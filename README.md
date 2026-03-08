@@ -1,4 +1,4 @@
-# IronPad
+# NotepadX
 
 A GPU-accelerated, cross-platform text editor built with Rust, wgpu, and winit.
 
