@@ -3,8 +3,9 @@ pub mod goto;
 pub mod palette;
 
 /// Which overlay is currently active
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum ActiveOverlay {
+    #[default]
     None,
     Find,
     FindReplace,
@@ -12,12 +13,6 @@ pub enum ActiveOverlay {
     CommandPalette,
     Help,
     Settings,
-}
-
-impl Default for ActiveOverlay {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// State for all overlays
