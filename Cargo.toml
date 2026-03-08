@@ -37,6 +37,13 @@ rfd = "0.15"
 # Encoding detection
 encoding_rs = "0.8"
 
+# Serialization (for config files)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# PNG decoding for app icon
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Vertex data
 bytemuck = { version = "1.19", features = ["derive"] }
 
@@ -53,6 +60,17 @@ tree-sitter-toml-ng = "0.7"
 tree-sitter-bash = "0.23"
 tree-sitter-yaml = "0.7"
 tree-sitter-xml = "0.7"
+
+[build-dependencies]
+winres = "0.1"
+
+[package.metadata.bundle]
+name = "NotepadX"
+identifier = "com.notepadx.app"
+icon = ["assets/logo.icns"]
+category = "public.app-category.developer-tools"
+short_description = "A fast, beautiful, cross-platform text editor"
+copyright = "2025 NotepadX"
 
 [profile.release]
 opt-level = 3

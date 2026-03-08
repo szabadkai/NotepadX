@@ -94,7 +94,7 @@ impl Buffer {
             line_ending: LineEnding::Lf,
             language_index: None,
             is_binary: false,
-            wrap_enabled: false,
+            wrap_enabled: true,  // default on; overridden by AppConfig on load
         }
     }
 
@@ -168,7 +168,7 @@ impl Buffer {
                 line_ending: LineEnding::Lf,
                 language_index: None,
                 is_binary: true,
-                wrap_enabled: false,
+                wrap_enabled: true,
             });
         }
 
@@ -202,7 +202,7 @@ impl Buffer {
             line_ending,
             language_index: None,
             is_binary: false,
-            wrap_enabled: false,
+            wrap_enabled: true,  // default on; overridden by AppConfig after open
         })
     }
 

@@ -43,7 +43,60 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      # macOS: create .app bundle
+      - name: Create macOS .app bundle
+        if: runner.os == 'macOS'
+        run: |
+          APP_DIR="NotepadX.app/Contents"
+          mkdir -p "$APP_DIR/MacOS"
+          mkdir -p "$APP_DIR/Resources"
+          cp target/${{ matrix.target }}/release/notepadx "$APP_DIR/MacOS/NotepadX"
+          cp assets/logo.icns "$APP_DIR/Resources/AppIcon.icns"
+          cat > "$APP_DIR/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>NotepadX</string>
+            <key>CFBundleDisplayName</key>
+            <string>NotepadX</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.notepadx.app</string>
+            <key>CFBundleVersion</key>
+            <string>0.1.0</string>
+            <key>CFBundleShortVersionString</key>
+            <string>0.1.0</string>
+            <key>CFBundleExecutable</key>
+            <string>NotepadX</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Zip macOS .app
+        if: runner.os == 'macOS'
+        run: zip -r NotepadX-${{ matrix.target }}.zip NotepadX.app
+
+      - name: Upload macOS .app
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NotepadX-${{ matrix.target }}.app
+          path: NotepadX-${{ matrix.target }}.zip
+
+      # Linux / Windows: upload raw binary
+      - name: Upload binary
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: notepadx-${{ matrix.target }}

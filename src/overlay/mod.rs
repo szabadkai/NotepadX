@@ -11,6 +11,7 @@ pub enum ActiveOverlay {
     GotoLine,
     CommandPalette,
     Help,
+    Settings,
 }
 
 impl Default for ActiveOverlay {

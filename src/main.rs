@@ -1,6 +1,10 @@
+// On Windows, hide the console window for GUI mode
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod editor;
 mod overlay;
 mod renderer;
+mod settings;
 mod syntax;
 mod theme;
 
@@ -9,6 +13,7 @@ use editor::Editor;
 use overlay::{ActiveOverlay, OverlayState};
 use overlay::palette::CommandId;
 use renderer::Renderer;
+use settings::AppConfig;
 use std::sync::Arc;
 use syntax::SyntaxHighlighter;
 use theme::Theme;
@@ -29,6 +34,9 @@ struct App {
     syntax: SyntaxHighlighter,
     overlay: OverlayState,
     clipboard: Option<arboard::Clipboard>,
+    config: AppConfig,
+    // Settings overlay: which item is focused (0-based row)
+    settings_cursor: usize,
 
     // GPU state (initialized after window creation)
     window: Option<Arc<Window>>,
@@ -46,6 +54,8 @@ struct App {
     // Double-click detection
     last_click_time: std::time::Instant,
     last_click_pos: (f64, f64),
+    // Suppress drag selection after double-click (word was already selected)
+    suppress_drag: bool,
 
     // Animation
     needs_redraw: bool,
@@ -53,13 +63,24 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        let config = AppConfig::load();
+        let all_themes = Theme::all_themes();
+        let theme_index = config.theme_index.min(all_themes.len().saturating_sub(1));
+        let theme = all_themes[theme_index].clone();
+
+        // Apply config to the initial buffer
+        let mut editor = Editor::new();
+        editor.active_mut().wrap_enabled = config.line_wrap;
+
         Self {
-            editor: Editor::new(),
-            theme: Theme::notepad_classic(),
-            theme_index: 0,
+            editor,
+            theme,
+            theme_index,
             syntax: SyntaxHighlighter::new(),
             overlay: OverlayState::new(),
             clipboard: arboard::Clipboard::new().ok(),
+            config,
+            settings_cursor: 0,
             window: None,
             device: None,
             queue: None,
@@ -71,6 +92,7 @@ impl App {
             is_mouse_down: false,
             last_click_time: std::time::Instant::now(),
             last_click_pos: (0.0, 0.0),
+            suppress_drag: false,
             needs_redraw: true,
         }
     }
@@ -154,7 +176,7 @@ impl App {
         }
 
         // Update text buffers
-        renderer.update_buffers(&self.editor, &self.theme, &self.syntax, &self.overlay);
+        renderer.update_buffers(&self.editor, &self.theme, &self.syntax, &self.overlay, &self.config, self.settings_cursor);
 
         // Get surface texture
         let output = match surface.get_current_texture() {
@@ -231,13 +253,32 @@ impl App {
         output.present();
     }
 
+    fn close_active_tab_with_confirm(&mut self) {
+        if self.editor.buffers.len() <= 1 {
+            return;
+        }
+        let can_close = if self.editor.active().dirty {
+            let name = self.editor.active().display_name();
+            rfd::MessageDialog::new()
+                .set_title("Unsaved Changes")
+                .set_description(&format!("\"{}\" has unsaved changes. Close without saving?", name))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show() == rfd::MessageDialogResult::Yes
+        } else {
+            true
+        };
+        if can_close {
+            self.editor.close_active_tab();
+        }
+    }
+
     fn handle_mouse_click(&mut self, is_double: bool) {
         let (x, y) = self.mouse_pos;
         let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{TAB_BAR_HEIGHT, TAB_PADDING_H, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
+        use renderer::{TAB_BAR_HEIGHT, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
@@ -245,10 +286,23 @@ impl App {
                 let click_x = x as f32;
                 for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
                     if click_x >= tx && click_x < tx + tw {
-                        // Check if click is on the close button (last portion of tab)
-                        let close_x = tx + tw - TAB_PADDING_H;
+                        // Check if click is on the close button (last ~24px of tab, larger target)
+                        let close_x = tx + tw - 24.0;
                         if click_x >= close_x && self.editor.buffers.len() > 1 {
-                            self.editor.close_tab(i);
+                            // Check for unsaved changes before closing
+                            let can_close = if self.editor.buffers[i].dirty {
+                                let name = self.editor.buffers[i].display_name();
+                                rfd::MessageDialog::new()
+                                    .set_title("Unsaved Changes")
+                                    .set_description(&format!("\"{}\" has unsaved changes. Close without saving?", name))
+                                    .set_buttons(rfd::MessageButtons::YesNo)
+                                    .show() == rfd::MessageDialogResult::Yes
+                            } else {
+                                true
+                            };
+                            if can_close {
+                                self.editor.close_tab(i);
+                            }
                         } else {
                             self.editor.active_buffer = i;
                         }
@@ -369,6 +423,16 @@ impl App {
                 self.needs_redraw = true;
                 return;
             }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "," => {
+                if self.overlay.active == ActiveOverlay::Settings {
+                    self.overlay.close();
+                } else {
+                    self.overlay.open(ActiveOverlay::Settings);
+                    self.settings_cursor = 0;
+                }
+                self.needs_redraw = true;
+                return;
+            }
             _ => {}
         }
 
@@ -391,9 +455,10 @@ impl App {
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "n" => {
                 self.editor.new_tab();
+                self.editor.active_mut().wrap_enabled = self.config.line_wrap;
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "w" => {
-                self.editor.close_active_tab();
+                self.close_active_tab_with_confirm();
             }
 
             // Clipboard
@@ -536,6 +601,13 @@ impl App {
     }
 
     fn handle_overlay_key(&mut self, event: KeyEvent, cmd_or_ctrl: bool, shift: bool) {
+        // Settings overlay has its own key handling
+        if self.overlay.active == ActiveOverlay::Settings {
+            self.handle_settings_key(&event.logical_key);
+            self.needs_redraw = true;
+            return;
+        }
+
         match &event.logical_key {
             Key::Named(NamedKey::Enter) => {
                 if self.overlay.active == ActiveOverlay::FindReplace && self.overlay.focus_replace {
@@ -666,6 +738,9 @@ impl App {
                 // Help is read-only; Enter just closes it
                 self.overlay.close();
             }
+            ActiveOverlay::Settings => {
+                // Settings handled separately in handle_settings_key
+            }
         }
         self.needs_redraw = true;
     }
@@ -715,8 +790,99 @@ impl App {
                 let prefix = self.comment_prefix().to_string();
                 self.editor.active_mut().toggle_comment(&prefix);
             }
+            CommandId::Settings => {
+                self.overlay.open(ActiveOverlay::Settings);
+                self.settings_cursor = 0;
+            }
         }
         self.needs_redraw = true;
+    }
+
+    /// Number of configurable settings rows in the settings panel
+    const SETTINGS_ROW_COUNT: usize = 8;
+
+    /// Handle keyboard input while the settings overlay is active.
+    /// Up/Down moves the cursor, Space/Enter/Left/Right toggles or adjusts values, Esc closes.
+    fn handle_settings_key(&mut self, key: &Key) {
+        match key {
+            Key::Named(NamedKey::ArrowUp) => {
+                if self.settings_cursor > 0 {
+                    self.settings_cursor -= 1;
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if self.settings_cursor + 1 < Self::SETTINGS_ROW_COUNT {
+                    self.settings_cursor += 1;
+                }
+            }
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) |
+            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowRight) => {
+                let increment = matches!(key, Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space));
+                match self.settings_cursor {
+                    0 => {
+                        // Theme
+                        let themes = Theme::all_themes();
+                        if increment {
+                            self.config.theme_index = (self.config.theme_index + 1) % themes.len();
+                        } else {
+                            self.config.theme_index = if self.config.theme_index == 0 {
+                                themes.len() - 1
+                            } else {
+                                self.config.theme_index - 1
+                            };
+                        }
+                        self.theme_index = self.config.theme_index;
+                        self.theme = themes[self.theme_index].clone();
+                    }
+                    1 => {
+                        // Font size
+                        if increment {
+                            self.config.font_size = (self.config.font_size + 1.0).min(36.0);
+                        } else {
+                            self.config.font_size = (self.config.font_size - 1.0).max(8.0);
+                        }
+                    }
+                    2 => {
+                        // Line wrap toggle
+                        self.config.line_wrap = !self.config.line_wrap;
+                        for buf in &mut self.editor.buffers {
+                            buf.wrap_enabled = self.config.line_wrap;
+                        }
+                    }
+                    3 => {
+                        // Auto-save toggle
+                        self.config.auto_save = !self.config.auto_save;
+                    }
+                    4 => {
+                        // Show line numbers toggle
+                        self.config.show_line_numbers = !self.config.show_line_numbers;
+                    }
+                    5 => {
+                        // Tab size
+                        if increment {
+                            self.config.tab_size = (self.config.tab_size + 1).min(8);
+                        } else {
+                            self.config.tab_size = (self.config.tab_size - 1).max(1);
+                        }
+                    }
+                    6 => {
+                        // Use spaces toggle
+                        self.config.use_spaces = !self.config.use_spaces;
+                    }
+                    7 => {
+                        // Highlight current line toggle
+                        self.config.highlight_current_line = !self.config.highlight_current_line;
+                    }
+                    _ => {}
+                }
+                // Persist every change immediately
+                self.config.save();
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.overlay.close();
+            }
+            _ => {}
+        }
     }
 
     /// Get the comment prefix for the current buffer's detected language
@@ -773,6 +939,8 @@ impl App {
         if let Some(path) = rfd::FileDialog::new().pick_file() {
             if let Err(e) = self.editor.open_file(&path, Some(&self.syntax)) {
                 log::error!("Open failed: {}", e);
+            } else {
+                self.editor.active_mut().wrap_enabled = self.config.line_wrap;
             }
         }
     }
@@ -781,10 +949,25 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let attrs = WindowAttributes::default()
+            // Build window icon from embedded logo.png
+            let icon_bytes = include_bytes!("../assets/logo.png");
+            let icon = image::load_from_memory(icon_bytes)
+                .ok()
+                .map(|img| {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
+                })
+                .flatten();
+
+            let mut attrs = WindowAttributes::default()
                 .with_title("NotepadX")
                 .with_inner_size(LogicalSize::new(1200.0, 800.0))
                 .with_min_inner_size(LogicalSize::new(400.0, 300.0));
+
+            if let Some(icon) = icon {
+                attrs = attrs.with_window_icon(Some(icon));
+            }
 
             let window = event_loop.create_window(attrs).expect("Failed to create window");
             let window = Arc::new(window);
@@ -835,7 +1018,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                if self.is_mouse_down && !self.overlay.is_active() {
+                if self.is_mouse_down && !self.overlay.is_active() && !self.suppress_drag {
                     self.handle_mouse_drag();
                 }
             }
@@ -849,9 +1032,13 @@ impl ApplicationHandler for App {
                         let (cx, cy) = self.mouse_pos;
                         let dist = ((cx - self.last_click_pos.0).powi(2) + (cy - self.last_click_pos.1).powi(2)).sqrt();
                         let is_double = elapsed.as_millis() < 400 && dist < 5.0;
+                        self.suppress_drag = is_double;
                         self.handle_mouse_click(is_double);
                         self.last_click_time = now;
                         self.last_click_pos = (cx, cy);
+                    } else if !self.is_mouse_down {
+                        // Mouse released — always re-enable drag for next click
+                        self.suppress_drag = false;
                     }
                 }
             }
@@ -882,6 +1069,8 @@ impl ApplicationHandler for App {
             WindowEvent::DroppedFile(path) => {
                 if let Err(e) = self.editor.open_file(&path, Some(&self.syntax)) {
                     log::error!("Open dropped file failed: {}", e);
+                } else {
+                    self.editor.active_mut().wrap_enabled = self.config.line_wrap;
                 }
                 self.needs_redraw = true;
             }

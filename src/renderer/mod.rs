@@ -126,6 +126,8 @@ impl Renderer {
         theme: &Theme,
         syntax: &crate::syntax::SyntaxHighlighter,
         overlay: &crate::overlay::OverlayState,
+        config: &crate::settings::AppConfig,
+        settings_cursor: usize,
     ) {
         let buffer = editor.active();
         let width = self.width as f32;
@@ -199,7 +201,9 @@ impl Renderer {
         // --- Editor Text (with syntax highlighting) ---
         let editor_left = GUTTER_WIDTH + LINE_PADDING_LEFT;
         let editor_width = width - editor_left - SCROLLBAR_WIDTH;
-        self.editor_buffer.set_size(&mut self.font_system, Some(editor_width), Some(editor_height));
+        // Use finite width for line wrapping, or None for unlimited (horizontal scroll)
+        let buf_width = if buffer.wrap_enabled { Some(editor_width) } else { None };
+        self.editor_buffer.set_size(&mut self.font_system, buf_width, Some(editor_height));
 
         let mut visible_text = String::new();
         for i in 0..visible_lines + 1 {
@@ -306,12 +310,13 @@ impl Renderer {
 
         // --- Overlay Panel ---
         if overlay.is_active() {
-            let is_help = matches!(overlay.active, crate::overlay::ActiveOverlay::Help);
-            let overlay_width = if is_help { (width * 0.8).max(400.0).min(900.0) } else { (width * 0.5).max(300.0).min(600.0) };
+            let is_wide = matches!(overlay.active, crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings);
+            let overlay_width = if is_wide { (width * 0.8).max(400.0).min(900.0) } else { (width * 0.5).max(300.0).min(600.0) };
             let overlay_h = match &overlay.active {
                 crate::overlay::ActiveOverlay::FindReplace => 52.0,
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0,
                 crate::overlay::ActiveOverlay::Help => 600.0,
+                crate::overlay::ActiveOverlay::Settings => 360.0,
                 _ => 32.0,
             };
             self.overlay_buffer.set_size(&mut self.font_system, Some(overlay_width - 20.0), Some(overlay_h));
@@ -352,10 +357,35 @@ impl Renderer {
                     text.push_str("           PgUp/PgDn     | Cmd+[/]: Tab\n\n");
                     text.push_str("Search:    Cmd+F: Find   | Cmd+H: Replace\n");
                     text.push_str("           Cmd+G: Goto   | Cmd+Shift+P: Palette\n\n");
-                    text.push_str("Other:     Cmd+K: Theme  | F1: Help\n");
+                    text.push_str("Other:     Cmd+K: Theme  | Cmd+,: Settings\n");
+                    text.push_str("           F1: Help\n");
                     text.push_str("           Esc: Close Overlay\n\n");
                     text.push_str("Help:      TAB toggles fields in Replace.\n");
                     text.push_str("           ENTER/Arrows for search results.");
+                    text
+                }
+                crate::overlay::ActiveOverlay::Settings => {
+                    let all_themes = Theme::all_themes();
+                    let theme_name = all_themes
+                        .get(config.theme_index)
+                        .map(|t| t.name())
+                        .unwrap_or("Unknown");
+                    let rows: &[(&str, String)] = &[
+                        ("Theme",              format!("< {} >", theme_name)),
+                        ("Font Size",          format!("< {} pt >", config.font_size as usize)),
+                        ("Line Wrap",          format!("[{}]", if config.line_wrap { "✓" } else { " " })),
+                        ("Auto-Save",          format!("[{}]", if config.auto_save { "✓" } else { " " })),
+                        ("Show Line Numbers",  format!("[{}]", if config.show_line_numbers { "✓" } else { " " })),
+                        ("Tab Size",           format!("< {} >", config.tab_size)),
+                        ("Use Spaces",         format!("[{}]", if config.use_spaces { "✓" } else { " " })),
+                        ("Highlight Line",     format!("[{}]", if config.highlight_current_line { "✓" } else { " " })),
+                    ];
+                    let mut text = String::from("⚙  Settings  (↑↓ navigate · ←→/Space toggle · Esc close)\n\n");
+                    for (i, (label, value)) in rows.iter().enumerate() {
+                        let cursor = if i == settings_cursor { "▶ " } else { "  " };
+                        text.push_str(&format!("{}{:<22} {}\n", cursor, label, value));
+                    }
+                    text.push_str(&format!("\nConfig: {}", crate::settings::AppConfig::config_path().display()));
                     text
                 }
                 crate::overlay::ActiveOverlay::None => String::new(),
@@ -576,14 +606,15 @@ impl Renderer {
 
         // 5. Overlay Panel Backgrounds
         if overlay.is_active() {
-            let is_help = matches!(overlay.active, crate::overlay::ActiveOverlay::Help);
-            let overlay_width = if is_help { (width * 0.8).max(400.0 * s).min(900.0 * s) } else { (width * 0.5).max(300.0 * s).min(600.0 * s) };
+            let is_wide = matches!(overlay.active, crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings);
+            let overlay_width = if is_wide { (width * 0.8).max(400.0 * s).min(900.0 * s) } else { (width * 0.5).max(300.0 * s).min(600.0 * s) };
             let overlay_left = (width - overlay_width) / 2.0;
             let overlay_top_panel = editor_top + 4.0 * s;
             let overlay_height = match &overlay.active {
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
                 crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
+                crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 _ => 40.0 * s,
             };
             
@@ -694,14 +725,15 @@ impl Renderer {
 
         // Overlay text area
         if overlay.is_active() {
-            let is_help = matches!(overlay.active, crate::overlay::ActiveOverlay::Help);
-            let overlay_width = if is_help { (width * 0.8).max(400.0 * s).min(900.0 * s) } else { (width * 0.5).max(300.0 * s).min(600.0 * s) };
+            let is_wide = matches!(overlay.active, crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings);
+            let overlay_width = if is_wide { (width * 0.8).max(400.0 * s).min(900.0 * s) } else { (width * 0.5).max(300.0 * s).min(600.0 * s) };
             let overlay_left = (width - overlay_width) / 2.0;
             let overlay_top_panel = tab_bar_height + 4.0 * s;
             let overlay_height = match &overlay.active {
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
                 crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
+                crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 _ => 40.0 * s,
             };
             overlay_text_areas.push(TextArea {

@@ -26,6 +26,7 @@ pub enum CommandId {
     Paste,
     DuplicateLine,
     ToggleComment,
+    Settings,
 }
 
 /// Get all available commands
@@ -49,6 +50,7 @@ pub fn all_commands() -> Vec<Command> {
         Command { name: "Next Theme", shortcut: "Cmd+K", id: CommandId::NextTheme },
         Command { name: "Next Tab", shortcut: "Ctrl+Tab", id: CommandId::NextTab },
         Command { name: "Previous Tab", shortcut: "Ctrl+Shift+Tab", id: CommandId::PrevTab },
+        Command { name: "Settings", shortcut: "Cmd+,", id: CommandId::Settings },
     ]
 }
 

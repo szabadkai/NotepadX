@@ -94,6 +94,11 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Return the theme name as a &str
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Notepad++ Classic — clean black on white (default)
     pub fn notepad_classic() -> Self {
         Self {
