@@ -1,5 +1,5 @@
 [package]
-name = "ironpad"
+name = "notepadx"
 version = "0.1.0"
 edition = "2021"
 description = "A fast, beautiful, cross-platform text editor"

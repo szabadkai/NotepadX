@@ -291,7 +291,7 @@ impl Renderer {
             .map(|i| syntax.language_name(i))
             .unwrap_or("Plain Text");
         let status_text = format!(
-            "  Ln {}, Col {}    │    {} lines    │    {}    │    {}    │    {}    │    IronPad v0.1",
+            "  Ln {}, Col {}    │    {} lines    │    {}    │    {}    │    {}    │    NotepadX v0.1",
             line, col, total_lines, lang_name, encoding, line_ending
         );
         self.status_buffer.set_text(
@@ -337,7 +337,7 @@ impl Renderer {
                     text
                 }
                 crate::overlay::ActiveOverlay::Help => {
-                    let mut text = String::from("--- IronPad Keyboard Shortcuts ---\n\n");
+                    let mut text = String::from("--- NotepadX Keyboard Shortcuts ---\n\n");
                     text.push_str("File:      Cmd+N: New    | Cmd+O: Open\n");
                     text.push_str("           Cmd+S: Save   | Cmd+W: Close\n\n");
                     text.push_str("Edit:      Cmd+Z: Undo   | Cmd+Y: Redo\n");
@@ -691,7 +691,7 @@ impl Renderer {
         // Render pass
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("IronPad Render Pass"),
+                label: Some("NotepadX Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,

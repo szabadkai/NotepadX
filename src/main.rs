@@ -88,7 +88,7 @@ impl App {
 
         let (device_raw, queue_raw) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("IronPad Device"),
+                label: Some("NotepadX Device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
@@ -168,7 +168,7 @@ impl App {
 
                 let (device_raw, queue_raw) = pollster::block_on(adapter.request_device(
                     &wgpu::DeviceDescriptor {
-                        label: Some("IronPad Device"),
+                        label: Some("NotepadX Device"),
                         required_features: wgpu::Features::empty(),
                         required_limits: wgpu::Limits::default(),
                         memory_hints: wgpu::MemoryHints::Performance,
@@ -215,7 +215,7 @@ impl App {
 
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("IronPad Encoder"),
+            label: Some("NotepadX Encoder"),
         });
 
         renderer.render(device, queue, &self.editor, &self.theme, &self.overlay, &mut encoder, &view);
@@ -755,7 +755,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let attrs = WindowAttributes::default()
-                .with_title("IronPad")
+                .with_title("NotepadX")
                 .with_inner_size(LogicalSize::new(1200.0, 800.0))
                 .with_min_inner_size(LogicalSize::new(400.0, 300.0));
 

@@ -22,16 +22,16 @@ A GPU-accelerated, cross-platform text editor built with Rust, wgpu, and winit.
 cargo build --release
 ```
 
-The binary will be at `target/release/ironpad`.
+The binary will be at `target/release/notepadx`.
 
 ## Usage
 
 ```bash
 # Open with no file (untitled buffer)
-ironpad
+notepadx
 
 # Open a file
-ironpad path/to/file.rs
+notepadx path/to/file.rs
 
 # Open via drag & drop (drop files onto the window)
 ```
