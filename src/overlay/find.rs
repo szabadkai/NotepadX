@@ -95,4 +95,42 @@ impl FindState {
             format!("{} of {}", self.current_match + 1, self.matches.len())
         }
     }
+
+    /// Replace the current match with `replacement` in the rope.
+    /// Returns (removed_text, start_offset) or None if no current match.
+    pub fn replace_current(&mut self, rope: &mut Rope, replacement: &str) -> Option<(String, usize)> {
+        let m = self.matches.get(self.current_match)?.clone();
+        let removed: String = rope.slice(m.start..m.end).to_string();
+        rope.remove(m.start..m.end);
+        rope.insert(m.start, replacement);
+        let result = (removed, m.start);
+
+        // Remove this match and adjust subsequent matches
+        let delta = replacement.len() as isize - (m.end - m.start) as isize;
+        self.matches.remove(self.current_match);
+        for m in self.matches.iter_mut().skip(self.current_match) {
+            m.start = (m.start as isize + delta) as usize;
+            m.end = (m.end as isize + delta) as usize;
+        }
+        if self.current_match >= self.matches.len() && !self.matches.is_empty() {
+            self.current_match = 0;
+        }
+        Some(result)
+    }
+
+    /// Replace all matches with `replacement`. Returns the number replaced.
+    pub fn replace_all(&mut self, rope: &mut Rope, replacement: &str) -> Vec<(String, usize)> {
+        let mut results = Vec::new();
+        // Replace in reverse order to keep offsets valid
+        for m in self.matches.iter().rev() {
+            let removed: String = rope.slice(m.start..m.end).to_string();
+            rope.remove(m.start..m.end);
+            rope.insert(m.start, replacement);
+            results.push((removed, m.start));
+        }
+        results.reverse();
+        self.matches.clear();
+        self.current_match = 0;
+        results
+    }
 }

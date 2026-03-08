@@ -11,10 +11,12 @@ pub struct Buffer {
     pub file_path: Option<PathBuf>,
     /// Whether the buffer has unsaved changes
     pub dirty: bool,
-    /// Cursor position as a character offset
+    /// Cursor position as a byte offset
     pub cursor: usize,
     /// Selection anchor (None if no selection)
     pub selection_anchor: Option<usize>,
+    /// Desired column for up/down movement (sticky column)
+    pub desired_col: Option<usize>,
     /// Scroll offset in lines
     pub scroll_y: f64,
     /// Target scroll offset (for smooth scrolling)
@@ -73,6 +75,7 @@ impl Buffer {
             dirty: false,
             cursor: 0,
             selection_anchor: None,
+            desired_col: None,
             scroll_y: 0.0,
             scroll_y_target: 0.0,
             undo_stack: Vec::new(),
@@ -106,6 +109,7 @@ impl Buffer {
             dirty: false,
             cursor: 0,
             selection_anchor: None,
+            desired_col: None,
             scroll_y: 0.0,
             scroll_y_target: 0.0,
             undo_stack: Vec::new(),
@@ -284,69 +288,99 @@ impl Buffer {
 
     // --- Cursor Movement ---
 
-    pub fn move_left(&mut self) {
-        self.selection_anchor = None;
+    /// Helper: set or clear selection anchor based on shift state
+    fn update_selection_for_move(&mut self, shift: bool) {
+        if shift {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(self.cursor);
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+    }
+
+    pub fn move_left(&mut self) { self.move_left_sel(false); }
+    pub fn move_right(&mut self) { self.move_right_sel(false); }
+    pub fn move_up(&mut self) { self.move_up_sel(false); }
+    pub fn move_down(&mut self) { self.move_down_sel(false); }
+
+    pub fn move_left_sel(&mut self, shift: bool) {
+        self.update_selection_for_move(shift);
         if self.cursor > 0 {
             let char_idx = self.rope.byte_to_char(self.cursor);
             if char_idx > 0 {
                 self.cursor = self.rope.char_to_byte(char_idx - 1);
             }
         }
+        self.desired_col = None;
     }
 
-    pub fn move_right(&mut self) {
-        self.selection_anchor = None;
+    pub fn move_right_sel(&mut self, shift: bool) {
+        self.update_selection_for_move(shift);
         let char_idx = self.rope.byte_to_char(self.cursor);
         if char_idx < self.rope.len_chars() {
             self.cursor = self.rope.char_to_byte(char_idx + 1);
         }
+        self.desired_col = None;
     }
 
-    pub fn move_up(&mut self) {
-        self.selection_anchor = None;
+    pub fn move_up_sel(&mut self, shift: bool) {
+        self.update_selection_for_move(shift);
         let char_idx = self.rope.byte_to_char(self.cursor);
         let line = self.rope.char_to_line(char_idx);
         if line > 0 {
-            let col = char_idx - self.rope.line_to_char(line);
+            let current_col = char_idx - self.rope.line_to_char(line);
+            let target_col = self.desired_col.unwrap_or(current_col);
+            self.desired_col = Some(target_col);
+
             let prev_line_start = self.rope.line_to_char(line - 1);
             let prev_line_len = self.rope.line(line - 1).len_chars().saturating_sub(1);
-            let target_char = prev_line_start + col.min(prev_line_len);
-            self.cursor = self.rope.char_to_byte(target_char);
+            let actual_col = target_col.min(prev_line_len);
+            self.cursor = self.rope.char_to_byte(prev_line_start + actual_col);
         }
     }
 
-    pub fn move_down(&mut self) {
-        self.selection_anchor = None;
+    pub fn move_down_sel(&mut self, shift: bool) {
+        self.update_selection_for_move(shift);
         let char_idx = self.rope.byte_to_char(self.cursor);
         let line = self.rope.char_to_line(char_idx);
         if line < self.rope.len_lines().saturating_sub(1) {
-            let col = char_idx - self.rope.line_to_char(line);
+            let current_col = char_idx - self.rope.line_to_char(line);
+            let target_col = self.desired_col.unwrap_or(current_col);
+            self.desired_col = Some(target_col);
+
             let next_line_start = self.rope.line_to_char(line + 1);
             let next_line_len = self.rope.line(line + 1).len_chars().saturating_sub(1);
-            let target_char = next_line_start + col.min(next_line_len);
-            self.cursor = self.rope.char_to_byte(target_char);
+            let actual_col = target_col.min(next_line_len);
+            self.cursor = self.rope.char_to_byte(next_line_start + actual_col);
         }
     }
 
-    pub fn move_to_line_start(&mut self) {
+    pub fn move_to_line_start(&mut self) { self.move_to_line_start_sel(false); }
+    pub fn move_to_line_end(&mut self) { self.move_to_line_end_sel(false); }
+
+    pub fn move_to_line_start_sel(&mut self, shift: bool) {
+        self.update_selection_for_move(shift);
         let char_idx = self.rope.byte_to_char(self.cursor);
         let line = self.rope.char_to_line(char_idx);
         let line_start = self.rope.line_to_char(line);
         self.cursor = self.rope.char_to_byte(line_start);
+        self.desired_col = None;
     }
 
-    pub fn move_to_line_end(&mut self) {
+    pub fn move_to_line_end_sel(&mut self, shift: bool) {
+        self.update_selection_for_move(shift);
         let char_idx = self.rope.byte_to_char(self.cursor);
         let line = self.rope.char_to_line(char_idx);
         let line_start = self.rope.line_to_char(line);
         let line_len = self.rope.line(line).len_chars();
-        // Don't include the newline character
         let end = if line < self.rope.len_lines() - 1 {
             line_start + line_len.saturating_sub(1)
         } else {
             line_start + line_len
         };
         self.cursor = self.rope.char_to_byte(end);
+        self.desired_col = None;
     }
 
     // --- Selection ---
@@ -362,6 +396,462 @@ impl Buffer {
             let end = self.cursor.max(anchor);
             self.rope.slice(start..end).to_string()
         })
+    }
+
+    /// Delete the current selection and return the removed text.
+    /// Returns None if there is no selection.
+    pub fn delete_selection(&mut self) -> Option<String> {
+        let anchor = self.selection_anchor.take()?;
+        let start = self.cursor.min(anchor);
+        let end = self.cursor.max(anchor);
+        let removed: String = self.rope.slice(start..end).into();
+        let cursor_before = self.cursor;
+        self.rope.remove(start..end);
+        self.cursor = start;
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.undo_stack.push(EditOperation {
+            offset: start,
+            removed: removed.clone(),
+            inserted: String::new(),
+            cursor_before,
+        });
+        Some(removed)
+    }
+
+    // --- Clipboard Helpers ---
+
+    /// Copy: return selected text (or entire current line if no selection)
+    pub fn copy(&self) -> Option<String> {
+        if let Some(text) = self.get_selected_text() {
+            Some(text)
+        } else {
+            // Copy entire current line
+            let char_idx = self.rope.byte_to_char(self.cursor);
+            let line = self.rope.char_to_line(char_idx);
+            let line_text: String = self.rope.line(line).into();
+            Some(line_text)
+        }
+    }
+
+    /// Cut: delete selection and return it (or cut entire current line if no selection)
+    pub fn cut(&mut self) -> Option<String> {
+        if self.selection_anchor.is_some() {
+            self.delete_selection()
+        } else {
+            // Cut entire current line
+            let char_idx = self.rope.byte_to_char(self.cursor);
+            let line = self.rope.char_to_line(char_idx);
+            let line_start = self.rope.line_to_char(line);
+            let line_end = if line + 1 < self.rope.len_lines() {
+                self.rope.line_to_char(line + 1)
+            } else {
+                self.rope.len_chars()
+            };
+            let start_byte = self.rope.char_to_byte(line_start);
+            let end_byte = self.rope.char_to_byte(line_end);
+            let removed: String = self.rope.slice(start_byte..end_byte).into();
+            let cursor_before = self.cursor;
+            self.rope.remove(start_byte..end_byte);
+            self.cursor = start_byte;
+            self.dirty = true;
+            self.redo_stack.clear();
+            self.undo_stack.push(EditOperation {
+                offset: start_byte,
+                removed: removed.clone(),
+                inserted: String::new(),
+                cursor_before,
+            });
+            Some(removed)
+        }
+    }
+
+    // --- Word-wise Movement ---
+
+    fn is_word_char(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_'
+    }
+
+    /// Move cursor to the beginning of the previous word
+    pub fn move_word_left(&mut self) {
+        self.selection_anchor = None;
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        if char_idx == 0 {
+            return;
+        }
+        let mut pos = char_idx;
+        // Skip whitespace/non-word chars going left
+        while pos > 0 && !Self::is_word_char(self.rope.char(pos - 1)) {
+            pos -= 1;
+        }
+        // Skip word chars going left
+        while pos > 0 && Self::is_word_char(self.rope.char(pos - 1)) {
+            pos -= 1;
+        }
+        self.cursor = self.rope.char_to_byte(pos);
+    }
+
+    /// Move cursor to the end of the next word
+    pub fn move_word_right(&mut self) {
+        self.selection_anchor = None;
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        let len = self.rope.len_chars();
+        if char_idx >= len {
+            return;
+        }
+        let mut pos = char_idx;
+        // Skip word chars going right
+        while pos < len && Self::is_word_char(self.rope.char(pos)) {
+            pos += 1;
+        }
+        // Skip whitespace/non-word chars going right
+        while pos < len && !Self::is_word_char(self.rope.char(pos)) {
+            pos += 1;
+        }
+        self.cursor = self.rope.char_to_byte(pos);
+    }
+
+    // --- Word-wise Deletion ---
+
+    /// Delete backward to the previous word boundary (Opt+Backspace)
+    pub fn delete_word_left(&mut self) {
+        if self.selection_anchor.is_some() {
+            self.delete_selection();
+            return;
+        }
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        if char_idx == 0 {
+            return;
+        }
+        let mut pos = char_idx;
+        while pos > 0 && !Self::is_word_char(self.rope.char(pos - 1)) {
+            pos -= 1;
+        }
+        while pos > 0 && Self::is_word_char(self.rope.char(pos - 1)) {
+            pos -= 1;
+        }
+        let start_byte = self.rope.char_to_byte(pos);
+        let end_byte = self.cursor;
+        let removed: String = self.rope.slice(start_byte..end_byte).into();
+        let cursor_before = self.cursor;
+        self.rope.remove(start_byte..end_byte);
+        self.cursor = start_byte;
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.undo_stack.push(EditOperation {
+            offset: start_byte,
+            removed,
+            inserted: String::new(),
+            cursor_before,
+        });
+    }
+
+    /// Delete forward to the next word boundary (Opt+Delete)
+    pub fn delete_word_right(&mut self) {
+        if self.selection_anchor.is_some() {
+            self.delete_selection();
+            return;
+        }
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        let len = self.rope.len_chars();
+        if char_idx >= len {
+            return;
+        }
+        let mut pos = char_idx;
+        while pos < len && Self::is_word_char(self.rope.char(pos)) {
+            pos += 1;
+        }
+        while pos < len && !Self::is_word_char(self.rope.char(pos)) {
+            pos += 1;
+        }
+        let end_byte = self.rope.char_to_byte(pos);
+        let removed: String = self.rope.slice(self.cursor..end_byte).into();
+        let cursor_before = self.cursor;
+        self.rope.remove(self.cursor..end_byte);
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.undo_stack.push(EditOperation {
+            offset: self.cursor,
+            removed,
+            inserted: String::new(),
+            cursor_before,
+        });
+    }
+
+    // --- Document Navigation ---
+
+    /// Move cursor to the very beginning of the document
+    pub fn move_to_start(&mut self) {
+        self.selection_anchor = None;
+        self.cursor = 0;
+    }
+
+    /// Move cursor to the very end of the document
+    pub fn move_to_end(&mut self) {
+        self.selection_anchor = None;
+        self.cursor = self.rope.len_bytes();
+    }
+
+    // --- Line Operations ---
+
+    /// Duplicate the current line below the cursor
+    pub fn duplicate_line(&mut self) {
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        let line = self.rope.char_to_line(char_idx);
+        let line_text: String = self.rope.line(line).into();
+        let col = char_idx - self.rope.line_to_char(line);
+
+        // Find insertion point (end of current line including newline)
+        let insert_char = if line + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line + 1)
+        } else {
+            // Last line — need to add a newline first
+            self.rope.len_chars()
+        };
+        let insert_byte = self.rope.char_to_byte(insert_char);
+
+        let text_to_insert = if line + 1 >= self.rope.len_lines() {
+            // We're on the last line, we need a newline before the duplicate
+            let mut t = String::from("\n");
+            t.push_str(line_text.trim_end_matches(&['\n', '\r']));
+            t
+        } else {
+            line_text.clone()
+        };
+
+        let cursor_before = self.cursor;
+        self.rope.insert(insert_byte, &text_to_insert);
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.undo_stack.push(EditOperation {
+            offset: insert_byte,
+            removed: String::new(),
+            inserted: text_to_insert,
+            cursor_before,
+        });
+
+        // Move cursor to the same column on the new line
+        let new_line_start = self.rope.line_to_char(line + 1);
+        let new_line_len = self.rope.line(line + 1).len_chars();
+        let target_col = col.min(new_line_len.saturating_sub(1));
+        self.cursor = self.rope.char_to_byte(new_line_start + target_col);
+    }
+
+    /// Toggle line comment for the current line or each line in the selection
+    pub fn toggle_comment(&mut self, comment_prefix: &str) {
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        let cursor_line = self.rope.char_to_line(char_idx);
+
+        let (start_line, end_line) = if let Some(anchor) = self.selection_anchor {
+            let anchor_line = self.rope.char_to_line(anchor);
+            (cursor_line.min(anchor_line), cursor_line.max(anchor_line))
+        } else {
+            (cursor_line, cursor_line)
+        };
+
+        let prefix_with_space = format!("{} ", comment_prefix);
+
+        // Check if all lines in range are commented
+        let all_commented = (start_line..=end_line).all(|l| {
+            let line: String = self.rope.line(l).into();
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&prefix_with_space) || trimmed.starts_with(comment_prefix)
+        });
+
+        let cursor_before = self.cursor;
+
+        // Apply comment toggle line by line (reverse order to keep offsets valid)
+        for l in (start_line..=end_line).rev() {
+            let line_start_char = self.rope.line_to_char(l);
+            let line: String = self.rope.line(l).into();
+            let leading_ws: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            let leading_ws_chars = leading_ws.chars().count();
+            let insert_char_pos = line_start_char + leading_ws_chars;
+            let insert_byte = self.rope.char_to_byte(insert_char_pos);
+
+            if all_commented {
+                // Remove comment prefix
+                let after_ws = &line[leading_ws.len()..];
+                let remove_len = if after_ws.starts_with(&prefix_with_space) {
+                    prefix_with_space.len()
+                } else if after_ws.starts_with(comment_prefix) {
+                    comment_prefix.len()
+                } else {
+                    continue;
+                };
+                let remove_end = insert_byte + remove_len;
+                let removed: String = self.rope.slice(insert_byte..remove_end).into();
+                self.rope.remove(insert_byte..remove_end);
+                self.undo_stack.push(EditOperation {
+                    offset: insert_byte,
+                    removed,
+                    inserted: String::new(),
+                    cursor_before,
+                });
+            } else {
+                // Add comment prefix
+                self.rope.insert(insert_byte, &prefix_with_space);
+                self.undo_stack.push(EditOperation {
+                    offset: insert_byte,
+                    removed: String::new(),
+                    inserted: prefix_with_space.clone(),
+                    cursor_before,
+                });
+            }
+        }
+
+        self.dirty = true;
+        self.redo_stack.clear();
+        // Re-anchor cursor to current position
+        self.selection_anchor = None;
+        // Keep cursor on the same line, clamped
+        let new_line_start = self.rope.line_to_char(cursor_line.min(self.rope.len_lines().saturating_sub(1)));
+        let new_line_len = self.rope.line(cursor_line.min(self.rope.len_lines().saturating_sub(1))).len_chars();
+        let new_col = (char_idx - self.rope.line_to_char(cursor_line)).min(new_line_len.saturating_sub(1));
+        self.cursor = self.rope.char_to_byte(new_line_start + new_col);
+    }
+
+    // --- Bracket Matching ---
+
+    const BRACKET_PAIRS: &'static [(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}')];
+
+    /// Find the matching bracket for the character at or near the cursor.
+    /// Returns the byte offset of the matching bracket, or None.
+    pub fn find_matching_bracket(&self) -> Option<usize> {
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return None;
+        }
+
+        // Check char at cursor and char before cursor
+        for &check_idx in &[char_idx, char_idx.wrapping_sub(1)] {
+            if check_idx >= len {
+                continue;
+            }
+            let ch = self.rope.char(check_idx);
+
+            // Opening bracket — scan forward
+            if let Some(&(open, close)) = Self::BRACKET_PAIRS.iter().find(|(o, _)| *o == ch) {
+                let mut depth = 1i32;
+                let mut pos = check_idx + 1;
+                while pos < len && depth > 0 {
+                    let c = self.rope.char(pos);
+                    if c == open { depth += 1; }
+                    if c == close { depth -= 1; }
+                    if depth == 0 { return Some(self.rope.char_to_byte(pos)); }
+                    pos += 1;
+                }
+            }
+            // Closing bracket — scan backward
+            if let Some(&(open, close)) = Self::BRACKET_PAIRS.iter().find(|(_, c)| *c == ch) {
+                let mut depth = 1i32;
+                let mut pos = check_idx;
+                while pos > 0 && depth > 0 {
+                    pos -= 1;
+                    let c = self.rope.char(pos);
+                    if c == close { depth += 1; }
+                    if c == open { depth -= 1; }
+                    if depth == 0 { return Some(self.rope.char_to_byte(pos)); }
+                }
+            }
+        }
+        None
+    }
+
+    // --- Auto-close Brackets ---
+
+    /// Insert text with auto-close for brackets and quotes.
+    /// Returns true if it handled the input (caller should not insert again).
+    pub fn insert_with_autoclose(&mut self, text: &str) -> bool {
+        if text.len() != 1 {
+            return false;
+        }
+        let ch = text.chars().next().unwrap();
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        let len = self.rope.len_chars();
+
+        // Auto-close pairs
+        let close = match ch {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            _ => None,
+        };
+
+        // If typing a closing bracket and the next char is already that closer, skip over it
+        let closers = [')', ']', '}', '"', '\''];
+        if closers.contains(&ch) && char_idx < len && self.rope.char(char_idx) == ch {
+            self.cursor = self.rope.char_to_byte(char_idx + 1);
+            self.selection_anchor = None;
+            return true;
+        }
+
+        // Insert opening bracket + closing bracket, cursor between them
+        if let Some(closer) = close {
+            let pair = format!("{}{}", ch, closer);
+            self.insert_text(&pair);
+            // Move cursor back one (between the pair)
+            let new_char = self.rope.byte_to_char(self.cursor);
+            if new_char > 0 {
+                self.cursor = self.rope.char_to_byte(new_char - 1);
+            }
+            return true;
+        }
+
+        false
+    }
+
+    // --- Smart Auto-Indent ---
+
+    /// Insert a newline with smart indentation:
+    /// - Copies leading whitespace from current line
+    /// - Adds extra indent after { ( [
+    /// - Splits {} () [] pairs into three lines
+    pub fn insert_newline(&mut self, line_ending: &str) {
+        // Delete selection first
+        if self.selection_anchor.is_some() {
+            self.delete_selection();
+        }
+
+        let char_idx = self.rope.byte_to_char(self.cursor);
+        let line = self.rope.char_to_line(char_idx);
+        let line_text: String = self.rope.line(line).into();
+
+        // Get leading whitespace
+        let leading_ws: String = line_text.chars().take_while(|c| c.is_whitespace() && *c != '\n' && *c != '\r').collect();
+
+        // Check char before cursor
+        let char_before = if char_idx > 0 { Some(self.rope.char(char_idx - 1)) } else { None };
+        let char_after = if char_idx < self.rope.len_chars() { Some(self.rope.char(char_idx)) } else { None };
+
+        let openers = ['{', '(', '['];
+        let closers = ['}', ')', ']'];
+
+        // Check if we're between a bracket pair: {|} or (|) or [|]
+        let between_brackets = char_before.map_or(false, |b| openers.contains(&b))
+            && char_after.map_or(false, |a| closers.contains(&a));
+
+        if between_brackets {
+            // Split into three lines:
+            // line_ending + indent + extra_indent + line_ending + indent
+            let indent = format!("{}    ", leading_ws);
+            let text = format!("{}{}{}{}", line_ending, indent, line_ending, leading_ws);
+            self.insert_text(&text);
+            // Move cursor to the middle line (after the first newline + indent)
+            let target = self.cursor - line_ending.len() - leading_ws.len();
+            self.cursor = target;
+        } else if char_before.map_or(false, |b| openers.contains(&b)) {
+            // Add extra indent
+            let text = format!("{}{}    ", line_ending, leading_ws);
+            self.insert_text(&text);
+        } else {
+            // Normal: just preserve indentation
+            let text = format!("{}{}", line_ending, leading_ws);
+            self.insert_text(&text);
+        }
     }
 
     // --- Queries ---
@@ -444,6 +934,50 @@ impl Buffer {
         } else if cursor_line > scroll + visible_lines as f64 - margin {
             self.scroll_y_target = cursor_line - visible_lines as f64 + margin;
         }
+    }
+    /// Calculate character index from pixel coordinates (logical)
+    pub fn char_at_pos(&self, x: f32, y: f32, x_offset: f32, line_height: f32, char_width: f32) -> usize {
+        let total_lines = self.rope.len_lines();
+        if total_lines == 0 {
+            return 0;
+        }
+
+        // Adjust for scroll
+        let relative_y = y + (self.scroll_y as f32 * line_height);
+        let line_idx = (relative_y / line_height).floor() as usize;
+        let line_idx = line_idx.min(total_lines.saturating_sub(1));
+
+        // Adjust for x_offset (gutter + padding)
+        let relative_x = (x - x_offset).max(0.0);
+        let col_idx = (relative_x / char_width).round() as usize;
+        
+        // Get the actual line and clamp column
+        let line = self.rope.line(line_idx);
+        let line_len = line.len_chars();
+        // Don't include the trailing newline in the column clamp if possible
+        let max_col = if line_len > 0 && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r') {
+            if line_len > 1 && line.char(line_len - 1) == '\n' && line.char(line_len - 2) == '\r' {
+                line_len.saturating_sub(2)
+            } else {
+                line_len.saturating_sub(1)
+            }
+        } else {
+            line_len
+        };
+        
+        let col_idx = col_idx.min(max_col);
+        
+        self.rope.line_to_char(line_idx) + col_idx
+    }
+
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        self.selection_anchor.map(|anchor| {
+            if anchor < self.cursor {
+                (anchor, self.cursor)
+            } else {
+                (self.cursor, anchor)
+            }
+        })
     }
 }
 

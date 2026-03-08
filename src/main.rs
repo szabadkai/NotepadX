@@ -28,17 +28,20 @@ struct App {
     theme_index: usize,
     syntax: SyntaxHighlighter,
     overlay: OverlayState,
+    clipboard: Option<arboard::Clipboard>,
 
     // GPU state (initialized after window creation)
     window: Option<Arc<Window>>,
-    device: Option<wgpu::Device>,
-    queue: Option<wgpu::Queue>,
+    device: Option<Arc<wgpu::Device>>,
+    queue: Option<Arc<wgpu::Queue>>,
     surface: Option<wgpu::Surface<'static>>,
     surface_config: Option<wgpu::SurfaceConfiguration>,
     renderer: Option<Renderer>,
 
     // Input state
     modifiers: ModifiersState,
+    mouse_pos: (f64, f64),
+    is_mouse_down: bool,
 
     // Animation
     needs_redraw: bool,
@@ -52,6 +55,7 @@ impl App {
             theme_index: 0,
             syntax: SyntaxHighlighter::new(),
             overlay: OverlayState::new(),
+            clipboard: arboard::Clipboard::new().ok(),
             window: None,
             device: None,
             queue: None,
@@ -59,6 +63,8 @@ impl App {
             surface_config: None,
             renderer: None,
             modifiers: ModifiersState::empty(),
+            mouse_pos: (0.0, 0.0),
+            is_mouse_down: false,
             needs_redraw: true,
         }
     }
@@ -80,7 +86,7 @@ impl App {
         }))
         .expect("Failed to find GPU adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
+        let (device_raw, queue_raw) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("IronPad Device"),
                 required_features: wgpu::Features::empty(),
@@ -90,6 +96,9 @@ impl App {
             None,
         ))
         .expect("Failed to create device");
+
+        let device = Arc::new(device_raw);
+        let queue = Arc::new(queue_raw);
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -111,7 +120,8 @@ impl App {
         };
         surface.configure(&device, &config);
 
-        let renderer = Renderer::new(&device, &queue, surface_format, size.width, size.height);
+        let mut renderer = Renderer::new(&device, queue.clone(), surface_format, size.width, size.height);
+        renderer.resize(size.width, size.height, window.scale_factor() as f32);
 
         self.window = Some(window);
         self.surface = Some(surface);
@@ -143,9 +153,58 @@ impl App {
         let output = match surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                if let Some(config) = &self.surface_config {
-                    surface.configure(device, config);
-                }
+                let window = self.window.as_ref().unwrap();
+                let size = window.inner_size();
+                let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                    backends: wgpu::Backends::all(),
+                    ..Default::default()
+                });
+                let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(surface),
+                    force_fallback_adapter: false,
+                }))
+                .expect("Failed to find GPU adapter");
+
+                let (device_raw, queue_raw) = pollster::block_on(adapter.request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: Some("IronPad Device"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::default(),
+                        memory_hints: wgpu::MemoryHints::Performance,
+                    },
+                    None,
+                ))
+                .expect("Failed to create device");
+                let device = Arc::new(device_raw);
+                let queue = Arc::new(queue_raw);
+
+                let surface_caps = surface.get_capabilities(&adapter);
+                let surface_format = surface_caps
+                    .formats
+                    .iter()
+                    .find(|f| f.is_srgb())
+                    .copied()
+                    .unwrap_or(surface_caps.formats[0]);
+
+                let config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format: surface_format,
+                    width: size.width.max(1),
+                    height: size.height.max(1),
+                    present_mode: wgpu::PresentMode::AutoVsync,
+                    alpha_mode: surface_caps.alpha_modes[0],
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                };
+                surface.configure(&device, &config);
+
+                let renderer = Renderer::new(&device, queue.clone(), surface_format, size.width, size.height);
+
+                self.device = Some(device);
+                self.queue = Some(queue);
+                self.surface_config = Some(config);
+                self.renderer = Some(renderer);
                 return;
             }
             Err(e) => {
@@ -163,6 +222,81 @@ impl App {
 
         queue.submit(std::iter::once(encoder.finish()));
         output.present();
+    }
+
+    fn handle_mouse_click(&mut self) {
+        let (x, y) = self.mouse_pos;
+        let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+        let x = x / scale;
+        let y = y / scale;
+
+        use renderer::{TAB_BAR_HEIGHT, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
+
+        // Tab Bar
+        if y < TAB_BAR_HEIGHT as f64 {
+            if let Some(renderer) = &self.renderer {
+                let click_x = x as f32;
+                for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
+                    if click_x >= tx && click_x < tx + tw {
+                        self.editor.active_buffer = i;
+                        break;
+                    }
+                }
+            }
+        } 
+        // Editor Area
+        else if y >= TAB_BAR_HEIGHT as f64 {
+            let shift = self.modifiers.shift_key();
+            let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
+            
+            let buffer = self.editor.active_mut();
+            let new_pos = buffer.char_at_pos(
+                x as f32, 
+                editor_y as f32, 
+                GUTTER_WIDTH + LINE_PADDING_LEFT, 
+                LINE_HEIGHT, 
+                CHAR_WIDTH
+            );
+            
+            if shift {
+                if buffer.selection_anchor.is_none() {
+                    buffer.selection_anchor = Some(buffer.cursor);
+                }
+            } else {
+                buffer.selection_anchor = None;
+            }
+            
+            buffer.cursor = new_pos;
+        }
+        self.needs_redraw = true;
+    }
+
+    fn handle_mouse_drag(&mut self) {
+        let (x, y) = self.mouse_pos;
+        let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+        let x = x / scale;
+        let y = y / scale;
+
+        use renderer::{TAB_BAR_HEIGHT, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
+
+        if y >= TAB_BAR_HEIGHT as f64 {
+            let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
+            
+            let buffer = self.editor.active_mut();
+            if buffer.selection_anchor.is_none() {
+                buffer.selection_anchor = Some(buffer.cursor);
+            }
+            
+            let new_pos = buffer.char_at_pos(
+                x as f32, 
+                editor_y as f32, 
+                GUTTER_WIDTH + LINE_PADDING_LEFT, 
+                LINE_HEIGHT, 
+                CHAR_WIDTH
+            );
+            buffer.cursor = new_pos;
+        }
+        self.needs_redraw = true;
     }
 
     fn handle_key_event(&mut self, event: KeyEvent) {
@@ -193,6 +327,11 @@ impl App {
                 self.needs_redraw = true;
                 return;
             }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "h" => {
+                self.overlay.open(ActiveOverlay::FindReplace);
+                self.needs_redraw = true;
+                return;
+            }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "g" => {
                 self.overlay.open(ActiveOverlay::GotoLine);
                 self.needs_redraw = true;
@@ -200,6 +339,15 @@ impl App {
             }
             Key::Character(c) if cmd_or_ctrl && shift && c.as_str() == "p" => {
                 self.overlay.open(ActiveOverlay::CommandPalette);
+                self.needs_redraw = true;
+                return;
+            }
+            Key::Named(NamedKey::F1) => {
+                if self.overlay.active == ActiveOverlay::Help {
+                    self.overlay.close();
+                } else {
+                    self.overlay.open(ActiveOverlay::Help);
+                }
                 self.needs_redraw = true;
                 return;
             }
@@ -211,6 +359,8 @@ impl App {
             self.handle_overlay_key(event, cmd_or_ctrl, shift);
             return;
         }
+
+        let alt = self.modifiers.alt_key();
 
         // --- Normal editor shortcuts ---
         match &event.logical_key {
@@ -228,6 +378,29 @@ impl App {
                 self.editor.close_active_tab();
             }
 
+            // Clipboard
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
+                if let Some(text) = self.editor.active().copy() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "x" => {
+                if let Some(text) = self.editor.active_mut().cut() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "v" => {
+                if let Some(clip) = &mut self.clipboard {
+                    if let Ok(text) = clip.get_text() {
+                        self.editor.active_mut().insert_text(&text);
+                    }
+                }
+            }
+
             // Undo/Redo
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "z" => {
                 if shift { self.editor.active_mut().redo(); } else { self.editor.active_mut().undo(); }
@@ -239,6 +412,17 @@ impl App {
             // Select All
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "a" => {
                 self.editor.active_mut().select_all();
+            }
+
+            // Duplicate Line (Cmd+Shift+D)
+            Key::Character(c) if cmd_or_ctrl && shift && (c.as_str() == "d" || c.as_str() == "D") => {
+                self.editor.active_mut().duplicate_line();
+            }
+
+            // Toggle Comment (Cmd+/)
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "/" => {
+                let prefix = self.comment_prefix().to_string();
+                self.editor.active_mut().toggle_comment(&prefix);
             }
 
             // Tab switching
@@ -262,28 +446,42 @@ impl App {
                 self.theme = themes[self.theme_index].clone();
             }
 
-            // Navigation
-            Key::Named(NamedKey::ArrowLeft) => self.editor.active_mut().move_left(),
-            Key::Named(NamedKey::ArrowRight) => self.editor.active_mut().move_right(),
-            Key::Named(NamedKey::ArrowUp) => self.editor.active_mut().move_up(),
-            Key::Named(NamedKey::ArrowDown) => self.editor.active_mut().move_down(),
-            Key::Named(NamedKey::Home) => self.editor.active_mut().move_to_line_start(),
-            Key::Named(NamedKey::End) => self.editor.active_mut().move_to_line_end(),
+            // Navigation — word-wise (Alt/Opt+Arrow)
+            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_word_left(),
+            Key::Named(NamedKey::ArrowRight) if alt => self.editor.active_mut().move_word_right(),
+
+            // Navigation — document start/end (Cmd+Up/Down or Cmd+Home/End)
+            Key::Named(NamedKey::ArrowUp) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
+            Key::Named(NamedKey::ArrowDown) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
+            Key::Named(NamedKey::Home) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
+            Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
+
+            // Navigation — basic (with shift-selection support)
+            Key::Named(NamedKey::ArrowLeft) => self.editor.active_mut().move_left_sel(shift),
+            Key::Named(NamedKey::ArrowRight) => self.editor.active_mut().move_right_sel(shift),
+            Key::Named(NamedKey::ArrowUp) => self.editor.active_mut().move_up_sel(shift),
+            Key::Named(NamedKey::ArrowDown) => self.editor.active_mut().move_down_sel(shift),
+            Key::Named(NamedKey::Home) => self.editor.active_mut().move_to_line_start_sel(shift),
+            Key::Named(NamedKey::End) => self.editor.active_mut().move_to_line_end_sel(shift),
             Key::Named(NamedKey::PageUp) => {
                 let visible = self.renderer.as_ref().map(|r| r.visible_lines()).unwrap_or(20);
-                for _ in 0..visible { self.editor.active_mut().move_up(); }
+                for _ in 0..visible { self.editor.active_mut().move_up_sel(shift); }
             }
             Key::Named(NamedKey::PageDown) => {
                 let visible = self.renderer.as_ref().map(|r| r.visible_lines()).unwrap_or(20);
-                for _ in 0..visible { self.editor.active_mut().move_down(); }
+                for _ in 0..visible { self.editor.active_mut().move_down_sel(shift); }
             }
 
-            // Editing
+            // Editing — word-wise deletion
+            Key::Named(NamedKey::Backspace) if alt => self.editor.active_mut().delete_word_left(),
+            Key::Named(NamedKey::Delete) if alt => self.editor.active_mut().delete_word_right(),
+
+            // Editing — basic
             Key::Named(NamedKey::Backspace) => self.editor.active_mut().backspace(),
             Key::Named(NamedKey::Delete) => self.editor.active_mut().delete_forward(),
             Key::Named(NamedKey::Enter) => {
                 let le = self.editor.active().line_ending.as_str().to_string();
-                self.editor.active_mut().insert_text(&le);
+                self.editor.active_mut().insert_newline(&le);
             }
             Key::Named(NamedKey::Tab) => {
                 self.editor.active_mut().insert_text("    ");
@@ -292,9 +490,12 @@ impl App {
                 self.editor.active_mut().insert_text(" ");
             }
 
-            // Text input
+            // Text input (with auto-close for brackets/quotes)
             Key::Character(c) if !cmd_or_ctrl => {
-                self.editor.active_mut().insert_text(c.as_str());
+                let s = c.as_str();
+                if !self.editor.active_mut().insert_with_autoclose(s) {
+                    self.editor.active_mut().insert_text(s);
+                }
             }
 
             _ => {}
@@ -309,10 +510,36 @@ impl App {
         self.needs_redraw = true;
     }
 
-    fn handle_overlay_key(&mut self, event: KeyEvent, cmd_or_ctrl: bool, _shift: bool) {
+    fn handle_overlay_key(&mut self, event: KeyEvent, cmd_or_ctrl: bool, shift: bool) {
         match &event.logical_key {
             Key::Named(NamedKey::Enter) => {
-                self.execute_overlay_action();
+                if self.overlay.active == ActiveOverlay::FindReplace && self.overlay.focus_replace {
+                    // Replace current match
+                    let replacement = self.overlay.replace_input.clone();
+                    let rope = &mut self.editor.active_mut().rope;
+                    if let Some((_removed, offset)) = self.overlay.find.replace_current(rope, &replacement) {
+                        self.editor.active_mut().cursor = offset + replacement.len();
+                        self.editor.active_mut().dirty = true;
+                        // Re-search to update matches
+                        let query = self.overlay.input.clone();
+                        let rope = &self.editor.active().rope;
+                        self.overlay.find.search(rope, &query);
+                    }
+                } else {
+                    self.execute_overlay_action();
+                }
+            }
+            // Navigation
+            Key::Named(NamedKey::Tab) => {
+                if self.overlay.active == ActiveOverlay::FindReplace {
+                    self.overlay.toggle_focus();
+                } else {
+                    self.overlay.insert_char(' ');
+                    self.overlay.insert_char(' ');
+                    self.overlay.insert_char(' ');
+                    self.overlay.insert_char(' ');
+                    self.on_overlay_input_changed();
+                }
             }
             Key::Named(NamedKey::Backspace) => {
                 self.overlay.backspace();
@@ -325,21 +552,20 @@ impl App {
                 self.overlay.move_input_right();
             }
             Key::Named(NamedKey::ArrowDown) => {
-                // In find: next match. In palette: next item (TODO: selection)
-                if self.overlay.active == ActiveOverlay::Find {
+                if self.overlay.active == ActiveOverlay::Find || self.overlay.active == ActiveOverlay::FindReplace {
                     self.overlay.find.next_match();
                     self.jump_to_current_match();
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                if self.overlay.active == ActiveOverlay::Find {
+                if self.overlay.active == ActiveOverlay::Find || self.overlay.active == ActiveOverlay::FindReplace {
                     self.overlay.find.prev_match();
                     self.jump_to_current_match();
                 }
             }
             // Cmd+G for next match in find
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "g" => {
-                if self.overlay.active == ActiveOverlay::Find {
+                if self.overlay.active == ActiveOverlay::Find || self.overlay.active == ActiveOverlay::FindReplace {
                     self.overlay.find.next_match();
                     self.jump_to_current_match();
                 }
@@ -359,10 +585,12 @@ impl App {
 
     fn on_overlay_input_changed(&mut self) {
         match self.overlay.active {
-            ActiveOverlay::Find => {
-                let rope = &self.editor.active().rope;
-                self.overlay.find.search(rope, &self.overlay.input.clone());
-                self.jump_to_current_match();
+            ActiveOverlay::Find | ActiveOverlay::FindReplace => {
+                if !self.overlay.focus_replace {
+                    let rope = &self.editor.active().rope;
+                    self.overlay.find.search(rope, &self.overlay.input.clone());
+                    self.jump_to_current_match();
+                }
             }
             _ => {}
         }
@@ -374,6 +602,14 @@ impl App {
                 // Enter = next match
                 self.overlay.find.next_match();
                 self.jump_to_current_match();
+            }
+            ActiveOverlay::FindReplace => {
+                if !self.overlay.focus_replace {
+                    // Enter in find field = next match
+                    self.overlay.find.next_match();
+                    self.jump_to_current_match();
+                }
+                // Enter in replace field handled separately in handle_overlay_key
             }
             ActiveOverlay::GotoLine => {
                 if let Some(line) = overlay::goto::goto_line(&self.overlay.input) {
@@ -400,6 +636,10 @@ impl App {
                 }
             }
             ActiveOverlay::None => {}
+            ActiveOverlay::Help => {
+                // Help is read-only; Enter just closes it
+                self.overlay.close();
+            }
         }
         self.needs_redraw = true;
     }
@@ -423,8 +663,52 @@ impl App {
             }
             CommandId::NextTab => self.editor.next_tab(),
             CommandId::PrevTab => self.editor.prev_tab(),
+            CommandId::Copy => {
+                if let Some(text) = self.editor.active().copy() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+            }
+            CommandId::Cut => {
+                if let Some(text) = self.editor.active_mut().cut() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+            }
+            CommandId::Paste => {
+                if let Some(clip) = &mut self.clipboard {
+                    if let Ok(text) = clip.get_text() {
+                        self.editor.active_mut().insert_text(&text);
+                    }
+                }
+            }
+            CommandId::DuplicateLine => self.editor.active_mut().duplicate_line(),
+            CommandId::ToggleComment => {
+                let prefix = self.comment_prefix().to_string();
+                self.editor.active_mut().toggle_comment(&prefix);
+            }
         }
         self.needs_redraw = true;
+    }
+
+    /// Get the comment prefix for the current buffer's detected language
+    fn comment_prefix(&self) -> &'static str {
+        let lang_idx = self.editor.active().language_index;
+        match lang_idx {
+            Some(idx) => {
+                let name = self.syntax.language_name(idx);
+                match name {
+                    "Rust" | "JavaScript" | "TypeScript" | "C" | "C++" | "Go" | "Java" => "//",
+                    "Python" | "Ruby" | "Bash" | "YAML" | "TOML" => "#",
+                    "HTML" | "XML" => "<!--",
+                    "CSS" => "/*",
+                    _ => "//",
+                }
+            }
+            None => "//",
+        }
     }
 
     fn jump_to_current_match(&mut self) {
@@ -497,7 +781,9 @@ impl ApplicationHandler for App {
                         surface.configure(device, config);
                     }
                     if let Some(renderer) = &mut self.renderer {
-                        renderer.resize(size.width, size.height);
+                        if let Some(window) = &self.window {
+                            renderer.resize(size.width, size.height, window.scale_factor() as f32);
+                        }
                     }
                     self.needs_redraw = true;
                 }
@@ -505,6 +791,35 @@ impl ApplicationHandler for App {
 
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_pos = (position.x, position.y);
+                
+                // Update cursor icon
+                if let Some(window) = &self.window {
+                    let scale = window.scale_factor();
+                    let y = position.y / scale;
+                    use renderer::TAB_BAR_HEIGHT;
+                    if y >= TAB_BAR_HEIGHT as f64 {
+                        window.set_cursor(winit::window::CursorIcon::Text);
+                    } else {
+                        window.set_cursor(winit::window::CursorIcon::Default);
+                    }
+                }
+
+                if self.is_mouse_down && !self.overlay.is_active() {
+                    self.handle_mouse_drag();
+                }
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == winit::event::MouseButton::Left {
+                    self.is_mouse_down = state == ElementState::Pressed;
+                    if self.is_mouse_down && !self.overlay.is_active() {
+                        self.handle_mouse_click();
+                    }
+                }
             }
 
             WindowEvent::KeyboardInput { event, .. } => {

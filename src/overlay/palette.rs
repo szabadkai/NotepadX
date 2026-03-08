@@ -21,6 +21,11 @@ pub enum CommandId {
     NextTheme,
     NextTab,
     PrevTab,
+    Copy,
+    Cut,
+    Paste,
+    DuplicateLine,
+    ToggleComment,
 }
 
 /// Get all available commands
@@ -36,6 +41,11 @@ pub fn all_commands() -> Vec<Command> {
         Command { name: "Select All", shortcut: "Cmd+A", id: CommandId::SelectAll },
         Command { name: "Find", shortcut: "Cmd+F", id: CommandId::Find },
         Command { name: "Go to Line", shortcut: "Cmd+G", id: CommandId::GotoLine },
+        Command { name: "Copy", shortcut: "Cmd+C", id: CommandId::Copy },
+        Command { name: "Cut", shortcut: "Cmd+X", id: CommandId::Cut },
+        Command { name: "Paste", shortcut: "Cmd+V", id: CommandId::Paste },
+        Command { name: "Duplicate Line", shortcut: "Cmd+Shift+D", id: CommandId::DuplicateLine },
+        Command { name: "Toggle Comment", shortcut: "Cmd+/", id: CommandId::ToggleComment },
         Command { name: "Next Theme", shortcut: "Cmd+K", id: CommandId::NextTheme },
         Command { name: "Next Tab", shortcut: "Ctrl+Tab", id: CommandId::NextTab },
         Command { name: "Previous Tab", shortcut: "Ctrl+Shift+Tab", id: CommandId::PrevTab },
@@ -57,3 +67,4 @@ pub fn filter_commands(query: &str) -> Vec<Command> {
         })
         .collect()
 }
+
