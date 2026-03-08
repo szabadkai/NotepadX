@@ -400,10 +400,11 @@ impl Renderer {
         let visible_lines = self.visible_lines();
 
         // Collect UI rectangles
-        let mut rects = Vec::new();
+        let mut base_rects = Vec::new();
+        let mut overlay_rects = Vec::new();
 
         // 1. Tab Bar Background
-        rects.push(Rect {
+        base_rects.push(Rect {
             x: 0.0,
             y: 0.0,
             w: width,
@@ -419,7 +420,7 @@ impl Renderer {
             // Draw individual tab background
             let is_active = i == editor.active_buffer;
             let tab_bg = if is_active { theme.tab_active_bg } else { theme.tab_inactive_bg };
-            rects.push(Rect {
+            base_rects.push(Rect {
                 x: tx_s,
                 y: 0.0,
                 w: tw_s,
@@ -430,7 +431,7 @@ impl Renderer {
             // Draw a separator line between tabs
             if i > 0 {
                 let sep = [theme.tab_inactive_fg.r, theme.tab_inactive_fg.g, theme.tab_inactive_fg.b, 0.3];
-                rects.push(Rect {
+                base_rects.push(Rect {
                     x: tx_s,
                     y: 4.0 * s,
                     w: 1.0,
@@ -442,7 +443,7 @@ impl Renderer {
 
         // 2b. Gutter Background
         let editor_height_px = height - tab_bar_height - status_bar_height;
-        rects.push(Rect {
+        base_rects.push(Rect {
             x: 0.0,
             y: editor_top,
             w: gutter_width,
@@ -453,7 +454,7 @@ impl Renderer {
         // 3. Active Line Highlight
         let cursor_line_in_view = buffer.cursor_line() as i64 - scroll_line as i64;
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-            rects.push(Rect {
+            base_rects.push(Rect {
                 x: gutter_width,
                 y: editor_top + cursor_line_in_view as f32 * line_height,
                 w: width - gutter_width,
@@ -465,7 +466,7 @@ impl Renderer {
         // 4. Cursor I-beam (thin 2px line)
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
             let col = buffer.cursor_col();
-            rects.push(Rect {
+            base_rects.push(Rect {
                 x: editor_left + col as f32 * char_width,
                 y: editor_top + cursor_line_in_view as f32 * line_height,
                 w: 2.0 * s,
@@ -482,7 +483,7 @@ impl Renderer {
             
             if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
                 let match_col = match_char - buffer.rope.line_to_char(match_line);
-                rects.push(Rect {
+                base_rects.push(Rect {
                     x: editor_left + match_col as f32 * char_width,
                     y: editor_top + match_line_in_view as f32 * line_height,
                     w: char_width,
@@ -510,7 +511,7 @@ impl Renderer {
                         let col_start = sel_start - line_start_char;
                         let col_end = sel_end - line_start_char;
                         
-                        rects.push(Rect {
+                        base_rects.push(Rect {
                             x: editor_left + col_start as f32 * char_width,
                             y: editor_top + i as f32 * line_height,
                             w: (col_end - col_start) as f32 * char_width,
@@ -523,7 +524,7 @@ impl Renderer {
         }
 
         // 5. Status Bar Background
-        rects.push(Rect {
+        base_rects.push(Rect {
             x: 0.0,
             y: status_top,
             w: width,
@@ -545,8 +546,8 @@ impl Renderer {
             };
             
             // Background — use a slightly lighter/darker shade of editor bg
-            let overlay_bg = [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, 0.98];
-            rects.push(Rect {
+            let overlay_bg = [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, 1.0];
+            overlay_rects.push(Rect {
                 x: overlay_left,
                 y: overlay_top_panel,
                 w: overlay_width,
@@ -555,10 +556,10 @@ impl Renderer {
             });
             // Border (simulated with thin rects)
             let border_color = [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5];
-            rects.push(Rect { x: overlay_left, y: overlay_top_panel, w: overlay_width, h: 1.0 * s, color: border_color });
-            rects.push(Rect { x: overlay_left, y: overlay_top_panel + overlay_height, w: overlay_width, h: 1.0 * s, color: border_color });
-            rects.push(Rect { x: overlay_left, y: overlay_top_panel, w: 1.0 * s, h: overlay_height, color: border_color });
-            rects.push(Rect { x: overlay_left + overlay_width, y: overlay_top_panel, w: 1.0 * s, h: overlay_height, color: border_color });
+            overlay_rects.push(Rect { x: overlay_left, y: overlay_top_panel, w: overlay_width, h: 1.0 * s, color: border_color });
+            overlay_rects.push(Rect { x: overlay_left, y: overlay_top_panel + overlay_height, w: overlay_width, h: 1.0 * s, color: border_color });
+            overlay_rects.push(Rect { x: overlay_left, y: overlay_top_panel, w: 1.0 * s, h: overlay_height, color: border_color });
+            overlay_rects.push(Rect { x: overlay_left + overlay_width, y: overlay_top_panel, w: 1.0 * s, h: overlay_height, color: border_color });
         }
         let editor_height = height - tab_bar_height - status_bar_height;
 
@@ -573,11 +574,12 @@ impl Renderer {
         );
 
         // Build text areas
-        let mut text_areas = Vec::new();
+        let mut base_text_areas = Vec::new();
+        let mut overlay_text_areas = Vec::new();
 
         // Tab bar text - single buffer with padding-based alignment
         let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0; // vertically center (line_height 16)
-        text_areas.push(TextArea {
+        base_text_areas.push(TextArea {
             buffer: &self.tab_bar_buffer,
             left: 0.0,
             top: tab_text_top,
@@ -594,7 +596,7 @@ impl Renderer {
 
 
         // Gutter text
-        text_areas.push(TextArea {
+        base_text_areas.push(TextArea {
             buffer: &self.gutter_buffer,
             left: 0.0,
             top: tab_bar_height,
@@ -611,7 +613,7 @@ impl Renderer {
 
 
         // Editor text
-        text_areas.push(TextArea {
+        base_text_areas.push(TextArea {
             buffer: &self.editor_buffer,
             left: editor_left,
             top: tab_bar_height,
@@ -629,7 +631,7 @@ impl Renderer {
 
         // Status bar text (vertically centered)
         let status_text_top = status_top + (status_bar_height - FONT_SIZE * s) / 2.0;
-        text_areas.push(TextArea {
+        base_text_areas.push(TextArea {
             buffer: &self.status_buffer,
             left: 10.0 * s,
             top: status_text_top,
@@ -659,7 +661,7 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 _ => 40.0 * s,
             };
-            text_areas.push(TextArea {
+            overlay_text_areas.push(TextArea {
                 buffer: &self.overlay_buffer,
                 left: overlay_left + 8.0 * s,
                 top: overlay_top_panel + 6.0 * s,
@@ -675,23 +677,22 @@ impl Renderer {
             });
         }
 
-        // Prepare text
-        self.text_renderer
-            .prepare(
-                device,
-                queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )
-            .expect("Failed to prepare text rendering");
-
-        // Render pass
+        // --- Pass 1: Base Layer (Clear + Shapes + Text) ---
         {
+            self.text_renderer
+                .prepare(
+                    device,
+                    queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    base_text_areas,
+                    &mut self.swash_cache,
+                )
+                .expect("Failed to prepare base text rendering");
+
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("NotepadX Render Pass"),
+                label: Some("NotepadX Base Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
@@ -705,10 +706,41 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // Render shapes first
-            self.shape_renderer.render(device, queue, &mut pass, &rects, self.width, self.height);
+            self.shape_renderer.render(device, queue, &mut pass, &base_rects, self.width, self.height);
+            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).expect("Failed to render base text");
+        }
 
-            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).expect("Failed to render text");
+        // --- Pass 2: Overlay Layer (Load + Shapes + Text) ---
+        if overlay.is_active() {
+            self.text_renderer
+                .prepare(
+                    device,
+                    queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    overlay_text_areas,
+                    &mut self.swash_cache,
+                )
+                .expect("Failed to prepare overlay text rendering");
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("NotepadX Overlay Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            self.shape_renderer.render(device, queue, &mut pass, &overlay_rects, self.width, self.height);
+            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).expect("Failed to render overlay text");
         }
 
         // Trim atlas to free unused glyph space
