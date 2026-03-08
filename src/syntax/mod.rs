@@ -73,14 +73,6 @@ struct LangDef {
 fn language_defs() -> Vec<LangDef> {
     vec![
         LangDef {
-            extensions: &["rs"],
-            name: "rust",
-            language: tree_sitter_rust::LANGUAGE.into(),
-            highlights_query: tree_sitter_rust::HIGHLIGHTS_QUERY,
-            injections_query: tree_sitter_rust::INJECTIONS_QUERY,
-            locals_query: "",
-        },
-        LangDef {
             extensions: &["js", "mjs", "cjs", "jsx"],
             name: "javascript",
             language: tree_sitter_javascript::LANGUAGE.into(),
@@ -129,22 +121,6 @@ fn language_defs() -> Vec<LangDef> {
             locals_query: "",
         },
         LangDef {
-            extensions: &["c", "h"],
-            name: "c",
-            language: tree_sitter_c::LANGUAGE.into(),
-            highlights_query: tree_sitter_c::HIGHLIGHT_QUERY,
-            injections_query: "",
-            locals_query: "",
-        },
-        LangDef {
-            extensions: &["cpp", "cc", "cxx", "hpp", "hxx", "hh"],
-            name: "cpp",
-            language: tree_sitter_cpp::LANGUAGE.into(),
-            highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
-            injections_query: "",
-            locals_query: "",
-        },
-        LangDef {
             extensions: &["toml"],
             name: "toml",
             language: tree_sitter_toml_ng::LANGUAGE.into(),
@@ -159,30 +135,6 @@ fn language_defs() -> Vec<LangDef> {
             highlights_query: tree_sitter_bash::HIGHLIGHT_QUERY,
             injections_query: "",
             locals_query: "",
-        },
-        LangDef {
-            extensions: &["go"],
-            name: "go",
-            language: tree_sitter_go::LANGUAGE.into(),
-            highlights_query: tree_sitter_go::HIGHLIGHTS_QUERY,
-            injections_query: "",
-            locals_query: "",
-        },
-        LangDef {
-            extensions: &["java"],
-            name: "java",
-            language: tree_sitter_java::LANGUAGE.into(),
-            highlights_query: tree_sitter_java::HIGHLIGHTS_QUERY,
-            injections_query: "",
-            locals_query: "",
-        },
-        LangDef {
-            extensions: &["rb", "ruby"],
-            name: "ruby",
-            language: tree_sitter_ruby::LANGUAGE.into(),
-            highlights_query: tree_sitter_ruby::HIGHLIGHTS_QUERY,
-            injections_query: "",
-            locals_query: tree_sitter_ruby::LOCALS_QUERY,
         },
         LangDef {
             extensions: &["yml", "yaml"],

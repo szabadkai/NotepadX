@@ -141,10 +141,12 @@ impl Renderer {
         let mut tab_x = 0.0f32;
         let mut tab_spans: Vec<(String, Attrs)> = Vec::new();
         let base_tab_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+        let show_close = editor.buffers.len() > 1;
         for (i, buf) in editor.buffers.iter().enumerate() {
             let name = buf.display_name();
             let dirty_marker = if buf.dirty { "● " } else { "" };
-            let label = format!("{dirty_marker}{name}");
+            let close_marker = if show_close { " ×" } else { "" };
+            let label = format!("{dirty_marker}{name}{close_marker}");
             let label_chars = label.chars().count();
             let tw = label_chars as f32 * tab_char_w + tab_pad * 2.0;
 
@@ -467,7 +469,7 @@ impl Renderer {
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
             let col = buffer.cursor_col();
             base_rects.push(Rect {
-                x: editor_left + col as f32 * char_width,
+                x: editor_left + col as f32 * char_width - buffer.scroll_x * s,
                 y: editor_top + cursor_line_in_view as f32 * line_height,
                 w: 2.0 * s,
                 h: line_height,
@@ -476,15 +478,14 @@ impl Renderer {
         }
 
         // 4. Bracket Matching Highlight
-        if let Some(match_byte) = buffer.find_matching_bracket() {
-            let match_char = buffer.rope.byte_to_char(match_byte);
+        if let Some(match_char) = buffer.find_matching_bracket() {
             let match_line = buffer.rope.char_to_line(match_char);
             let match_line_in_view = match_line as i64 - scroll_line as i64;
             
             if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
                 let match_col = match_char - buffer.rope.line_to_char(match_line);
                 base_rects.push(Rect {
-                    x: editor_left + match_col as f32 * char_width,
+                    x: editor_left + match_col as f32 * char_width - buffer.scroll_x * s,
                     y: editor_top + match_line_in_view as f32 * line_height,
                     w: char_width,
                     h: line_height,
@@ -510,9 +511,9 @@ impl Renderer {
                     if sel_start < sel_end {
                         let col_start = sel_start - line_start_char;
                         let col_end = sel_end - line_start_char;
-                        
+
                         base_rects.push(Rect {
-                            x: editor_left + col_start as f32 * char_width,
+                            x: editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
                             y: editor_top + i as f32 * line_height,
                             w: (col_end - col_start) as f32 * char_width,
                             h: line_height,
@@ -523,7 +524,48 @@ impl Renderer {
             }
         }
 
-        // 5. Status Bar Background
+        // 5b. Find Match Highlights
+        if overlay.is_active() && !overlay.find.matches.is_empty() {
+            let total_lines = buffer.rope.len_lines();
+            for (match_idx, m) in overlay.find.matches.iter().enumerate() {
+                // find matches store byte offsets; convert to char indices
+                let match_start_char = buffer.rope.byte_to_char(m.start);
+                let match_end_char = buffer.rope.byte_to_char(m.end);
+                let match_start_line = buffer.rope.char_to_line(match_start_char);
+                let match_end_line = buffer.rope.char_to_line(match_end_char);
+
+                let is_current = match_idx == overlay.find.current_match;
+                let highlight_alpha = if is_current { 0.6 } else { 0.3 };
+
+                for line_idx in match_start_line..=match_end_line {
+                    let view_line = line_idx as i64 - scroll_line as i64;
+                    if view_line < 0 || view_line >= visible_lines as i64 { continue; }
+                    if line_idx >= total_lines { break; }
+
+                    let line_start_char = buffer.rope.line_to_char(line_idx);
+                    let line_end_char = if line_idx + 1 < total_lines {
+                        buffer.rope.line_to_char(line_idx + 1)
+                    } else {
+                        buffer.rope.len_chars()
+                    };
+
+                    let col_start = match_start_char.max(line_start_char) - line_start_char;
+                    let col_end = match_end_char.min(line_end_char) - line_start_char;
+
+                    if col_start < col_end {
+                        base_rects.push(Rect {
+                            x: editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
+                            y: editor_top + view_line as f32 * line_height,
+                            w: (col_end - col_start) as f32 * char_width,
+                            h: line_height,
+                            color: [theme.selection.r, theme.selection.g, theme.selection.b, highlight_alpha],
+                        });
+                    }
+                }
+            }
+        }
+
+        // 6. Status Bar Background
         base_rects.push(Rect {
             x: 0.0,
             y: status_top,
@@ -613,9 +655,10 @@ impl Renderer {
 
 
         // Editor text
+        let scroll_x_px = buffer.scroll_x * s;
         base_text_areas.push(TextArea {
             buffer: &self.editor_buffer,
-            left: editor_left,
+            left: editor_left - scroll_x_px,
             top: tab_bar_height,
             scale: s,
             bounds: TextBounds {

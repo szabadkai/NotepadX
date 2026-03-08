@@ -43,6 +43,10 @@ struct App {
     mouse_pos: (f64, f64),
     is_mouse_down: bool,
 
+    // Double-click detection
+    last_click_time: std::time::Instant,
+    last_click_pos: (f64, f64),
+
     // Animation
     needs_redraw: bool,
 }
@@ -65,6 +69,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             mouse_pos: (0.0, 0.0),
             is_mouse_down: false,
+            last_click_time: std::time::Instant::now(),
+            last_click_pos: (0.0, 0.0),
             needs_redraw: true,
         }
     }
@@ -141,8 +147,9 @@ impl App {
         self.editor.active_mut().update_scroll();
 
         // Check if still animating
-        let scroll_diff = (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
-        if scroll_diff > 0.1 {
+        let scroll_diff_y = (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
+        let scroll_diff_x = (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
+        if scroll_diff_y > 0.1 || scroll_diff_x > 0.1 {
             self.needs_redraw = true;
         }
 
@@ -224,13 +231,13 @@ impl App {
         output.present();
     }
 
-    fn handle_mouse_click(&mut self) {
+    fn handle_mouse_click(&mut self, is_double: bool) {
         let (x, y) = self.mouse_pos;
         let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{TAB_BAR_HEIGHT, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
+        use renderer::{TAB_BAR_HEIGHT, TAB_PADDING_H, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
@@ -238,26 +245,32 @@ impl App {
                 let click_x = x as f32;
                 for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
                     if click_x >= tx && click_x < tx + tw {
-                        self.editor.active_buffer = i;
+                        // Check if click is on the close button (last portion of tab)
+                        let close_x = tx + tw - TAB_PADDING_H;
+                        if click_x >= close_x && self.editor.buffers.len() > 1 {
+                            self.editor.close_tab(i);
+                        } else {
+                            self.editor.active_buffer = i;
+                        }
                         break;
                     }
                 }
             }
-        } 
+        }
         // Editor Area
         else if y >= TAB_BAR_HEIGHT as f64 {
             let shift = self.modifiers.shift_key();
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
-            
+
             let buffer = self.editor.active_mut();
             let new_pos = buffer.char_at_pos(
-                x as f32, 
-                editor_y as f32, 
-                GUTTER_WIDTH + LINE_PADDING_LEFT, 
-                LINE_HEIGHT, 
+                x as f32,
+                editor_y as f32,
+                GUTTER_WIDTH + LINE_PADDING_LEFT,
+                LINE_HEIGHT,
                 CHAR_WIDTH
             );
-            
+
             if shift {
                 if buffer.selection_anchor.is_none() {
                     buffer.selection_anchor = Some(buffer.cursor);
@@ -265,8 +278,13 @@ impl App {
             } else {
                 buffer.selection_anchor = None;
             }
-            
+
             buffer.cursor = new_pos;
+
+            // Double-click: select word
+            if is_double {
+                buffer.select_word_at_cursor();
+            }
         }
         self.needs_redraw = true;
     }
@@ -446,15 +464,19 @@ impl App {
                 self.theme = themes[self.theme_index].clone();
             }
 
-            // Navigation — word-wise (Alt/Opt+Arrow)
-            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_word_left(),
-            Key::Named(NamedKey::ArrowRight) if alt => self.editor.active_mut().move_word_right(),
+            // Navigation — line start/end (Cmd+Left/Right)
+            Key::Named(NamedKey::ArrowLeft) if cmd_or_ctrl => self.editor.active_mut().move_to_line_start_sel(shift),
+            Key::Named(NamedKey::ArrowRight) if cmd_or_ctrl => self.editor.active_mut().move_to_line_end_sel(shift),
 
             // Navigation — document start/end (Cmd+Up/Down or Cmd+Home/End)
             Key::Named(NamedKey::ArrowUp) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
             Key::Named(NamedKey::ArrowDown) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
             Key::Named(NamedKey::Home) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
             Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
+
+            // Navigation — word-wise (Alt/Opt+Arrow)
+            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_word_left(),
+            Key::Named(NamedKey::ArrowRight) if alt => self.editor.active_mut().move_word_right(),
 
             // Navigation — basic (with shift-selection support)
             Key::Named(NamedKey::ArrowLeft) => self.editor.active_mut().move_left_sel(shift),
@@ -505,6 +527,9 @@ impl App {
         if let Some(renderer) = &self.renderer {
             let visible = renderer.visible_lines();
             self.editor.active_mut().ensure_cursor_visible(visible);
+            let win_width = self.window.as_ref().map(|w| w.inner_size().width).unwrap_or(1200) as f32 / self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+            let editor_width = win_width - renderer::GUTTER_WIDTH - renderer::LINE_PADDING_LEFT - renderer::SCROLLBAR_WIDTH;
+            self.editor.active_mut().ensure_cursor_visible_x(renderer::CHAR_WIDTH, editor_width);
         }
 
         self.needs_redraw = true;
@@ -518,7 +543,9 @@ impl App {
                     let replacement = self.overlay.replace_input.clone();
                     let rope = &mut self.editor.active_mut().rope;
                     if let Some((_removed, offset)) = self.overlay.find.replace_current(rope, &replacement) {
-                        self.editor.active_mut().cursor = offset + replacement.len();
+                        // offset is a byte offset from find; convert to char
+                        let char_offset = self.editor.active().rope.byte_to_char(offset);
+                        self.editor.active_mut().cursor = char_offset + replacement.chars().count();
                         self.editor.active_mut().dirty = true;
                         // Re-search to update matches
                         let query = self.overlay.input.clone();
@@ -616,8 +643,7 @@ impl App {
                     let buffer = self.editor.active_mut();
                     let total = buffer.line_count();
                     let target = line.min(total.saturating_sub(1));
-                    let char_idx = buffer.rope.line_to_char(target);
-                    buffer.cursor = buffer.rope.char_to_byte(char_idx);
+                    buffer.cursor = buffer.rope.line_to_char(target);
                     if let Some(renderer) = &self.renderer {
                         let visible = renderer.visible_lines();
                         buffer.ensure_cursor_visible(visible);
@@ -700,10 +726,10 @@ impl App {
             Some(idx) => {
                 let name = self.syntax.language_name(idx);
                 match name {
-                    "Rust" | "JavaScript" | "TypeScript" | "C" | "C++" | "Go" | "Java" => "//",
-                    "Python" | "Ruby" | "Bash" | "YAML" | "TOML" => "#",
-                    "HTML" | "XML" => "<!--",
-                    "CSS" => "/*",
+                    "js" | "ts" => "//",
+                    "py" | "sh" | "yml" | "toml" => "#",
+                    "html" | "xml" => "<!--",
+                    "css" => "/*",
                     _ => "//",
                 }
             }
@@ -713,9 +739,10 @@ impl App {
 
     fn jump_to_current_match(&mut self) {
         if let Some(m) = self.overlay.find.current() {
-            let start = m.start;
+            let start_byte = m.start;
             let buffer = self.editor.active_mut();
-            buffer.cursor = start;
+            // Find matches store byte offsets; convert to char index
+            buffer.cursor = buffer.rope.byte_to_char(start_byte);
             if let Some(renderer) = &self.renderer {
                 let visible = renderer.visible_lines();
                 buffer.ensure_cursor_visible(visible);
@@ -817,7 +844,14 @@ impl ApplicationHandler for App {
                 if button == winit::event::MouseButton::Left {
                     self.is_mouse_down = state == ElementState::Pressed;
                     if self.is_mouse_down && !self.overlay.is_active() {
-                        self.handle_mouse_click();
+                        let now = std::time::Instant::now();
+                        let elapsed = now.duration_since(self.last_click_time);
+                        let (cx, cy) = self.mouse_pos;
+                        let dist = ((cx - self.last_click_pos.0).powi(2) + (cy - self.last_click_pos.1).powi(2)).sqrt();
+                        let is_double = elapsed.as_millis() < 400 && dist < 5.0;
+                        self.handle_mouse_click(is_double);
+                        self.last_click_time = now;
+                        self.last_click_pos = (cx, cy);
                     }
                 }
             }
@@ -828,12 +862,18 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 match delta {
-                    MouseScrollDelta::LineDelta(_, y) => {
+                    MouseScrollDelta::LineDelta(x, y) => {
                         self.editor.active_mut().scroll(-y as f64 * 3.0);
+                        if x.abs() > 0.0 {
+                            self.editor.active_mut().scroll_horizontal(x * renderer::CHAR_WIDTH * 3.0);
+                        }
                     }
                     MouseScrollDelta::PixelDelta(pos) => {
                         let lines = -pos.y / renderer::LINE_HEIGHT as f64;
                         self.editor.active_mut().scroll_direct(lines);
+                        if pos.x.abs() > 0.0 {
+                            self.editor.active_mut().scroll_horizontal_direct(-pos.x as f32);
+                        }
                     }
                 }
                 self.needs_redraw = true;
@@ -862,8 +902,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let scroll_diff = (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
-        if scroll_diff > 0.1 {
+        let scroll_diff_y = (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
+        let scroll_diff_x = (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
+        if scroll_diff_y > 0.1 || scroll_diff_x > 0.1 {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }

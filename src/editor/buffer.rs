@@ -11,16 +11,20 @@ pub struct Buffer {
     pub file_path: Option<PathBuf>,
     /// Whether the buffer has unsaved changes
     pub dirty: bool,
-    /// Cursor position as a byte offset
+    /// Cursor position as a char index into the rope
     pub cursor: usize,
-    /// Selection anchor (None if no selection)
+    /// Selection anchor as a char index (None if no selection)
     pub selection_anchor: Option<usize>,
     /// Desired column for up/down movement (sticky column)
     pub desired_col: Option<usize>,
-    /// Scroll offset in lines
+    /// Scroll offset in lines (vertical)
     pub scroll_y: f64,
     /// Target scroll offset (for smooth scrolling)
     pub scroll_y_target: f64,
+    /// Horizontal scroll offset in pixels
+    pub scroll_x: f32,
+    /// Target horizontal scroll offset (for smooth scrolling)
+    pub scroll_x_target: f32,
     /// Undo stack
     undo_stack: Vec<EditOperation>,
     /// Redo stack
@@ -31,6 +35,10 @@ pub struct Buffer {
     pub line_ending: LineEnding,
     /// Detected language index for syntax highlighting (None = plain text)
     pub language_index: Option<usize>,
+    /// Whether this buffer contains binary content
+    pub is_binary: bool,
+    /// Whether soft line wrapping is enabled
+    pub wrap_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -57,13 +65,13 @@ impl LineEnding {
 
 #[derive(Clone, Debug)]
 struct EditOperation {
-    /// Character offset where the edit occurred
+    /// Char offset where the edit occurred
     offset: usize,
     /// Text that was removed (empty for insert)
     removed: String,
     /// Text that was inserted (empty for delete)
     inserted: String,
-    /// Cursor position before the edit
+    /// Cursor position (char index) before the edit
     cursor_before: usize,
 }
 
@@ -78,17 +86,91 @@ impl Buffer {
             desired_col: None,
             scroll_y: 0.0,
             scroll_y_target: 0.0,
+            scroll_x: 0.0,
+            scroll_x_target: 0.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             encoding: "UTF-8",
             line_ending: LineEnding::Lf,
             language_index: None,
+            is_binary: false,
+            wrap_enabled: false,
         }
+    }
+
+    /// Check if bytes likely represent a binary file.
+    fn is_likely_binary(bytes: &[u8]) -> bool {
+        let sample = &bytes[..bytes.len().min(8192)];
+        if sample.contains(&0u8) {
+            return true;
+        }
+        let non_printable = sample.iter().filter(|&&b| {
+            b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' && b != 0x1b
+        }).count();
+        if sample.is_empty() {
+            return false;
+        }
+        non_printable as f64 / sample.len() as f64 > 0.10
+    }
+
+    /// Format a hex dump of bytes
+    fn hex_dump(bytes: &[u8]) -> String {
+        let mut result = String::new();
+        for (i, chunk) in bytes.chunks(16).enumerate() {
+            result.push_str(&format!("{:08x}  ", i * 16));
+            for (j, b) in chunk.iter().enumerate() {
+                result.push_str(&format!("{:02x} ", b));
+                if j == 7 { result.push(' '); }
+            }
+            // Pad if short
+            let pad = 16 - chunk.len();
+            for _ in 0..pad { result.push_str("   "); }
+            if chunk.len() <= 7 { result.push(' '); }
+            result.push_str(" |");
+            for &b in chunk {
+                if b >= 0x20 && b < 0x7f {
+                    result.push(b as char);
+                } else {
+                    result.push('.');
+                }
+            }
+            result.push_str("|\n");
+        }
+        result
     }
 
     /// Open a file and detect its encoding
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
+
+        // Check for binary content
+        if Self::is_likely_binary(&bytes) {
+            let display_text = format!(
+                "[Binary file: {} bytes]\n\n{}",
+                bytes.len(),
+                Self::hex_dump(&bytes[..bytes.len().min(4096)])
+            );
+            let rope = Rope::from_str(&display_text);
+            return Ok(Self {
+                rope,
+                file_path: Some(path.to_path_buf()),
+                dirty: false,
+                cursor: 0,
+                selection_anchor: None,
+                desired_col: None,
+                scroll_y: 0.0,
+                scroll_y_target: 0.0,
+                scroll_x: 0.0,
+                scroll_x_target: 0.0,
+                undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
+                encoding: "Binary",
+                line_ending: LineEnding::Lf,
+                language_index: None,
+                is_binary: true,
+                wrap_enabled: false,
+            });
+        }
 
         // Detect encoding
         let (encoding, _confident) = Self::detect_encoding(&bytes);
@@ -112,11 +194,15 @@ impl Buffer {
             desired_col: None,
             scroll_y: 0.0,
             scroll_y_target: 0.0,
+            scroll_x: 0.0,
+            scroll_x_target: 0.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             encoding: encoding.name(),
             line_ending,
-            language_index: None, // Set by caller after construction
+            language_index: None,
+            is_binary: false,
+            wrap_enabled: false,
         })
     }
 
@@ -143,6 +229,7 @@ impl Buffer {
 
     /// Insert text at the cursor position
     pub fn insert_text(&mut self, text: &str) {
+        if self.is_binary { return; }
         let offset = self.cursor;
 
         // Delete selection first if any
@@ -162,7 +249,7 @@ impl Buffer {
 
         let cursor_before = self.cursor;
         self.rope.insert(self.cursor, text);
-        self.cursor += text.len();
+        self.cursor += text.chars().count();
         self.dirty = true;
         self.redo_stack.clear();
 
@@ -176,6 +263,7 @@ impl Buffer {
 
     /// Delete the character before the cursor (backspace)
     pub fn backspace(&mut self) {
+        if self.is_binary { return; }
         // Delete selection if any
         if let Some(anchor) = self.selection_anchor.take() {
             let start = self.cursor.min(anchor);
@@ -197,26 +285,24 @@ impl Buffer {
 
         if self.cursor > 0 {
             let cursor_before = self.cursor;
-            let char_start = self.rope.byte_to_char(self.cursor);
-            if char_start > 0 {
-                let prev_char_byte = self.rope.char_to_byte(char_start - 1);
-                let removed: String = self.rope.slice(prev_char_byte..self.cursor).into();
-                self.rope.remove(prev_char_byte..self.cursor);
-                self.cursor = prev_char_byte;
-                self.dirty = true;
-                self.redo_stack.clear();
-                self.undo_stack.push(EditOperation {
-                    offset: prev_char_byte,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before,
-                });
-            }
+            let prev = self.cursor - 1;
+            let removed: String = self.rope.slice(prev..self.cursor).into();
+            self.rope.remove(prev..self.cursor);
+            self.cursor = prev;
+            self.dirty = true;
+            self.redo_stack.clear();
+            self.undo_stack.push(EditOperation {
+                offset: prev,
+                removed,
+                inserted: String::new(),
+                cursor_before,
+            });
         }
     }
 
     /// Delete the character after the cursor (delete key)
     pub fn delete_forward(&mut self) {
+        if self.is_binary { return; }
         // Delete selection if any
         if let Some(anchor) = self.selection_anchor.take() {
             let start = self.cursor.min(anchor);
@@ -236,22 +322,18 @@ impl Buffer {
             return;
         }
 
-        let len = self.rope.len_bytes();
-        if self.cursor < len {
-            let char_idx = self.rope.byte_to_char(self.cursor);
-            if char_idx < self.rope.len_chars() {
-                let next_char_byte = self.rope.char_to_byte(char_idx + 1);
-                let removed: String = self.rope.slice(self.cursor..next_char_byte).into();
-                self.rope.remove(self.cursor..next_char_byte);
-                self.dirty = true;
-                self.redo_stack.clear();
-                self.undo_stack.push(EditOperation {
-                    offset: self.cursor,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before: self.cursor,
-                });
-            }
+        if self.cursor < self.rope.len_chars() {
+            let next = self.cursor + 1;
+            let removed: String = self.rope.slice(self.cursor..next).into();
+            self.rope.remove(self.cursor..next);
+            self.dirty = true;
+            self.redo_stack.clear();
+            self.undo_stack.push(EditOperation {
+                offset: self.cursor,
+                removed,
+                inserted: String::new(),
+                cursor_before: self.cursor,
+            });
         }
     }
 
@@ -260,7 +342,7 @@ impl Buffer {
         if let Some(op) = self.undo_stack.pop() {
             // Reverse the operation
             if !op.inserted.is_empty() {
-                self.rope.remove(op.offset..op.offset + op.inserted.len());
+                self.rope.remove(op.offset..op.offset + op.inserted.chars().count());
             }
             if !op.removed.is_empty() {
                 self.rope.insert(op.offset, &op.removed);
@@ -275,12 +357,12 @@ impl Buffer {
     pub fn redo(&mut self) {
         if let Some(op) = self.redo_stack.pop() {
             if !op.removed.is_empty() {
-                self.rope.remove(op.offset..op.offset + op.removed.len());
+                self.rope.remove(op.offset..op.offset + op.removed.chars().count());
             }
             if !op.inserted.is_empty() {
                 self.rope.insert(op.offset, &op.inserted);
             }
-            self.cursor = op.offset + op.inserted.len();
+            self.cursor = op.offset + op.inserted.chars().count();
             self.dirty = true;
             self.undo_stack.push(op);
         }
@@ -307,52 +389,46 @@ impl Buffer {
     pub fn move_left_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
         if self.cursor > 0 {
-            let char_idx = self.rope.byte_to_char(self.cursor);
-            if char_idx > 0 {
-                self.cursor = self.rope.char_to_byte(char_idx - 1);
-            }
+            self.cursor -= 1;
         }
         self.desired_col = None;
     }
 
     pub fn move_right_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        if char_idx < self.rope.len_chars() {
-            self.cursor = self.rope.char_to_byte(char_idx + 1);
+        if self.cursor < self.rope.len_chars() {
+            self.cursor += 1;
         }
         self.desired_col = None;
     }
 
     pub fn move_up_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let line = self.rope.char_to_line(char_idx);
+        let line = self.rope.char_to_line(self.cursor);
         if line > 0 {
-            let current_col = char_idx - self.rope.line_to_char(line);
+            let current_col = self.cursor - self.rope.line_to_char(line);
             let target_col = self.desired_col.unwrap_or(current_col);
             self.desired_col = Some(target_col);
 
             let prev_line_start = self.rope.line_to_char(line - 1);
             let prev_line_len = self.rope.line(line - 1).len_chars().saturating_sub(1);
             let actual_col = target_col.min(prev_line_len);
-            self.cursor = self.rope.char_to_byte(prev_line_start + actual_col);
+            self.cursor = prev_line_start + actual_col;
         }
     }
 
     pub fn move_down_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let line = self.rope.char_to_line(char_idx);
+        let line = self.rope.char_to_line(self.cursor);
         if line < self.rope.len_lines().saturating_sub(1) {
-            let current_col = char_idx - self.rope.line_to_char(line);
+            let current_col = self.cursor - self.rope.line_to_char(line);
             let target_col = self.desired_col.unwrap_or(current_col);
             self.desired_col = Some(target_col);
 
             let next_line_start = self.rope.line_to_char(line + 1);
             let next_line_len = self.rope.line(line + 1).len_chars().saturating_sub(1);
             let actual_col = target_col.min(next_line_len);
-            self.cursor = self.rope.char_to_byte(next_line_start + actual_col);
+            self.cursor = next_line_start + actual_col;
         }
     }
 
@@ -361,17 +437,14 @@ impl Buffer {
 
     pub fn move_to_line_start_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let line = self.rope.char_to_line(char_idx);
-        let line_start = self.rope.line_to_char(line);
-        self.cursor = self.rope.char_to_byte(line_start);
+        let line = self.rope.char_to_line(self.cursor);
+        self.cursor = self.rope.line_to_char(line);
         self.desired_col = None;
     }
 
     pub fn move_to_line_end_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let line = self.rope.char_to_line(char_idx);
+        let line = self.rope.char_to_line(self.cursor);
         let line_start = self.rope.line_to_char(line);
         let line_len = self.rope.line(line).len_chars();
         let end = if line < self.rope.len_lines() - 1 {
@@ -379,7 +452,7 @@ impl Buffer {
         } else {
             line_start + line_len
         };
-        self.cursor = self.rope.char_to_byte(end);
+        self.cursor = end;
         self.desired_col = None;
     }
 
@@ -387,7 +460,7 @@ impl Buffer {
 
     pub fn select_all(&mut self) {
         self.selection_anchor = Some(0);
-        self.cursor = self.rope.len_bytes();
+        self.cursor = self.rope.len_chars();
     }
 
     pub fn get_selected_text(&self) -> Option<String> {
@@ -401,6 +474,7 @@ impl Buffer {
     /// Delete the current selection and return the removed text.
     /// Returns None if there is no selection.
     pub fn delete_selection(&mut self) -> Option<String> {
+        if self.is_binary { return None; }
         let anchor = self.selection_anchor.take()?;
         let start = self.cursor.min(anchor);
         let end = self.cursor.max(anchor);
@@ -427,8 +501,7 @@ impl Buffer {
             Some(text)
         } else {
             // Copy entire current line
-            let char_idx = self.rope.byte_to_char(self.cursor);
-            let line = self.rope.char_to_line(char_idx);
+            let line = self.rope.char_to_line(self.cursor);
             let line_text: String = self.rope.line(line).into();
             Some(line_text)
         }
@@ -436,28 +509,26 @@ impl Buffer {
 
     /// Cut: delete selection and return it (or cut entire current line if no selection)
     pub fn cut(&mut self) -> Option<String> {
+        if self.is_binary { return None; }
         if self.selection_anchor.is_some() {
             self.delete_selection()
         } else {
             // Cut entire current line
-            let char_idx = self.rope.byte_to_char(self.cursor);
-            let line = self.rope.char_to_line(char_idx);
+            let line = self.rope.char_to_line(self.cursor);
             let line_start = self.rope.line_to_char(line);
             let line_end = if line + 1 < self.rope.len_lines() {
                 self.rope.line_to_char(line + 1)
             } else {
                 self.rope.len_chars()
             };
-            let start_byte = self.rope.char_to_byte(line_start);
-            let end_byte = self.rope.char_to_byte(line_end);
-            let removed: String = self.rope.slice(start_byte..end_byte).into();
+            let removed: String = self.rope.slice(line_start..line_end).into();
             let cursor_before = self.cursor;
-            self.rope.remove(start_byte..end_byte);
-            self.cursor = start_byte;
+            self.rope.remove(line_start..line_end);
+            self.cursor = line_start;
             self.dirty = true;
             self.redo_stack.clear();
             self.undo_stack.push(EditOperation {
-                offset: start_byte,
+                offset: line_start,
                 removed: removed.clone(),
                 inserted: String::new(),
                 cursor_before,
@@ -475,11 +546,10 @@ impl Buffer {
     /// Move cursor to the beginning of the previous word
     pub fn move_word_left(&mut self) {
         self.selection_anchor = None;
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        if char_idx == 0 {
+        if self.cursor == 0 {
             return;
         }
-        let mut pos = char_idx;
+        let mut pos = self.cursor;
         // Skip whitespace/non-word chars going left
         while pos > 0 && !Self::is_word_char(self.rope.char(pos - 1)) {
             pos -= 1;
@@ -488,18 +558,17 @@ impl Buffer {
         while pos > 0 && Self::is_word_char(self.rope.char(pos - 1)) {
             pos -= 1;
         }
-        self.cursor = self.rope.char_to_byte(pos);
+        self.cursor = pos;
     }
 
     /// Move cursor to the end of the next word
     pub fn move_word_right(&mut self) {
         self.selection_anchor = None;
-        let char_idx = self.rope.byte_to_char(self.cursor);
         let len = self.rope.len_chars();
-        if char_idx >= len {
+        if self.cursor >= len {
             return;
         }
-        let mut pos = char_idx;
+        let mut pos = self.cursor;
         // Skip word chars going right
         while pos < len && Self::is_word_char(self.rope.char(pos)) {
             pos += 1;
@@ -508,38 +577,36 @@ impl Buffer {
         while pos < len && !Self::is_word_char(self.rope.char(pos)) {
             pos += 1;
         }
-        self.cursor = self.rope.char_to_byte(pos);
+        self.cursor = pos;
     }
 
     // --- Word-wise Deletion ---
 
     /// Delete backward to the previous word boundary (Opt+Backspace)
     pub fn delete_word_left(&mut self) {
+        if self.is_binary { return; }
         if self.selection_anchor.is_some() {
             self.delete_selection();
             return;
         }
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        if char_idx == 0 {
+        if self.cursor == 0 {
             return;
         }
-        let mut pos = char_idx;
+        let mut pos = self.cursor;
         while pos > 0 && !Self::is_word_char(self.rope.char(pos - 1)) {
             pos -= 1;
         }
         while pos > 0 && Self::is_word_char(self.rope.char(pos - 1)) {
             pos -= 1;
         }
-        let start_byte = self.rope.char_to_byte(pos);
-        let end_byte = self.cursor;
-        let removed: String = self.rope.slice(start_byte..end_byte).into();
+        let removed: String = self.rope.slice(pos..self.cursor).into();
         let cursor_before = self.cursor;
-        self.rope.remove(start_byte..end_byte);
-        self.cursor = start_byte;
+        self.rope.remove(pos..self.cursor);
+        self.cursor = pos;
         self.dirty = true;
         self.redo_stack.clear();
         self.undo_stack.push(EditOperation {
-            offset: start_byte,
+            offset: pos,
             removed,
             inserted: String::new(),
             cursor_before,
@@ -548,26 +615,25 @@ impl Buffer {
 
     /// Delete forward to the next word boundary (Opt+Delete)
     pub fn delete_word_right(&mut self) {
+        if self.is_binary { return; }
         if self.selection_anchor.is_some() {
             self.delete_selection();
             return;
         }
-        let char_idx = self.rope.byte_to_char(self.cursor);
         let len = self.rope.len_chars();
-        if char_idx >= len {
+        if self.cursor >= len {
             return;
         }
-        let mut pos = char_idx;
+        let mut pos = self.cursor;
         while pos < len && Self::is_word_char(self.rope.char(pos)) {
             pos += 1;
         }
         while pos < len && !Self::is_word_char(self.rope.char(pos)) {
             pos += 1;
         }
-        let end_byte = self.rope.char_to_byte(pos);
-        let removed: String = self.rope.slice(self.cursor..end_byte).into();
+        let removed: String = self.rope.slice(self.cursor..pos).into();
         let cursor_before = self.cursor;
-        self.rope.remove(self.cursor..end_byte);
+        self.rope.remove(self.cursor..pos);
         self.dirty = true;
         self.redo_stack.clear();
         self.undo_stack.push(EditOperation {
@@ -589,29 +655,26 @@ impl Buffer {
     /// Move cursor to the very end of the document
     pub fn move_to_end(&mut self) {
         self.selection_anchor = None;
-        self.cursor = self.rope.len_bytes();
+        self.cursor = self.rope.len_chars();
     }
 
     // --- Line Operations ---
 
     /// Duplicate the current line below the cursor
     pub fn duplicate_line(&mut self) {
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let line = self.rope.char_to_line(char_idx);
+        if self.is_binary { return; }
+        let line = self.rope.char_to_line(self.cursor);
         let line_text: String = self.rope.line(line).into();
-        let col = char_idx - self.rope.line_to_char(line);
+        let col = self.cursor - self.rope.line_to_char(line);
 
         // Find insertion point (end of current line including newline)
-        let insert_char = if line + 1 < self.rope.len_lines() {
+        let insert_pos = if line + 1 < self.rope.len_lines() {
             self.rope.line_to_char(line + 1)
         } else {
-            // Last line — need to add a newline first
             self.rope.len_chars()
         };
-        let insert_byte = self.rope.char_to_byte(insert_char);
 
         let text_to_insert = if line + 1 >= self.rope.len_lines() {
-            // We're on the last line, we need a newline before the duplicate
             let mut t = String::from("\n");
             t.push_str(line_text.trim_end_matches(&['\n', '\r']));
             t
@@ -620,11 +683,11 @@ impl Buffer {
         };
 
         let cursor_before = self.cursor;
-        self.rope.insert(insert_byte, &text_to_insert);
+        self.rope.insert(insert_pos, &text_to_insert);
         self.dirty = true;
         self.redo_stack.clear();
         self.undo_stack.push(EditOperation {
-            offset: insert_byte,
+            offset: insert_pos,
             removed: String::new(),
             inserted: text_to_insert,
             cursor_before,
@@ -634,13 +697,13 @@ impl Buffer {
         let new_line_start = self.rope.line_to_char(line + 1);
         let new_line_len = self.rope.line(line + 1).len_chars();
         let target_col = col.min(new_line_len.saturating_sub(1));
-        self.cursor = self.rope.char_to_byte(new_line_start + target_col);
+        self.cursor = new_line_start + target_col;
     }
 
     /// Toggle line comment for the current line or each line in the selection
     pub fn toggle_comment(&mut self, comment_prefix: &str) {
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let cursor_line = self.rope.char_to_line(char_idx);
+        if self.is_binary { return; }
+        let cursor_line = self.rope.char_to_line(self.cursor);
 
         let (start_line, end_line) = if let Some(anchor) = self.selection_anchor {
             let anchor_line = self.rope.char_to_line(anchor);
@@ -659,6 +722,7 @@ impl Buffer {
         });
 
         let cursor_before = self.cursor;
+        let cursor_col = self.cursor - self.rope.line_to_char(cursor_line);
 
         // Apply comment toggle line by line (reverse order to keep offsets valid)
         for l in (start_line..=end_line).rev() {
@@ -666,33 +730,33 @@ impl Buffer {
             let line: String = self.rope.line(l).into();
             let leading_ws: String = line.chars().take_while(|c| c.is_whitespace()).collect();
             let leading_ws_chars = leading_ws.chars().count();
-            let insert_char_pos = line_start_char + leading_ws_chars;
-            let insert_byte = self.rope.char_to_byte(insert_char_pos);
+            let insert_pos = line_start_char + leading_ws_chars;
 
             if all_commented {
                 // Remove comment prefix
                 let after_ws = &line[leading_ws.len()..];
-                let remove_len = if after_ws.starts_with(&prefix_with_space) {
+                let remove_len_bytes = if after_ws.starts_with(&prefix_with_space) {
                     prefix_with_space.len()
                 } else if after_ws.starts_with(comment_prefix) {
                     comment_prefix.len()
                 } else {
                     continue;
                 };
-                let remove_end = insert_byte + remove_len;
-                let removed: String = self.rope.slice(insert_byte..remove_end).into();
-                self.rope.remove(insert_byte..remove_end);
+                let remove_chars = after_ws[..remove_len_bytes].chars().count();
+                let remove_end = insert_pos + remove_chars;
+                let removed: String = self.rope.slice(insert_pos..remove_end).into();
+                self.rope.remove(insert_pos..remove_end);
                 self.undo_stack.push(EditOperation {
-                    offset: insert_byte,
+                    offset: insert_pos,
                     removed,
                     inserted: String::new(),
                     cursor_before,
                 });
             } else {
                 // Add comment prefix
-                self.rope.insert(insert_byte, &prefix_with_space);
+                self.rope.insert(insert_pos, &prefix_with_space);
                 self.undo_stack.push(EditOperation {
-                    offset: insert_byte,
+                    offset: insert_pos,
                     removed: String::new(),
                     inserted: prefix_with_space.clone(),
                     cursor_before,
@@ -702,13 +766,13 @@ impl Buffer {
 
         self.dirty = true;
         self.redo_stack.clear();
-        // Re-anchor cursor to current position
         self.selection_anchor = None;
         // Keep cursor on the same line, clamped
-        let new_line_start = self.rope.line_to_char(cursor_line.min(self.rope.len_lines().saturating_sub(1)));
-        let new_line_len = self.rope.line(cursor_line.min(self.rope.len_lines().saturating_sub(1))).len_chars();
-        let new_col = (char_idx - self.rope.line_to_char(cursor_line)).min(new_line_len.saturating_sub(1));
-        self.cursor = self.rope.char_to_byte(new_line_start + new_col);
+        let clamped_line = cursor_line.min(self.rope.len_lines().saturating_sub(1));
+        let new_line_start = self.rope.line_to_char(clamped_line);
+        let new_line_len = self.rope.line(clamped_line).len_chars();
+        let new_col = cursor_col.min(new_line_len.saturating_sub(1));
+        self.cursor = new_line_start + new_col;
     }
 
     // --- Bracket Matching ---
@@ -716,9 +780,9 @@ impl Buffer {
     const BRACKET_PAIRS: &'static [(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}')];
 
     /// Find the matching bracket for the character at or near the cursor.
-    /// Returns the byte offset of the matching bracket, or None.
+    /// Returns the char index of the matching bracket, or None.
     pub fn find_matching_bracket(&self) -> Option<usize> {
-        let char_idx = self.rope.byte_to_char(self.cursor);
+        let char_idx = self.cursor;
         let len = self.rope.len_chars();
         if len == 0 {
             return None;
@@ -739,7 +803,7 @@ impl Buffer {
                     let c = self.rope.char(pos);
                     if c == open { depth += 1; }
                     if c == close { depth -= 1; }
-                    if depth == 0 { return Some(self.rope.char_to_byte(pos)); }
+                    if depth == 0 { return Some(pos); }
                     pos += 1;
                 }
             }
@@ -752,7 +816,7 @@ impl Buffer {
                     let c = self.rope.char(pos);
                     if c == close { depth += 1; }
                     if c == open { depth -= 1; }
-                    if depth == 0 { return Some(self.rope.char_to_byte(pos)); }
+                    if depth == 0 { return Some(pos); }
                 }
             }
         }
@@ -764,11 +828,11 @@ impl Buffer {
     /// Insert text with auto-close for brackets and quotes.
     /// Returns true if it handled the input (caller should not insert again).
     pub fn insert_with_autoclose(&mut self, text: &str) -> bool {
+        if self.is_binary { return false; }
         if text.len() != 1 {
             return false;
         }
         let ch = text.chars().next().unwrap();
-        let char_idx = self.rope.byte_to_char(self.cursor);
         let len = self.rope.len_chars();
 
         // Auto-close pairs
@@ -783,8 +847,8 @@ impl Buffer {
 
         // If typing a closing bracket and the next char is already that closer, skip over it
         let closers = [')', ']', '}', '"', '\''];
-        if closers.contains(&ch) && char_idx < len && self.rope.char(char_idx) == ch {
-            self.cursor = self.rope.char_to_byte(char_idx + 1);
+        if closers.contains(&ch) && self.cursor < len && self.rope.char(self.cursor) == ch {
+            self.cursor += 1;
             self.selection_anchor = None;
             return true;
         }
@@ -794,9 +858,8 @@ impl Buffer {
             let pair = format!("{}{}", ch, closer);
             self.insert_text(&pair);
             // Move cursor back one (between the pair)
-            let new_char = self.rope.byte_to_char(self.cursor);
-            if new_char > 0 {
-                self.cursor = self.rope.char_to_byte(new_char - 1);
+            if self.cursor > 0 {
+                self.cursor -= 1;
             }
             return true;
         }
@@ -806,51 +869,69 @@ impl Buffer {
 
     // --- Smart Auto-Indent ---
 
-    /// Insert a newline with smart indentation:
-    /// - Copies leading whitespace from current line
-    /// - Adds extra indent after { ( [
-    /// - Splits {} () [] pairs into three lines
+    /// Insert a newline with smart indentation
     pub fn insert_newline(&mut self, line_ending: &str) {
+        if self.is_binary { return; }
         // Delete selection first
         if self.selection_anchor.is_some() {
             self.delete_selection();
         }
 
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let line = self.rope.char_to_line(char_idx);
+        let line = self.rope.char_to_line(self.cursor);
         let line_text: String = self.rope.line(line).into();
 
         // Get leading whitespace
         let leading_ws: String = line_text.chars().take_while(|c| c.is_whitespace() && *c != '\n' && *c != '\r').collect();
 
         // Check char before cursor
-        let char_before = if char_idx > 0 { Some(self.rope.char(char_idx - 1)) } else { None };
-        let char_after = if char_idx < self.rope.len_chars() { Some(self.rope.char(char_idx)) } else { None };
+        let char_before = if self.cursor > 0 { Some(self.rope.char(self.cursor - 1)) } else { None };
+        let char_after = if self.cursor < self.rope.len_chars() { Some(self.rope.char(self.cursor)) } else { None };
 
         let openers = ['{', '(', '['];
         let closers = ['}', ')', ']'];
 
-        // Check if we're between a bracket pair: {|} or (|) or [|]
         let between_brackets = char_before.map_or(false, |b| openers.contains(&b))
             && char_after.map_or(false, |a| closers.contains(&a));
 
         if between_brackets {
-            // Split into three lines:
-            // line_ending + indent + extra_indent + line_ending + indent
             let indent = format!("{}    ", leading_ws);
             let text = format!("{}{}{}{}", line_ending, indent, line_ending, leading_ws);
             self.insert_text(&text);
-            // Move cursor to the middle line (after the first newline + indent)
-            let target = self.cursor - line_ending.len() - leading_ws.len();
+            // Move cursor to the middle line
+            let target = self.cursor - line_ending.chars().count() - leading_ws.chars().count();
             self.cursor = target;
         } else if char_before.map_or(false, |b| openers.contains(&b)) {
-            // Add extra indent
             let text = format!("{}{}    ", line_ending, leading_ws);
             self.insert_text(&text);
         } else {
-            // Normal: just preserve indentation
             let text = format!("{}{}", line_ending, leading_ws);
             self.insert_text(&text);
+        }
+    }
+
+    // --- Word Selection ---
+
+    /// Select the word under the cursor
+    pub fn select_word_at_cursor(&mut self) {
+        let len = self.rope.len_chars();
+        if len == 0 { return; }
+
+        let pos = self.cursor.min(len.saturating_sub(1));
+        let ch = self.rope.char(pos);
+
+        if Self::is_word_char(ch) {
+            // Expand left
+            let mut start = pos;
+            while start > 0 && Self::is_word_char(self.rope.char(start - 1)) {
+                start -= 1;
+            }
+            // Expand right
+            let mut end = pos;
+            while end < len && Self::is_word_char(self.rope.char(end)) {
+                end += 1;
+            }
+            self.selection_anchor = Some(start);
+            self.cursor = end;
         }
     }
 
@@ -858,16 +939,14 @@ impl Buffer {
 
     /// Get the line number the cursor is on (0-indexed)
     pub fn cursor_line(&self) -> usize {
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        self.rope.char_to_line(char_idx)
+        self.rope.char_to_line(self.cursor)
     }
 
     /// Get the column the cursor is on (0-indexed)
     pub fn cursor_col(&self) -> usize {
-        let char_idx = self.rope.byte_to_char(self.cursor);
-        let line = self.rope.char_to_line(char_idx);
+        let line = self.rope.char_to_line(self.cursor);
         let line_start = self.rope.line_to_char(line);
-        char_idx - line_start
+        self.cursor - line_start
     }
 
     /// Get the total number of lines
@@ -908,6 +987,13 @@ impl Buffer {
         } else {
             self.scroll_y += diff * 0.5; // Snappy lerp
         }
+        // Horizontal smooth scroll
+        let diff_x = self.scroll_x_target - self.scroll_x;
+        if diff_x.abs() < 0.1 {
+            self.scroll_x = self.scroll_x_target;
+        } else {
+            self.scroll_x += diff_x * 0.5;
+        }
     }
 
     /// Scroll by a number of lines (animated — for mouse wheel clicks)
@@ -923,6 +1009,19 @@ impl Buffer {
         self.scroll_y_target = self.scroll_y;
     }
 
+    /// Scroll horizontally
+    pub fn scroll_horizontal(&mut self, delta_px: f32) {
+        if self.wrap_enabled { return; }
+        self.scroll_x_target = (self.scroll_x_target + delta_px).max(0.0);
+    }
+
+    /// Scroll horizontally directly (trackpad)
+    pub fn scroll_horizontal_direct(&mut self, delta_px: f32) {
+        if self.wrap_enabled { return; }
+        self.scroll_x = (self.scroll_x + delta_px).max(0.0);
+        self.scroll_x_target = self.scroll_x;
+    }
+
     /// Ensure cursor is visible on screen
     pub fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         let cursor_line = self.cursor_line() as f64;
@@ -935,7 +1034,20 @@ impl Buffer {
             self.scroll_y_target = cursor_line - visible_lines as f64 + margin;
         }
     }
-    /// Calculate character index from pixel coordinates (logical)
+
+    /// Ensure cursor is visible horizontally
+    pub fn ensure_cursor_visible_x(&mut self, char_width: f32, editor_width: f32) {
+        if self.wrap_enabled { return; }
+        let cursor_x = self.cursor_col() as f32 * char_width;
+        let margin = char_width * 4.0;
+        if cursor_x < self.scroll_x_target + margin {
+            self.scroll_x_target = (cursor_x - margin).max(0.0);
+        } else if cursor_x > self.scroll_x_target + editor_width - margin {
+            self.scroll_x_target = cursor_x - editor_width + margin;
+        }
+    }
+
+    /// Calculate char index from pixel coordinates (logical, unscaled)
     pub fn char_at_pos(&self, x: f32, y: f32, x_offset: f32, line_height: f32, char_width: f32) -> usize {
         let total_lines = self.rope.len_lines();
         if total_lines == 0 {
@@ -947,14 +1059,14 @@ impl Buffer {
         let line_idx = (relative_y / line_height).floor() as usize;
         let line_idx = line_idx.min(total_lines.saturating_sub(1));
 
-        // Adjust for x_offset (gutter + padding)
-        let relative_x = (x - x_offset).max(0.0);
+        // Adjust for x_offset (gutter + padding) and horizontal scroll
+        let relative_x = (x - x_offset + self.scroll_x).max(0.0);
         let col_idx = (relative_x / char_width).round() as usize;
-        
+
         // Get the actual line and clamp column
         let line = self.rope.line(line_idx);
         let line_len = line.len_chars();
-        // Don't include the trailing newline in the column clamp if possible
+        // Don't include the trailing newline in the column clamp
         let max_col = if line_len > 0 && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r') {
             if line_len > 1 && line.char(line_len - 1) == '\n' && line.char(line_len - 2) == '\r' {
                 line_len.saturating_sub(2)
@@ -964,9 +1076,9 @@ impl Buffer {
         } else {
             line_len
         };
-        
+
         let col_idx = col_idx.min(max_col);
-        
+
         self.rope.line_to_char(line_idx) + col_idx
     }
 

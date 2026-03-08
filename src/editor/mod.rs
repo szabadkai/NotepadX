@@ -46,8 +46,18 @@ impl Editor {
             buffer.language_index = syntax.detect_language(&filename);
         }
 
-        self.buffers.push(buffer);
-        self.active_buffer = self.buffers.len() - 1;
+        // Replace empty untitled tab instead of adding a new one
+        if self.buffers.len() == 1
+            && self.buffers[0].file_path.is_none()
+            && !self.buffers[0].dirty
+            && self.buffers[0].rope.len_chars() == 0
+        {
+            self.buffers[0] = buffer;
+            self.active_buffer = 0;
+        } else {
+            self.buffers.push(buffer);
+            self.active_buffer = self.buffers.len() - 1;
+        }
         Ok(())
     }
 
@@ -63,6 +73,18 @@ impl Editor {
             self.buffers.remove(self.active_buffer);
             if self.active_buffer >= self.buffers.len() {
                 self.active_buffer = self.buffers.len() - 1;
+            }
+        }
+    }
+
+    /// Close a specific tab by index
+    pub fn close_tab(&mut self, index: usize) {
+        if self.buffers.len() > 1 && index < self.buffers.len() {
+            self.buffers.remove(index);
+            if self.active_buffer >= self.buffers.len() {
+                self.active_buffer = self.buffers.len() - 1;
+            } else if self.active_buffer > index {
+                self.active_buffer -= 1;
             }
         }
     }
