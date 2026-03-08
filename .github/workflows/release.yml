@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: notepadx
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: notepadx
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: notepadx
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: notepadx.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # macOS: create .app bundle
+      - name: Create macOS .app bundle
+        if: runner.os == 'macOS'
+        run: |
+          APP_DIR="NotepadX.app/Contents"
+          mkdir -p "$APP_DIR/MacOS"
+          mkdir -p "$APP_DIR/Resources"
+          cp target/${{ matrix.target }}/release/notepadx "$APP_DIR/MacOS/NotepadX"
+          cp assets/logo.icns "$APP_DIR/Resources/AppIcon.icns"
+          cat > "$APP_DIR/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>NotepadX</string>
+            <key>CFBundleDisplayName</key>
+            <string>NotepadX</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.notepadx.app</string>
+            <key>CFBundleVersion</key>
+            <string>0.1.0</string>
+            <key>CFBundleShortVersionString</key>
+            <string>0.1.0</string>
+            <key>CFBundleExecutable</key>
+            <string>NotepadX</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Zip macOS .app
+        if: runner.os == 'macOS'
+        run: zip -r NotepadX-${{ matrix.target }}.zip NotepadX.app
+
+      - name: Upload macOS .app
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NotepadX-${{ matrix.target }}.app
+          path: NotepadX-${{ matrix.target }}.zip
+
+      # Linux / Windows: upload raw binary
+      - name: Upload binary
+        if: runner.os != 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notepadx-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Move and rename macOS apps
+          if [ -f artifacts/NotepadX-x86_64-apple-darwin.app/NotepadX-x86_64-apple-darwin.zip ]; then
+            mv artifacts/NotepadX-x86_64-apple-darwin.app/NotepadX-x86_64-apple-darwin.zip release-assets/NotepadX-macos-x86_64.zip
+          fi
+          if [ -f artifacts/NotepadX-aarch64-apple-darwin.app/NotepadX-aarch64-apple-darwin.zip ]; then
+            mv artifacts/NotepadX-aarch64-apple-darwin.app/NotepadX-aarch64-apple-darwin.zip release-assets/NotepadX-macos-arm64.zip
+          fi
+          # Move Linux binary
+          if [ -f artifacts/notepadx-x86_64-unknown-linux-gnu/notepadx ]; then
+            mv artifacts/notepadx-x86_64-unknown-linux-gnu/notepadx release-assets/notepadx-linux-x86_64
+          fi
+          # Move Windows binary
+          if [ -f artifacts/notepadx-x86_64-pc-windows-msvc/notepadx.exe ]; then
+            mv artifacts/notepadx-x86_64-pc-windows-msvc/notepadx.exe release-assets/notepadx-windows-x86_64.exe
+          fi
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
