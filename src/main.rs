@@ -10,8 +10,8 @@ mod theme;
 
 use anyhow::Result;
 use editor::Editor;
-use overlay::{ActiveOverlay, OverlayState};
 use overlay::palette::CommandId;
+use overlay::{ActiveOverlay, OverlayState};
 use renderer::Renderer;
 use settings::AppConfig;
 use std::sync::Arc;
@@ -105,7 +105,9 @@ impl App {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window.clone()).expect("Failed to create surface");
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("Failed to create surface");
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -148,7 +150,13 @@ impl App {
         };
         surface.configure(&device, &config);
 
-        let mut renderer = Renderer::new(&device, queue.clone(), surface_format, size.width, size.height);
+        let mut renderer = Renderer::new(
+            &device,
+            queue.clone(),
+            surface_format,
+            size.width,
+            size.height,
+        );
         renderer.resize(size.width, size.height, window.scale_factor() as f32);
 
         self.window = Some(window);
@@ -169,14 +177,23 @@ impl App {
         self.editor.active_mut().update_scroll();
 
         // Check if still animating
-        let scroll_diff_y = (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
-        let scroll_diff_x = (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
+        let scroll_diff_y =
+            (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
+        let scroll_diff_x =
+            (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
         if scroll_diff_y > 0.1 || scroll_diff_x > 0.1 {
             self.needs_redraw = true;
         }
 
         // Update text buffers
-        renderer.update_buffers(&self.editor, &self.theme, &self.syntax, &self.overlay, &self.config, self.settings_cursor);
+        renderer.update_buffers(
+            &self.editor,
+            &self.theme,
+            &self.syntax,
+            &self.overlay,
+            &self.config,
+            self.settings_cursor,
+        );
 
         // Get surface texture
         let output = match surface.get_current_texture() {
@@ -188,12 +205,13 @@ impl App {
                     backends: wgpu::Backends::all(),
                     ..Default::default()
                 });
-                let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: Some(surface),
-                    force_fallback_adapter: false,
-                }))
-                .expect("Failed to find GPU adapter");
+                let adapter =
+                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: Some(surface),
+                        force_fallback_adapter: false,
+                    }))
+                    .expect("Failed to find GPU adapter");
 
                 let (device_raw, queue_raw) = pollster::block_on(adapter.request_device(
                     &wgpu::DeviceDescriptor {
@@ -228,7 +246,13 @@ impl App {
                 };
                 surface.configure(&device, &config);
 
-                let renderer = Renderer::new(&device, queue.clone(), surface_format, size.width, size.height);
+                let renderer = Renderer::new(
+                    &device,
+                    queue.clone(),
+                    surface_format,
+                    size.width,
+                    size.height,
+                );
 
                 self.device = Some(device);
                 self.queue = Some(queue);
@@ -242,12 +266,22 @@ impl App {
             }
         };
 
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("NotepadX Encoder"),
         });
 
-        renderer.render(device, queue, &self.editor, &self.theme, &self.overlay, &mut encoder, &view);
+        renderer.render(
+            device,
+            queue,
+            &self.editor,
+            &self.theme,
+            &self.overlay,
+            &mut encoder,
+            &view,
+        );
 
         queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -261,9 +295,13 @@ impl App {
             let name = self.editor.active().display_name();
             rfd::MessageDialog::new()
                 .set_title("Unsaved Changes")
-                .set_description(&format!("\"{}\" has unsaved changes. Close without saving?", name))
+                .set_description(&format!(
+                    "\"{}\" has unsaved changes. Close without saving?",
+                    name
+                ))
                 .set_buttons(rfd::MessageButtons::YesNo)
-                .show() == rfd::MessageDialogResult::Yes
+                .show()
+                == rfd::MessageDialogResult::Yes
         } else {
             true
         };
@@ -274,11 +312,15 @@ impl App {
 
     fn handle_mouse_click(&mut self, is_double: bool) {
         let (x, y) = self.mouse_pos;
-        let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0);
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{TAB_BAR_HEIGHT, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
+        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, TAB_BAR_HEIGHT};
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
@@ -294,9 +336,13 @@ impl App {
                                 let name = self.editor.buffers[i].display_name();
                                 rfd::MessageDialog::new()
                                     .set_title("Unsaved Changes")
-                                    .set_description(&format!("\"{}\" has unsaved changes. Close without saving?", name))
+                                    .set_description(&format!(
+                                        "\"{}\" has unsaved changes. Close without saving?",
+                                        name
+                                    ))
                                     .set_buttons(rfd::MessageButtons::YesNo)
-                                    .show() == rfd::MessageDialogResult::Yes
+                                    .show()
+                                    == rfd::MessageDialogResult::Yes
                             } else {
                                 true
                             };
@@ -322,7 +368,7 @@ impl App {
                 editor_y as f32,
                 GUTTER_WIDTH + LINE_PADDING_LEFT,
                 LINE_HEIGHT,
-                CHAR_WIDTH
+                CHAR_WIDTH,
             );
 
             if shift {
@@ -345,26 +391,30 @@ impl App {
 
     fn handle_mouse_drag(&mut self) {
         let (x, y) = self.mouse_pos;
-        let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0);
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{TAB_BAR_HEIGHT, GUTTER_WIDTH, LINE_PADDING_LEFT, LINE_HEIGHT, CHAR_WIDTH};
+        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, TAB_BAR_HEIGHT};
 
         if y >= TAB_BAR_HEIGHT as f64 {
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
-            
+
             let buffer = self.editor.active_mut();
             if buffer.selection_anchor.is_none() {
                 buffer.selection_anchor = Some(buffer.cursor);
             }
-            
+
             let new_pos = buffer.char_at_pos(
-                x as f32, 
-                editor_y as f32, 
-                GUTTER_WIDTH + LINE_PADDING_LEFT, 
-                LINE_HEIGHT, 
-                CHAR_WIDTH
+                x as f32,
+                editor_y as f32,
+                GUTTER_WIDTH + LINE_PADDING_LEFT,
+                LINE_HEIGHT,
+                CHAR_WIDTH,
             );
             buffer.cursor = new_pos;
         }
@@ -448,7 +498,11 @@ impl App {
         match &event.logical_key {
             // File Operations
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "s" => {
-                if shift { self.save_as(); } else { self.save(); }
+                if shift {
+                    self.save_as();
+                } else {
+                    self.save();
+                }
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "o" => {
                 self.open_file();
@@ -486,7 +540,11 @@ impl App {
 
             // Undo/Redo
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "z" => {
-                if shift { self.editor.active_mut().redo(); } else { self.editor.active_mut().undo(); }
+                if shift {
+                    self.editor.active_mut().redo();
+                } else {
+                    self.editor.active_mut().undo();
+                }
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "y" => {
                 self.editor.active_mut().redo();
@@ -498,7 +556,9 @@ impl App {
             }
 
             // Duplicate Line (Cmd+Shift+D)
-            Key::Character(c) if cmd_or_ctrl && shift && (c.as_str() == "d" || c.as_str() == "D") => {
+            Key::Character(c)
+                if cmd_or_ctrl && shift && (c.as_str() == "d" || c.as_str() == "D") =>
+            {
                 self.editor.active_mut().duplicate_line();
             }
 
@@ -530,12 +590,20 @@ impl App {
             }
 
             // Navigation — line start/end (Cmd+Left/Right)
-            Key::Named(NamedKey::ArrowLeft) if cmd_or_ctrl => self.editor.active_mut().move_to_line_start_sel(shift),
-            Key::Named(NamedKey::ArrowRight) if cmd_or_ctrl => self.editor.active_mut().move_to_line_end_sel(shift),
+            Key::Named(NamedKey::ArrowLeft) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_line_start_sel(shift)
+            }
+            Key::Named(NamedKey::ArrowRight) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_line_end_sel(shift)
+            }
 
             // Navigation — document start/end (Cmd+Up/Down or Cmd+Home/End)
-            Key::Named(NamedKey::ArrowUp) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
-            Key::Named(NamedKey::ArrowDown) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
+            Key::Named(NamedKey::ArrowUp) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_start()
+            }
+            Key::Named(NamedKey::ArrowDown) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_end()
+            }
             Key::Named(NamedKey::Home) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
             Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
 
@@ -551,12 +619,24 @@ impl App {
             Key::Named(NamedKey::Home) => self.editor.active_mut().move_to_line_start_sel(shift),
             Key::Named(NamedKey::End) => self.editor.active_mut().move_to_line_end_sel(shift),
             Key::Named(NamedKey::PageUp) => {
-                let visible = self.renderer.as_ref().map(|r| r.visible_lines()).unwrap_or(20);
-                for _ in 0..visible { self.editor.active_mut().move_up_sel(shift); }
+                let visible = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.visible_lines())
+                    .unwrap_or(20);
+                for _ in 0..visible {
+                    self.editor.active_mut().move_up_sel(shift);
+                }
             }
             Key::Named(NamedKey::PageDown) => {
-                let visible = self.renderer.as_ref().map(|r| r.visible_lines()).unwrap_or(20);
-                for _ in 0..visible { self.editor.active_mut().move_down_sel(shift); }
+                let visible = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.visible_lines())
+                    .unwrap_or(20);
+                for _ in 0..visible {
+                    self.editor.active_mut().move_down_sel(shift);
+                }
             }
 
             // Editing — word-wise deletion
@@ -592,9 +672,23 @@ impl App {
         if let Some(renderer) = &self.renderer {
             let visible = renderer.visible_lines();
             self.editor.active_mut().ensure_cursor_visible(visible);
-            let win_width = self.window.as_ref().map(|w| w.inner_size().width).unwrap_or(1200) as f32 / self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
-            let editor_width = win_width - renderer::GUTTER_WIDTH - renderer::LINE_PADDING_LEFT - renderer::SCROLLBAR_WIDTH;
-            self.editor.active_mut().ensure_cursor_visible_x(renderer::CHAR_WIDTH, editor_width);
+            let win_width = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().width)
+                .unwrap_or(1200) as f32
+                / self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
+            let editor_width = win_width
+                - renderer::GUTTER_WIDTH
+                - renderer::LINE_PADDING_LEFT
+                - renderer::SCROLLBAR_WIDTH;
+            self.editor
+                .active_mut()
+                .ensure_cursor_visible_x(renderer::CHAR_WIDTH, editor_width);
         }
 
         self.needs_redraw = true;
@@ -614,7 +708,9 @@ impl App {
                     // Replace current match
                     let replacement = self.overlay.replace_input.clone();
                     let rope = &mut self.editor.active_mut().rope;
-                    if let Some((_removed, offset)) = self.overlay.find.replace_current(rope, &replacement) {
+                    if let Some((_removed, offset)) =
+                        self.overlay.find.replace_current(rope, &replacement)
+                    {
                         // offset is a byte offset from find; convert to char
                         let char_offset = self.editor.active().rope.byte_to_char(offset);
                         self.editor.active_mut().cursor = char_offset + replacement.chars().count();
@@ -651,20 +747,26 @@ impl App {
                 self.overlay.move_input_right();
             }
             Key::Named(NamedKey::ArrowDown) => {
-                if self.overlay.active == ActiveOverlay::Find || self.overlay.active == ActiveOverlay::FindReplace {
+                if self.overlay.active == ActiveOverlay::Find
+                    || self.overlay.active == ActiveOverlay::FindReplace
+                {
                     self.overlay.find.next_match();
                     self.jump_to_current_match();
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                if self.overlay.active == ActiveOverlay::Find || self.overlay.active == ActiveOverlay::FindReplace {
+                if self.overlay.active == ActiveOverlay::Find
+                    || self.overlay.active == ActiveOverlay::FindReplace
+                {
                     self.overlay.find.prev_match();
                     self.jump_to_current_match();
                 }
             }
             // Cmd+G for next match in find
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "g" => {
-                if self.overlay.active == ActiveOverlay::Find || self.overlay.active == ActiveOverlay::FindReplace {
+                if self.overlay.active == ActiveOverlay::Find
+                    || self.overlay.active == ActiveOverlay::FindReplace
+                {
                     self.overlay.find.next_match();
                     self.jump_to_current_match();
                 }
@@ -815,9 +917,16 @@ impl App {
                     self.settings_cursor += 1;
                 }
             }
-            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) |
-            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowRight) => {
-                let increment = matches!(key, Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space));
+            Key::Named(NamedKey::Enter)
+            | Key::Named(NamedKey::Space)
+            | Key::Named(NamedKey::ArrowLeft)
+            | Key::Named(NamedKey::ArrowRight) => {
+                let increment = matches!(
+                    key,
+                    Key::Named(NamedKey::ArrowRight)
+                        | Key::Named(NamedKey::Enter)
+                        | Key::Named(NamedKey::Space)
+                );
                 match self.settings_cursor {
                     0 => {
                         // Theme
@@ -969,7 +1078,9 @@ impl ApplicationHandler for App {
                 attrs = attrs.with_window_icon(Some(icon));
             }
 
-            let window = event_loop.create_window(attrs).expect("Failed to create window");
+            let window = event_loop
+                .create_window(attrs)
+                .expect("Failed to create window");
             let window = Arc::new(window);
             self.init_gpu(window);
         }
@@ -1005,7 +1116,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = (position.x, position.y);
-                
+
                 // Update cursor icon
                 if let Some(window) = &self.window {
                     let scale = window.scale_factor();
@@ -1030,7 +1141,9 @@ impl ApplicationHandler for App {
                         let now = std::time::Instant::now();
                         let elapsed = now.duration_since(self.last_click_time);
                         let (cx, cy) = self.mouse_pos;
-                        let dist = ((cx - self.last_click_pos.0).powi(2) + (cy - self.last_click_pos.1).powi(2)).sqrt();
+                        let dist = ((cx - self.last_click_pos.0).powi(2)
+                            + (cy - self.last_click_pos.1).powi(2))
+                        .sqrt();
                         let is_double = elapsed.as_millis() < 400 && dist < 5.0;
                         self.suppress_drag = is_double;
                         self.handle_mouse_click(is_double);
@@ -1052,14 +1165,18 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(x, y) => {
                         self.editor.active_mut().scroll(-y as f64 * 3.0);
                         if x.abs() > 0.0 {
-                            self.editor.active_mut().scroll_horizontal(x * renderer::CHAR_WIDTH * 3.0);
+                            self.editor
+                                .active_mut()
+                                .scroll_horizontal(x * renderer::CHAR_WIDTH * 3.0);
                         }
                     }
                     MouseScrollDelta::PixelDelta(pos) => {
                         let lines = -pos.y / renderer::LINE_HEIGHT as f64;
                         self.editor.active_mut().scroll_direct(lines);
                         if pos.x.abs() > 0.0 {
-                            self.editor.active_mut().scroll_horizontal_direct(-pos.x as f32);
+                            self.editor
+                                .active_mut()
+                                .scroll_horizontal_direct(-pos.x as f32);
                         }
                     }
                 }
@@ -1091,8 +1208,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let scroll_diff_y = (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
-        let scroll_diff_x = (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
+        let scroll_diff_y =
+            (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
+        let scroll_diff_x =
+            (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
         if scroll_diff_y > 0.1 || scroll_diff_x > 0.1 {
             if let Some(window) = &self.window {
                 window.request_redraw();

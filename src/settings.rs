@@ -56,7 +56,10 @@ impl AppConfig {
         #[cfg(target_os = "macos")]
         {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".config").join("notepadx").join("config.json")
+            PathBuf::from(home)
+                .join(".config")
+                .join("notepadx")
+                .join("config.json")
         }
         #[cfg(target_os = "windows")]
         {
@@ -66,7 +69,10 @@ impl AppConfig {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".config").join("notepadx").join("config.json")
+            PathBuf::from(home)
+                .join(".config")
+                .join("notepadx")
+                .join("config.json")
         }
     }
 

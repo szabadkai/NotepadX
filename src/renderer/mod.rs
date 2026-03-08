@@ -1,7 +1,7 @@
 use crate::theme::Theme;
 use glyphon::{
-    Attrs, Buffer as GlyphonBuffer, Cache, Family, FontSystem, Metrics,
-    Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer as GlyphonBuffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -58,28 +58,29 @@ impl Renderer {
         height: u32,
     ) -> Self {
         let mut font_system = FontSystem::new();
-        font_system.db_mut().load_font_data(Vec::from(
-            include_bytes!("../../assets/JetBrainsMono-Regular.ttf") as &[u8],
-        ));
+        font_system
+            .db_mut()
+            .load_font_data(Vec::from(
+                include_bytes!("../../assets/JetBrainsMono-Regular.ttf") as &[u8],
+            ));
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let mut atlas = TextAtlas::new(device, &queue, &cache, format);
         let viewport = Viewport::new(device, &cache);
-        let text_renderer = TextRenderer::new(
-            &mut atlas,
-            device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
+        let text_renderer =
+            TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
 
         let shape_renderer = ShapeRenderer::new(device, format);
 
         let tab_bar_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(13.0, 16.0));
-        let gutter_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        let editor_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let gutter_buffer =
+            GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let editor_buffer =
+            GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         let status_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(12.0, 15.0));
-        let cursor_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let cursor_buffer =
+            GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         let overlay_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(14.0, 20.0));
 
         Self {
@@ -110,12 +111,14 @@ impl Renderer {
         self.width = width;
         self.height = height;
         self.scale_factor = scale_factor;
-        self.viewport.update(&self.queue, Resolution { width, height });
+        self.viewport
+            .update(&self.queue, Resolution { width, height });
     }
 
     /// Calculate how many lines fit in the editor area
     pub fn visible_lines(&self) -> usize {
-        let editor_height = self.height as f32 - (TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT) * self.scale_factor;
+        let editor_height =
+            self.height as f32 - (TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT) * self.scale_factor;
         (editor_height / (LINE_HEIGHT * self.scale_factor)).floor() as usize
     }
 
@@ -134,7 +137,8 @@ impl Renderer {
         let editor_height = self.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
 
         // --- Tab Bar ---
-        self.tab_bar_buffer.set_size(&mut self.font_system, Some(width), Some(TAB_BAR_HEIGHT));
+        self.tab_bar_buffer
+            .set_size(&mut self.font_system, Some(width), Some(TAB_BAR_HEIGHT));
 
         // Compute per-tab positions based on actual label width
         let tab_char_w = TAB_CHAR_WIDTH;
@@ -153,7 +157,11 @@ impl Renderer {
             let tw = label_chars as f32 * tab_char_w + tab_pad * 2.0;
 
             let is_active = i == editor.active_buffer;
-            let tab_fg = if is_active { theme.tab_active_fg } else { theme.tab_inactive_fg };
+            let tab_fg = if is_active {
+                theme.tab_active_fg
+            } else {
+                theme.tab_inactive_fg
+            };
             let attrs = base_tab_attrs.color(tab_fg.to_glyphon());
 
             // Pad with spaces to fill ~tab_pad worth of space on each side
@@ -166,17 +174,23 @@ impl Renderer {
             tab_x += tw;
         }
 
-        let rich_spans: Vec<(&str, Attrs)> = tab_spans.iter().map(|(s, a)| (s.as_str(), *a)).collect();
+        let rich_spans: Vec<(&str, Attrs)> =
+            tab_spans.iter().map(|(s, a)| (s.as_str(), *a)).collect();
         self.tab_bar_buffer.set_rich_text(
             &mut self.font_system,
             rich_spans,
             base_tab_attrs.color(theme.tab_active_fg.to_glyphon()),
             Shaping::Advanced,
         );
-        self.tab_bar_buffer.shape_until_scroll(&mut self.font_system, false);
+        self.tab_bar_buffer
+            .shape_until_scroll(&mut self.font_system, false);
 
         // --- Gutter (line numbers) ---
-        self.gutter_buffer.set_size(&mut self.font_system, Some(GUTTER_WIDTH), Some(editor_height));
+        self.gutter_buffer.set_size(
+            &mut self.font_system,
+            Some(GUTTER_WIDTH),
+            Some(editor_height),
+        );
         let visible_lines = (editor_height / LINE_HEIGHT).ceil() as usize;
         let scroll_line = buffer.scroll_y.floor() as usize;
         let total_lines = buffer.line_count();
@@ -193,17 +207,25 @@ impl Renderer {
         self.gutter_buffer.set_text(
             &mut self.font_system,
             &gutter_text,
-            Attrs::new().family(Family::Name("JetBrains Mono")).color(theme.gutter_fg.to_glyphon()),
+            Attrs::new()
+                .family(Family::Name("JetBrains Mono"))
+                .color(theme.gutter_fg.to_glyphon()),
             Shaping::Advanced,
         );
-        self.gutter_buffer.shape_until_scroll(&mut self.font_system, false);
+        self.gutter_buffer
+            .shape_until_scroll(&mut self.font_system, false);
 
         // --- Editor Text (with syntax highlighting) ---
         let editor_left = GUTTER_WIDTH + LINE_PADDING_LEFT;
         let editor_width = width - editor_left - SCROLLBAR_WIDTH;
         // Use finite width for line wrapping, or None for unlimited (horizontal scroll)
-        let buf_width = if buffer.wrap_enabled { Some(editor_width) } else { None };
-        self.editor_buffer.set_size(&mut self.font_system, buf_width, Some(editor_height));
+        let buf_width = if buffer.wrap_enabled {
+            Some(editor_width)
+        } else {
+            None
+        };
+        self.editor_buffer
+            .set_size(&mut self.font_system, buf_width, Some(editor_height));
 
         let mut visible_text = String::new();
         for i in 0..visible_lines + 1 {
@@ -219,7 +241,9 @@ impl Renderer {
             }
         }
 
-        let base_attrs = Attrs::new().family(Family::Name("JetBrains Mono")).color(theme.fg.to_glyphon());
+        let base_attrs = Attrs::new()
+            .family(Family::Name("JetBrains Mono"))
+            .color(theme.fg.to_glyphon());
 
         // Apply syntax highlighting if language is detected (with caching)
         if let Some(lang_idx) = buffer.language_index {
@@ -234,13 +258,16 @@ impl Renderer {
             }
 
             if !self.cached_spans.is_empty() {
-                let rich_spans: Vec<(&str, Attrs)> = self.cached_spans
+                let rich_spans: Vec<(&str, Attrs)> = self
+                    .cached_spans
                     .iter()
                     .filter_map(|span| {
                         if span.start < visible_text.len() && span.end <= visible_text.len() {
                             let text_slice = &visible_text[span.start..span.end];
                             let attrs = match span.highlight_index {
-                                Some(idx) => base_attrs.color(crate::syntax::highlight_color(idx, theme)),
+                                Some(idx) => {
+                                    base_attrs.color(crate::syntax::highlight_color(idx, theme))
+                                }
                                 None => base_attrs,
                             };
                             Some((text_slice, attrs))
@@ -271,23 +298,32 @@ impl Renderer {
                 Shaping::Advanced,
             );
         }
-        self.editor_buffer.shape_until_scroll(&mut self.font_system, false);
+        self.editor_buffer
+            .shape_until_scroll(&mut self.font_system, false);
 
         // --- Cursor ---
         let cursor_line_in_view = buffer.cursor_line() as i64 - scroll_line as i64;
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-            self.cursor_buffer.set_size(&mut self.font_system, Some(CHAR_WIDTH * 2.0), Some(LINE_HEIGHT));
+            self.cursor_buffer.set_size(
+                &mut self.font_system,
+                Some(CHAR_WIDTH * 2.0),
+                Some(LINE_HEIGHT),
+            );
             self.cursor_buffer.set_text(
                 &mut self.font_system,
                 "│",
-                Attrs::new().family(Family::Name("JetBrains Mono")).color(theme.cursor.to_glyphon()),
+                Attrs::new()
+                    .family(Family::Name("JetBrains Mono"))
+                    .color(theme.cursor.to_glyphon()),
                 Shaping::Advanced,
             );
-            self.cursor_buffer.shape_until_scroll(&mut self.font_system, false);
+            self.cursor_buffer
+                .shape_until_scroll(&mut self.font_system, false);
         }
 
         // --- Status Bar ---
-        self.status_buffer.set_size(&mut self.font_system, Some(width), Some(STATUS_BAR_HEIGHT));
+        self.status_buffer
+            .set_size(&mut self.font_system, Some(width), Some(STATUS_BAR_HEIGHT));
         let line = buffer.cursor_line() + 1;
         let col = buffer.cursor_col() + 1;
         let encoding = buffer.encoding;
@@ -303,15 +339,25 @@ impl Renderer {
         self.status_buffer.set_text(
             &mut self.font_system,
             &status_text,
-            Attrs::new().family(Family::Name("JetBrains Mono")).color(theme.status_bar_fg.to_glyphon()),
+            Attrs::new()
+                .family(Family::Name("JetBrains Mono"))
+                .color(theme.status_bar_fg.to_glyphon()),
             Shaping::Advanced,
         );
-        self.status_buffer.shape_until_scroll(&mut self.font_system, false);
+        self.status_buffer
+            .shape_until_scroll(&mut self.font_system, false);
 
         // --- Overlay Panel ---
         if overlay.is_active() {
-            let is_wide = matches!(overlay.active, crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings);
-            let overlay_width = if is_wide { (width * 0.8).max(400.0).min(900.0) } else { (width * 0.5).max(300.0).min(600.0) };
+            let is_wide = matches!(
+                overlay.active,
+                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
+            );
+            let overlay_width = if is_wide {
+                (width * 0.8).max(400.0).min(900.0)
+            } else {
+                (width * 0.5).max(300.0).min(600.0)
+            };
             let overlay_h = match &overlay.active {
                 crate::overlay::ActiveOverlay::FindReplace => 52.0,
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0,
@@ -319,7 +365,11 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Settings => 360.0,
                 _ => 32.0,
             };
-            self.overlay_buffer.set_size(&mut self.font_system, Some(overlay_width - 20.0), Some(overlay_h));
+            self.overlay_buffer.set_size(
+                &mut self.font_system,
+                Some(overlay_width - 20.0),
+                Some(overlay_h),
+            );
 
             let overlay_text = match &overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
@@ -330,7 +380,10 @@ impl Renderer {
                     let count = overlay.find.match_count_label();
                     let find_cursor = if !overlay.focus_replace { "│" } else { "" };
                     let repl_cursor = if overlay.focus_replace { "│" } else { "" };
-                    format!("Find:    {}{}  {}\nReplace: {}{}", overlay.input, find_cursor, count, overlay.replace_input, repl_cursor)
+                    format!(
+                        "Find:    {}{}  {}\nReplace: {}{}",
+                        overlay.input, find_cursor, count, overlay.replace_input, repl_cursor
+                    )
                 }
                 crate::overlay::ActiveOverlay::GotoLine => {
                     format!("Go to Line: {}│", overlay.input)
@@ -371,21 +424,48 @@ impl Renderer {
                         .map(|t| t.name())
                         .unwrap_or("Unknown");
                     let rows: &[(&str, String)] = &[
-                        ("Theme",              format!("< {} >", theme_name)),
-                        ("Font Size",          format!("< {} pt >", config.font_size as usize)),
-                        ("Line Wrap",          format!("[{}]", if config.line_wrap { "✓" } else { " " })),
-                        ("Auto-Save",          format!("[{}]", if config.auto_save { "✓" } else { " " })),
-                        ("Show Line Numbers",  format!("[{}]", if config.show_line_numbers { "✓" } else { " " })),
-                        ("Tab Size",           format!("< {} >", config.tab_size)),
-                        ("Use Spaces",         format!("[{}]", if config.use_spaces { "✓" } else { " " })),
-                        ("Highlight Line",     format!("[{}]", if config.highlight_current_line { "✓" } else { " " })),
+                        ("Theme", format!("< {} >", theme_name)),
+                        ("Font Size", format!("< {} pt >", config.font_size as usize)),
+                        (
+                            "Line Wrap",
+                            format!("[{}]", if config.line_wrap { "✓" } else { " " }),
+                        ),
+                        (
+                            "Auto-Save",
+                            format!("[{}]", if config.auto_save { "✓" } else { " " }),
+                        ),
+                        (
+                            "Show Line Numbers",
+                            format!("[{}]", if config.show_line_numbers { "✓" } else { " " }),
+                        ),
+                        ("Tab Size", format!("< {} >", config.tab_size)),
+                        (
+                            "Use Spaces",
+                            format!("[{}]", if config.use_spaces { "✓" } else { " " }),
+                        ),
+                        (
+                            "Highlight Line",
+                            format!(
+                                "[{}]",
+                                if config.highlight_current_line {
+                                    "✓"
+                                } else {
+                                    " "
+                                }
+                            ),
+                        ),
                     ];
-                    let mut text = String::from("⚙  Settings  (↑↓ navigate · ←→/Space toggle · Esc close)\n\n");
+                    let mut text = String::from(
+                        "⚙  Settings  (↑↓ navigate · ←→/Space toggle · Esc close)\n\n",
+                    );
                     for (i, (label, value)) in rows.iter().enumerate() {
                         let cursor = if i == settings_cursor { "▶ " } else { "  " };
                         text.push_str(&format!("{}{:<22} {}\n", cursor, label, value));
                     }
-                    text.push_str(&format!("\nConfig: {}", crate::settings::AppConfig::config_path().display()));
+                    text.push_str(&format!(
+                        "\nConfig: {}",
+                        crate::settings::AppConfig::config_path().display()
+                    ));
                     text
                 }
                 crate::overlay::ActiveOverlay::None => String::new(),
@@ -394,10 +474,13 @@ impl Renderer {
             self.overlay_buffer.set_text(
                 &mut self.font_system,
                 &overlay_text,
-                Attrs::new().family(Family::Name("JetBrains Mono")).color(theme.fg.to_glyphon()),
+                Attrs::new()
+                    .family(Family::Name("JetBrains Mono"))
+                    .color(theme.fg.to_glyphon()),
                 Shaping::Advanced,
             );
-            self.overlay_buffer.shape_until_scroll(&mut self.font_system, false);
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
         }
     }
 
@@ -415,14 +498,14 @@ impl Renderer {
         let s = self.scale_factor;
         let width = self.width as f32;
         let height = self.height as f32;
-        
+
         let tab_bar_height = TAB_BAR_HEIGHT * s;
         let status_bar_height = STATUS_BAR_HEIGHT * s;
         let gutter_width = GUTTER_WIDTH * s;
         let line_padding_left = LINE_PADDING_LEFT * s;
         let line_height = LINE_HEIGHT * s;
         let char_width = CHAR_WIDTH * s;
-        
+
         let editor_top = tab_bar_height;
         let editor_left = gutter_width + line_padding_left;
         let status_top = height - status_bar_height;
@@ -441,7 +524,12 @@ impl Renderer {
             y: 0.0,
             w: width,
             h: tab_bar_height,
-            color: [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, theme.tab_bar_bg.a],
+            color: [
+                theme.tab_bar_bg.r,
+                theme.tab_bar_bg.g,
+                theme.tab_bar_bg.b,
+                theme.tab_bar_bg.a,
+            ],
         });
 
         // 2. Per-tab backgrounds from precomputed tab_positions
@@ -451,7 +539,11 @@ impl Renderer {
 
             // Draw individual tab background
             let is_active = i == editor.active_buffer;
-            let tab_bg = if is_active { theme.tab_active_bg } else { theme.tab_inactive_bg };
+            let tab_bg = if is_active {
+                theme.tab_active_bg
+            } else {
+                theme.tab_inactive_bg
+            };
             base_rects.push(Rect {
                 x: tx_s,
                 y: 0.0,
@@ -462,7 +554,12 @@ impl Renderer {
 
             // Draw a separator line between tabs
             if i > 0 {
-                let sep = [theme.tab_inactive_fg.r, theme.tab_inactive_fg.g, theme.tab_inactive_fg.b, 0.3];
+                let sep = [
+                    theme.tab_inactive_fg.r,
+                    theme.tab_inactive_fg.g,
+                    theme.tab_inactive_fg.b,
+                    0.3,
+                ];
                 base_rects.push(Rect {
                     x: tx_s,
                     y: 4.0 * s,
@@ -480,7 +577,12 @@ impl Renderer {
             y: editor_top,
             w: gutter_width,
             h: editor_height_px,
-            color: [theme.gutter_bg.r, theme.gutter_bg.g, theme.gutter_bg.b, theme.gutter_bg.a],
+            color: [
+                theme.gutter_bg.r,
+                theme.gutter_bg.g,
+                theme.gutter_bg.b,
+                theme.gutter_bg.a,
+            ],
         });
 
         // 3. Active Line Highlight
@@ -511,7 +613,7 @@ impl Renderer {
         if let Some(match_char) = buffer.find_matching_bracket() {
             let match_line = buffer.rope.char_to_line(match_char);
             let match_line_in_view = match_line as i64 - scroll_line as i64;
-            
+
             if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
                 let match_col = match_char - buffer.rope.line_to_char(match_line);
                 base_rects.push(Rect {
@@ -528,16 +630,16 @@ impl Renderer {
         if let Some((start, end)) = buffer.selection_range() {
             let start_line = buffer.rope.char_to_line(start);
             let end_line = buffer.rope.char_to_line(end);
-            
+
             for i in 0..visible_lines + 1 {
                 let line_idx = scroll_line + i;
                 if line_idx >= start_line && line_idx <= end_line {
                     let line_start_char = buffer.rope.line_to_char(line_idx);
                     let line_end_char = buffer.rope.line_to_char(line_idx + 1);
-                    
+
                     let sel_start = start.max(line_start_char);
                     let sel_end = end.min(line_end_char);
-                    
+
                     if sel_start < sel_end {
                         let col_start = sel_start - line_start_char;
                         let col_end = sel_end - line_start_char;
@@ -547,7 +649,12 @@ impl Renderer {
                             y: editor_top + i as f32 * line_height,
                             w: (col_end - col_start) as f32 * char_width,
                             h: line_height,
-                            color: [theme.selection.r, theme.selection.g, theme.selection.b, theme.selection.a.max(0.4)],
+                            color: [
+                                theme.selection.r,
+                                theme.selection.g,
+                                theme.selection.b,
+                                theme.selection.a.max(0.4),
+                            ],
                         });
                     }
                 }
@@ -569,8 +676,12 @@ impl Renderer {
 
                 for line_idx in match_start_line..=match_end_line {
                     let view_line = line_idx as i64 - scroll_line as i64;
-                    if view_line < 0 || view_line >= visible_lines as i64 { continue; }
-                    if line_idx >= total_lines { break; }
+                    if view_line < 0 || view_line >= visible_lines as i64 {
+                        continue;
+                    }
+                    if line_idx >= total_lines {
+                        break;
+                    }
 
                     let line_start_char = buffer.rope.line_to_char(line_idx);
                     let line_end_char = if line_idx + 1 < total_lines {
@@ -588,7 +699,12 @@ impl Renderer {
                             y: editor_top + view_line as f32 * line_height,
                             w: (col_end - col_start) as f32 * char_width,
                             h: line_height,
-                            color: [theme.selection.r, theme.selection.g, theme.selection.b, highlight_alpha],
+                            color: [
+                                theme.selection.r,
+                                theme.selection.g,
+                                theme.selection.b,
+                                highlight_alpha,
+                            ],
                         });
                     }
                 }
@@ -601,13 +717,25 @@ impl Renderer {
             y: status_top,
             w: width,
             h: status_bar_height,
-            color: [theme.status_bar_bg.r, theme.status_bar_bg.g, theme.status_bar_bg.b, theme.status_bar_bg.a],
+            color: [
+                theme.status_bar_bg.r,
+                theme.status_bar_bg.g,
+                theme.status_bar_bg.b,
+                theme.status_bar_bg.a,
+            ],
         });
 
         // 5. Overlay Panel Backgrounds
         if overlay.is_active() {
-            let is_wide = matches!(overlay.active, crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings);
-            let overlay_width = if is_wide { (width * 0.8).max(400.0 * s).min(900.0 * s) } else { (width * 0.5).max(300.0 * s).min(600.0 * s) };
+            let is_wide = matches!(
+                overlay.active,
+                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
+            );
+            let overlay_width = if is_wide {
+                (width * 0.8).max(400.0 * s).min(900.0 * s)
+            } else {
+                (width * 0.5).max(300.0 * s).min(600.0 * s)
+            };
             let overlay_left = (width - overlay_width) / 2.0;
             let overlay_top_panel = editor_top + 4.0 * s;
             let overlay_height = match &overlay.active {
@@ -617,9 +745,14 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 _ => 40.0 * s,
             };
-            
+
             // Background — use a slightly lighter/darker shade of editor bg
-            let overlay_bg = [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, 1.0];
+            let overlay_bg = [
+                theme.tab_bar_bg.r,
+                theme.tab_bar_bg.g,
+                theme.tab_bar_bg.b,
+                1.0,
+            ];
             overlay_rects.push(Rect {
                 x: overlay_left,
                 y: overlay_top_panel,
@@ -629,13 +762,36 @@ impl Renderer {
             });
             // Border (simulated with thin rects)
             let border_color = [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5];
-            overlay_rects.push(Rect { x: overlay_left, y: overlay_top_panel, w: overlay_width, h: 1.0 * s, color: border_color });
-            overlay_rects.push(Rect { x: overlay_left, y: overlay_top_panel + overlay_height, w: overlay_width, h: 1.0 * s, color: border_color });
-            overlay_rects.push(Rect { x: overlay_left, y: overlay_top_panel, w: 1.0 * s, h: overlay_height, color: border_color });
-            overlay_rects.push(Rect { x: overlay_left + overlay_width, y: overlay_top_panel, w: 1.0 * s, h: overlay_height, color: border_color });
+            overlay_rects.push(Rect {
+                x: overlay_left,
+                y: overlay_top_panel,
+                w: overlay_width,
+                h: 1.0 * s,
+                color: border_color,
+            });
+            overlay_rects.push(Rect {
+                x: overlay_left,
+                y: overlay_top_panel + overlay_height,
+                w: overlay_width,
+                h: 1.0 * s,
+                color: border_color,
+            });
+            overlay_rects.push(Rect {
+                x: overlay_left,
+                y: overlay_top_panel,
+                w: 1.0 * s,
+                h: overlay_height,
+                color: border_color,
+            });
+            overlay_rects.push(Rect {
+                x: overlay_left + overlay_width,
+                y: overlay_top_panel,
+                w: 1.0 * s,
+                h: overlay_height,
+                color: border_color,
+            });
         }
         let editor_height = height - tab_bar_height - status_bar_height;
-
 
         // Update viewport
         self.viewport.update(
@@ -667,7 +823,6 @@ impl Renderer {
             custom_glyphs: &[],
         });
 
-
         // Gutter text
         base_text_areas.push(TextArea {
             buffer: &self.gutter_buffer,
@@ -683,7 +838,6 @@ impl Renderer {
             default_color: theme.gutter_fg.to_glyphon(),
             custom_glyphs: &[],
         });
-
 
         // Editor text
         let scroll_x_px = buffer.scroll_x * s;
@@ -702,7 +856,6 @@ impl Renderer {
             custom_glyphs: &[],
         });
 
-
         // Status bar text (vertically centered)
         let status_text_top = status_top + (status_bar_height - FONT_SIZE * s) / 2.0;
         base_text_areas.push(TextArea {
@@ -720,13 +873,19 @@ impl Renderer {
             custom_glyphs: &[],
         });
 
-
         // Cursor I-beam is rendered as a rect only; no text overlay needed
 
         // Overlay text area
         if overlay.is_active() {
-            let is_wide = matches!(overlay.active, crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings);
-            let overlay_width = if is_wide { (width * 0.8).max(400.0 * s).min(900.0 * s) } else { (width * 0.5).max(300.0 * s).min(600.0 * s) };
+            let is_wide = matches!(
+                overlay.active,
+                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
+            );
+            let overlay_width = if is_wide {
+                (width * 0.8).max(400.0 * s).min(900.0 * s)
+            } else {
+                (width * 0.5).max(300.0 * s).min(600.0 * s)
+            };
             let overlay_left = (width - overlay_width) / 2.0;
             let overlay_top_panel = tab_bar_height + 4.0 * s;
             let overlay_height = match &overlay.active {
@@ -781,8 +940,17 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            self.shape_renderer.render(device, queue, &mut pass, &base_rects, self.width, self.height);
-            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).expect("Failed to render base text");
+            self.shape_renderer.render(
+                device,
+                queue,
+                &mut pass,
+                &base_rects,
+                self.width,
+                self.height,
+            );
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("Failed to render base text");
         }
 
         // --- Pass 2: Overlay Layer (Load + Shapes + Text) ---
@@ -814,8 +982,17 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            self.shape_renderer.render(device, queue, &mut pass, &overlay_rects, self.width, self.height);
-            self.text_renderer.render(&self.atlas, &self.viewport, &mut pass).expect("Failed to render overlay text");
+            self.shape_renderer.render(
+                device,
+                queue,
+                &mut pass,
+                &overlay_rects,
+                self.width,
+                self.height,
+            );
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("Failed to render overlay text");
         }
 
         // Trim atlas to free unused glyph space
@@ -917,13 +1094,31 @@ impl ShapeRenderer {
             let c = rect.color;
 
             // Two triangles for the rectangle
-            vertices.push(ShapeVertex { pos: [x1, y1], color: c });
-            vertices.push(ShapeVertex { pos: [x1, y2], color: c });
-            vertices.push(ShapeVertex { pos: [x2, y1], color: c });
+            vertices.push(ShapeVertex {
+                pos: [x1, y1],
+                color: c,
+            });
+            vertices.push(ShapeVertex {
+                pos: [x1, y2],
+                color: c,
+            });
+            vertices.push(ShapeVertex {
+                pos: [x2, y1],
+                color: c,
+            });
 
-            vertices.push(ShapeVertex { pos: [x2, y1], color: c });
-            vertices.push(ShapeVertex { pos: [x1, y2], color: c });
-            vertices.push(ShapeVertex { pos: [x2, y2], color: c });
+            vertices.push(ShapeVertex {
+                pos: [x2, y1],
+                color: c,
+            });
+            vertices.push(ShapeVertex {
+                pos: [x1, y2],
+                color: c,
+            });
+            vertices.push(ShapeVertex {
+                pos: [x2, y2],
+                color: c,
+            });
         }
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

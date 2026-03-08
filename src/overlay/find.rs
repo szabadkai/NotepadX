@@ -98,7 +98,11 @@ impl FindState {
 
     /// Replace the current match with `replacement` in the rope.
     /// Returns (removed_text, start_offset) or None if no current match.
-    pub fn replace_current(&mut self, rope: &mut Rope, replacement: &str) -> Option<(String, usize)> {
+    pub fn replace_current(
+        &mut self,
+        rope: &mut Rope,
+        replacement: &str,
+    ) -> Option<(String, usize)> {
         let m = self.matches.get(self.current_match)?.clone();
         let removed: String = rope.slice(m.start..m.end).to_string();
         rope.remove(m.start..m.end);

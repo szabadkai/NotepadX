@@ -29,7 +29,11 @@ impl Editor {
     }
 
     /// Open a file in a new tab
-    pub fn open_file(&mut self, path: &std::path::Path, syntax: Option<&crate::syntax::SyntaxHighlighter>) -> anyhow::Result<()> {
+    pub fn open_file(
+        &mut self,
+        path: &std::path::Path,
+        syntax: Option<&crate::syntax::SyntaxHighlighter>,
+    ) -> anyhow::Result<()> {
         // Check if already open
         for (i, buf) in self.buffers.iter().enumerate() {
             if buf.file_path.as_deref() == Some(path) {

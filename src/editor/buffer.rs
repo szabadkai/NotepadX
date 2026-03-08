@@ -94,7 +94,7 @@ impl Buffer {
             line_ending: LineEnding::Lf,
             language_index: None,
             is_binary: false,
-            wrap_enabled: true,  // default on; overridden by AppConfig on load
+            wrap_enabled: true, // default on; overridden by AppConfig on load
         }
     }
 
@@ -104,9 +104,10 @@ impl Buffer {
         if sample.contains(&0u8) {
             return true;
         }
-        let non_printable = sample.iter().filter(|&&b| {
-            b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' && b != 0x1b
-        }).count();
+        let non_printable = sample
+            .iter()
+            .filter(|&&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' && b != 0x1b)
+            .count();
         if sample.is_empty() {
             return false;
         }
@@ -120,12 +121,18 @@ impl Buffer {
             result.push_str(&format!("{:08x}  ", i * 16));
             for (j, b) in chunk.iter().enumerate() {
                 result.push_str(&format!("{:02x} ", b));
-                if j == 7 { result.push(' '); }
+                if j == 7 {
+                    result.push(' ');
+                }
             }
             // Pad if short
             let pad = 16 - chunk.len();
-            for _ in 0..pad { result.push_str("   "); }
-            if chunk.len() <= 7 { result.push(' '); }
+            for _ in 0..pad {
+                result.push_str("   ");
+            }
+            if chunk.len() <= 7 {
+                result.push(' ');
+            }
             result.push_str(" |");
             for &b in chunk {
                 if b >= 0x20 && b < 0x7f {
@@ -202,7 +209,7 @@ impl Buffer {
             line_ending,
             language_index: None,
             is_binary: false,
-            wrap_enabled: true,  // default on; overridden by AppConfig after open
+            wrap_enabled: true, // default on; overridden by AppConfig after open
         })
     }
 
@@ -229,7 +236,9 @@ impl Buffer {
 
     /// Insert text at the cursor position
     pub fn insert_text(&mut self, text: &str) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         let offset = self.cursor;
 
         // Delete selection first if any
@@ -263,7 +272,9 @@ impl Buffer {
 
     /// Delete the character before the cursor (backspace)
     pub fn backspace(&mut self) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         // Delete selection if any
         if let Some(anchor) = self.selection_anchor.take() {
             let start = self.cursor.min(anchor);
@@ -302,7 +313,9 @@ impl Buffer {
 
     /// Delete the character after the cursor (delete key)
     pub fn delete_forward(&mut self) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         // Delete selection if any
         if let Some(anchor) = self.selection_anchor.take() {
             let start = self.cursor.min(anchor);
@@ -342,7 +355,8 @@ impl Buffer {
         if let Some(op) = self.undo_stack.pop() {
             // Reverse the operation
             if !op.inserted.is_empty() {
-                self.rope.remove(op.offset..op.offset + op.inserted.chars().count());
+                self.rope
+                    .remove(op.offset..op.offset + op.inserted.chars().count());
             }
             if !op.removed.is_empty() {
                 self.rope.insert(op.offset, &op.removed);
@@ -357,7 +371,8 @@ impl Buffer {
     pub fn redo(&mut self) {
         if let Some(op) = self.redo_stack.pop() {
             if !op.removed.is_empty() {
-                self.rope.remove(op.offset..op.offset + op.removed.chars().count());
+                self.rope
+                    .remove(op.offset..op.offset + op.removed.chars().count());
             }
             if !op.inserted.is_empty() {
                 self.rope.insert(op.offset, &op.inserted);
@@ -381,10 +396,18 @@ impl Buffer {
         }
     }
 
-    pub fn move_left(&mut self) { self.move_left_sel(false); }
-    pub fn move_right(&mut self) { self.move_right_sel(false); }
-    pub fn move_up(&mut self) { self.move_up_sel(false); }
-    pub fn move_down(&mut self) { self.move_down_sel(false); }
+    pub fn move_left(&mut self) {
+        self.move_left_sel(false);
+    }
+    pub fn move_right(&mut self) {
+        self.move_right_sel(false);
+    }
+    pub fn move_up(&mut self) {
+        self.move_up_sel(false);
+    }
+    pub fn move_down(&mut self) {
+        self.move_down_sel(false);
+    }
 
     pub fn move_left_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
@@ -432,8 +455,12 @@ impl Buffer {
         }
     }
 
-    pub fn move_to_line_start(&mut self) { self.move_to_line_start_sel(false); }
-    pub fn move_to_line_end(&mut self) { self.move_to_line_end_sel(false); }
+    pub fn move_to_line_start(&mut self) {
+        self.move_to_line_start_sel(false);
+    }
+    pub fn move_to_line_end(&mut self) {
+        self.move_to_line_end_sel(false);
+    }
 
     pub fn move_to_line_start_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
@@ -474,7 +501,9 @@ impl Buffer {
     /// Delete the current selection and return the removed text.
     /// Returns None if there is no selection.
     pub fn delete_selection(&mut self) -> Option<String> {
-        if self.is_binary { return None; }
+        if self.is_binary {
+            return None;
+        }
         let anchor = self.selection_anchor.take()?;
         let start = self.cursor.min(anchor);
         let end = self.cursor.max(anchor);
@@ -509,7 +538,9 @@ impl Buffer {
 
     /// Cut: delete selection and return it (or cut entire current line if no selection)
     pub fn cut(&mut self) -> Option<String> {
-        if self.is_binary { return None; }
+        if self.is_binary {
+            return None;
+        }
         if self.selection_anchor.is_some() {
             self.delete_selection()
         } else {
@@ -584,7 +615,9 @@ impl Buffer {
 
     /// Delete backward to the previous word boundary (Opt+Backspace)
     pub fn delete_word_left(&mut self) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         if self.selection_anchor.is_some() {
             self.delete_selection();
             return;
@@ -615,7 +648,9 @@ impl Buffer {
 
     /// Delete forward to the next word boundary (Opt+Delete)
     pub fn delete_word_right(&mut self) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         if self.selection_anchor.is_some() {
             self.delete_selection();
             return;
@@ -662,7 +697,9 @@ impl Buffer {
 
     /// Duplicate the current line below the cursor
     pub fn duplicate_line(&mut self) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         let line = self.rope.char_to_line(self.cursor);
         let line_text: String = self.rope.line(line).into();
         let col = self.cursor - self.rope.line_to_char(line);
@@ -702,7 +739,9 @@ impl Buffer {
 
     /// Toggle line comment for the current line or each line in the selection
     pub fn toggle_comment(&mut self, comment_prefix: &str) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         let cursor_line = self.rope.char_to_line(self.cursor);
 
         let (start_line, end_line) = if let Some(anchor) = self.selection_anchor {
@@ -801,9 +840,15 @@ impl Buffer {
                 let mut pos = check_idx + 1;
                 while pos < len && depth > 0 {
                     let c = self.rope.char(pos);
-                    if c == open { depth += 1; }
-                    if c == close { depth -= 1; }
-                    if depth == 0 { return Some(pos); }
+                    if c == open {
+                        depth += 1;
+                    }
+                    if c == close {
+                        depth -= 1;
+                    }
+                    if depth == 0 {
+                        return Some(pos);
+                    }
                     pos += 1;
                 }
             }
@@ -814,9 +859,15 @@ impl Buffer {
                 while pos > 0 && depth > 0 {
                     pos -= 1;
                     let c = self.rope.char(pos);
-                    if c == close { depth += 1; }
-                    if c == open { depth -= 1; }
-                    if depth == 0 { return Some(pos); }
+                    if c == close {
+                        depth += 1;
+                    }
+                    if c == open {
+                        depth -= 1;
+                    }
+                    if depth == 0 {
+                        return Some(pos);
+                    }
                 }
             }
         }
@@ -828,7 +879,9 @@ impl Buffer {
     /// Insert text with auto-close for brackets and quotes.
     /// Returns true if it handled the input (caller should not insert again).
     pub fn insert_with_autoclose(&mut self, text: &str) -> bool {
-        if self.is_binary { return false; }
+        if self.is_binary {
+            return false;
+        }
         if text.len() != 1 {
             return false;
         }
@@ -871,7 +924,9 @@ impl Buffer {
 
     /// Insert a newline with smart indentation
     pub fn insert_newline(&mut self, line_ending: &str) {
-        if self.is_binary { return; }
+        if self.is_binary {
+            return;
+        }
         // Delete selection first
         if self.selection_anchor.is_some() {
             self.delete_selection();
@@ -881,11 +936,22 @@ impl Buffer {
         let line_text: String = self.rope.line(line).into();
 
         // Get leading whitespace
-        let leading_ws: String = line_text.chars().take_while(|c| c.is_whitespace() && *c != '\n' && *c != '\r').collect();
+        let leading_ws: String = line_text
+            .chars()
+            .take_while(|c| c.is_whitespace() && *c != '\n' && *c != '\r')
+            .collect();
 
         // Check char before cursor
-        let char_before = if self.cursor > 0 { Some(self.rope.char(self.cursor - 1)) } else { None };
-        let char_after = if self.cursor < self.rope.len_chars() { Some(self.rope.char(self.cursor)) } else { None };
+        let char_before = if self.cursor > 0 {
+            Some(self.rope.char(self.cursor - 1))
+        } else {
+            None
+        };
+        let char_after = if self.cursor < self.rope.len_chars() {
+            Some(self.rope.char(self.cursor))
+        } else {
+            None
+        };
 
         let openers = ['{', '(', '['];
         let closers = ['}', ')', ']'];
@@ -914,7 +980,9 @@ impl Buffer {
     /// Select the word under the cursor
     pub fn select_word_at_cursor(&mut self) {
         let len = self.rope.len_chars();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
 
         let pos = self.cursor.min(len.saturating_sub(1));
         let ch = self.rope.char(pos);
@@ -957,7 +1025,10 @@ impl Buffer {
     /// Get the display name for the tab
     pub fn display_name(&self) -> String {
         match &self.file_path {
-            Some(p) => p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or("untitled".into()),
+            Some(p) => p
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or("untitled".into()),
             None => "untitled".into(),
         }
     }
@@ -1011,13 +1082,17 @@ impl Buffer {
 
     /// Scroll horizontally
     pub fn scroll_horizontal(&mut self, delta_px: f32) {
-        if self.wrap_enabled { return; }
+        if self.wrap_enabled {
+            return;
+        }
         self.scroll_x_target = (self.scroll_x_target + delta_px).max(0.0);
     }
 
     /// Scroll horizontally directly (trackpad)
     pub fn scroll_horizontal_direct(&mut self, delta_px: f32) {
-        if self.wrap_enabled { return; }
+        if self.wrap_enabled {
+            return;
+        }
         self.scroll_x = (self.scroll_x + delta_px).max(0.0);
         self.scroll_x_target = self.scroll_x;
     }
@@ -1037,7 +1112,9 @@ impl Buffer {
 
     /// Ensure cursor is visible horizontally
     pub fn ensure_cursor_visible_x(&mut self, char_width: f32, editor_width: f32) {
-        if self.wrap_enabled { return; }
+        if self.wrap_enabled {
+            return;
+        }
         let cursor_x = self.cursor_col() as f32 * char_width;
         let margin = char_width * 4.0;
         if cursor_x < self.scroll_x_target + margin {
@@ -1048,7 +1125,14 @@ impl Buffer {
     }
 
     /// Calculate char index from pixel coordinates (logical, unscaled)
-    pub fn char_at_pos(&self, x: f32, y: f32, x_offset: f32, line_height: f32, char_width: f32) -> usize {
+    pub fn char_at_pos(
+        &self,
+        x: f32,
+        y: f32,
+        x_offset: f32,
+        line_height: f32,
+        char_width: f32,
+    ) -> usize {
         let total_lines = self.rope.len_lines();
         if total_lines == 0 {
             return 0;
@@ -1067,7 +1151,9 @@ impl Buffer {
         let line = self.rope.line(line_idx);
         let line_len = line.len_chars();
         // Don't include the trailing newline in the column clamp
-        let max_col = if line_len > 0 && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r') {
+        let max_col = if line_len > 0
+            && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r')
+        {
             if line_len > 1 && line.char(line_len - 1) == '\n' && line.char(line_len - 2) == '\r' {
                 line_len.saturating_sub(2)
             } else {
