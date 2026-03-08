@@ -9,6 +9,7 @@ pub struct Match {
 }
 
 /// Find & Replace state
+#[allow(dead_code)]
 pub struct FindState {
     pub matches: Vec<Match>,
     pub current_match: usize,
@@ -123,6 +124,7 @@ impl FindState {
     }
 
     /// Replace all matches with `replacement`. Returns the number replaced.
+    #[allow(dead_code)]
     pub fn replace_all(&mut self, rope: &mut Rope, replacement: &str) -> Vec<(String, usize)> {
         let mut results = Vec::new();
         // Replace in reverse order to keep offsets valid

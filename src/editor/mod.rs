@@ -94,6 +94,7 @@ impl Editor {
     }
 
     /// Switch to a specific tab
+    #[allow(dead_code)]
     pub fn switch_tab(&mut self, index: usize) {
         if index < self.buffers.len() {
             self.active_buffer = index;

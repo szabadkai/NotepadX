@@ -24,6 +24,20 @@ cargo build --release
 
 The binary will be at `target/release/notepadx`.
 
+### macOS: Removing Quarantine
+
+If you download a pre-built release on macOS, the app may be quarantined by Gatekeeper (since it's not signed with an Apple Developer certificate). To remove the quarantine:
+
+```bash
+# Remove quarantine from the app bundle
+xattr -cr /path/to/NotepadX.app
+
+# Or if running the binary directly
+xattr -cr /path/to/notepadx
+```
+
+Alternatively, right-click the app and select "Open" from the context menu, then click "Open" in the dialog that appears.
+
 ## Usage
 
 ```bash

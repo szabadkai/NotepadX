@@ -135,7 +135,7 @@ impl Buffer {
             }
             result.push_str(" |");
             for &b in chunk {
-                if b >= 0x20 && b < 0x7f {
+                if (0x20..0x7f).contains(&b) {
                     result.push(b as char);
                 } else {
                     result.push('.');
@@ -396,15 +396,19 @@ impl Buffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn move_left(&mut self) {
         self.move_left_sel(false);
     }
+    #[allow(dead_code)]
     pub fn move_right(&mut self) {
         self.move_right_sel(false);
     }
+    #[allow(dead_code)]
     pub fn move_up(&mut self) {
         self.move_up_sel(false);
     }
+    #[allow(dead_code)]
     pub fn move_down(&mut self) {
         self.move_down_sel(false);
     }
@@ -455,9 +459,11 @@ impl Buffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn move_to_line_start(&mut self) {
         self.move_to_line_start_sel(false);
     }
+    #[allow(dead_code)]
     pub fn move_to_line_end(&mut self) {
         self.move_to_line_end_sel(false);
     }
@@ -713,7 +719,7 @@ impl Buffer {
 
         let text_to_insert = if line + 1 >= self.rope.len_lines() {
             let mut t = String::from("\n");
-            t.push_str(line_text.trim_end_matches(&['\n', '\r']));
+            t.push_str(line_text.trim_end_matches(['\n', '\r']));
             t
         } else {
             line_text.clone()
@@ -956,8 +962,8 @@ impl Buffer {
         let openers = ['{', '(', '['];
         let closers = ['}', ')', ']'];
 
-        let between_brackets = char_before.map_or(false, |b| openers.contains(&b))
-            && char_after.map_or(false, |a| closers.contains(&a));
+        let between_brackets = char_before.is_some_and(|b| openers.contains(&b))
+            && char_after.is_some_and(|a| closers.contains(&a));
 
         if between_brackets {
             let indent = format!("{}    ", leading_ws);
@@ -966,7 +972,7 @@ impl Buffer {
             // Move cursor to the middle line
             let target = self.cursor - line_ending.chars().count() - leading_ws.chars().count();
             self.cursor = target;
-        } else if char_before.map_or(false, |b| openers.contains(&b)) {
+        } else if char_before.is_some_and(|b| openers.contains(&b)) {
             let text = format!("{}{}    ", line_ending, leading_ws);
             self.insert_text(&text);
         } else {

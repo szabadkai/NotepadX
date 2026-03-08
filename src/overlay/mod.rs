@@ -109,16 +109,14 @@ impl OverlayState {
                 self.replace_input.drain(prev..self.replace_cursor_pos);
                 self.replace_cursor_pos = prev;
             }
-        } else {
-            if self.cursor_pos > 0 {
-                let prev = self.input[..self.cursor_pos]
-                    .char_indices()
-                    .last()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.input.drain(prev..self.cursor_pos);
-                self.cursor_pos = prev;
-            }
+        } else if self.cursor_pos > 0 {
+            let prev = self.input[..self.cursor_pos]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.input.drain(prev..self.cursor_pos);
+            self.cursor_pos = prev;
         }
     }
 
@@ -131,14 +129,12 @@ impl OverlayState {
                     .map(|(i, _)| i)
                     .unwrap_or(0);
             }
-        } else {
-            if self.cursor_pos > 0 {
-                self.cursor_pos = self.input[..self.cursor_pos]
-                    .char_indices()
-                    .last()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-            }
+        } else if self.cursor_pos > 0 {
+            self.cursor_pos = self.input[..self.cursor_pos]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
         }
     }
 
@@ -151,14 +147,12 @@ impl OverlayState {
                     .map(|(i, _)| self.replace_cursor_pos + i)
                     .unwrap_or(self.replace_input.len());
             }
-        } else {
-            if self.cursor_pos < self.input.len() {
-                self.cursor_pos = self.input[self.cursor_pos..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| self.cursor_pos + i)
-                    .unwrap_or(self.input.len());
-            }
+        } else if self.cursor_pos < self.input.len() {
+            self.cursor_pos = self.input[self.cursor_pos..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor_pos + i)
+                .unwrap_or(self.input.len());
         }
     }
 }

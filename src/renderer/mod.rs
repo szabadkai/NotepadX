@@ -25,6 +25,7 @@ pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6; // Monospace character width approx
 pub struct Renderer {
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
+    #[allow(dead_code)]
     pub cache: Cache,
     pub atlas: TextAtlas,
     pub viewport: Viewport,
@@ -233,7 +234,7 @@ impl Renderer {
             if line_idx < total_lines {
                 let line = buffer.rope.line(line_idx);
                 let line_str: String = line.into();
-                let trimmed = line_str.trim_end_matches(&['\n', '\r']);
+                let trimmed = line_str.trim_end_matches(['\n', '\r']);
                 visible_text.push_str(trimmed);
             }
             if i < visible_lines {
@@ -354,9 +355,9 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
             );
             let overlay_width = if is_wide {
-                (width * 0.8).max(400.0).min(900.0)
+                (width * 0.8).clamp(400.0, 900.0)
             } else {
-                (width * 0.5).max(300.0).min(600.0)
+                (width * 0.5).clamp(300.0, 600.0)
             };
             let overlay_h = match &overlay.active {
                 crate::overlay::ActiveOverlay::FindReplace => 52.0,
@@ -391,7 +392,7 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::CommandPalette => {
                     let filtered = crate::overlay::palette::filter_commands(&overlay.input);
                     let mut text = format!("> {}│\n", overlay.input);
-                    for (_i, cmd) in filtered.iter().take(8).enumerate() {
+                    for cmd in filtered.iter().take(8) {
                         text.push_str(&format!("  {}  {}\n", cmd.name, cmd.shortcut));
                     }
                     text
@@ -485,6 +486,7 @@ impl Renderer {
     }
 
     /// Render everything to the screen
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -1073,7 +1075,7 @@ impl ShapeRenderer {
     pub fn render<'a>(
         &'a self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'a>,
         rects: &[Rect],
         width: u32,

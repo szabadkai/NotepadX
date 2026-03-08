@@ -295,7 +295,7 @@ impl App {
             let name = self.editor.active().display_name();
             rfd::MessageDialog::new()
                 .set_title("Unsaved Changes")
-                .set_description(&format!(
+                .set_description(format!(
                     "\"{}\" has unsaved changes. Close without saving?",
                     name
                 ))
@@ -336,7 +336,7 @@ impl App {
                                 let name = self.editor.buffers[i].display_name();
                                 rfd::MessageDialog::new()
                                     .set_title("Unsaved Changes")
-                                    .set_description(&format!(
+                                    .set_description(format!(
                                         "\"{}\" has unsaved changes. Close without saving?",
                                         name
                                     ))
@@ -694,7 +694,7 @@ impl App {
         self.needs_redraw = true;
     }
 
-    fn handle_overlay_key(&mut self, event: KeyEvent, cmd_or_ctrl: bool, shift: bool) {
+    fn handle_overlay_key(&mut self, event: KeyEvent, cmd_or_ctrl: bool, _shift: bool) {
         // Settings overlay has its own key handling
         if self.overlay.active == ActiveOverlay::Settings {
             self.handle_settings_key(&event.logical_key);
@@ -1060,14 +1060,11 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             // Build window icon from embedded logo.png
             let icon_bytes = include_bytes!("../assets/logo.png");
-            let icon = image::load_from_memory(icon_bytes)
-                .ok()
-                .map(|img| {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
-                })
-                .flatten();
+            let icon = image::load_from_memory(icon_bytes).ok().and_then(|img| {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
+            });
 
             let mut attrs = WindowAttributes::default()
                 .with_title("NotepadX")
