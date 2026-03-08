@@ -47,6 +47,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Vertex data
 bytemuck = { version = "1.19", features = ["derive"] }
 
+# Native menus (macOS menu bar support)
+muda = "0.15"
+
 # Syntax highlighting (tree-sitter)
 tree-sitter = "0.24"
 tree-sitter-highlight = "0.24"

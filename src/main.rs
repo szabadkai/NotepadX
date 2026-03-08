@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod editor;
+mod menu;
 mod overlay;
 mod renderer;
 mod settings;
@@ -10,6 +11,7 @@ mod theme;
 
 use anyhow::Result;
 use editor::Editor;
+use menu::{AppMenu, MenuAction};
 use overlay::palette::CommandId;
 use overlay::{ActiveOverlay, OverlayState};
 use renderer::Renderer;
@@ -37,6 +39,9 @@ struct App {
     config: AppConfig,
     // Settings overlay: which item is focused (0-based row)
     settings_cursor: usize,
+    
+    // Native menu bar
+    menu: AppMenu,
 
     // GPU state (initialized after window creation)
     window: Option<Arc<Window>>,
@@ -81,6 +86,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             config,
             settings_cursor: 0,
+            menu: AppMenu::new(),
             window: None,
             device: None,
             queue: None,
@@ -320,7 +326,7 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, TAB_BAR_HEIGHT};
+        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
@@ -362,6 +368,14 @@ impl App {
             let shift = self.modifiers.shift_key();
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
 
+            // Calculate wrap width for line wrapping
+            let wrap_width = if self.editor.active().wrap_enabled {
+                Some((self.renderer.as_ref().map(|r| r.width as f32).unwrap_or(800.0) 
+                    - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH)).max(100.0))
+            } else {
+                None
+            };
+
             let buffer = self.editor.active_mut();
             let new_pos = buffer.char_at_pos(
                 x as f32,
@@ -369,6 +383,7 @@ impl App {
                 GUTTER_WIDTH + LINE_PADDING_LEFT,
                 LINE_HEIGHT,
                 CHAR_WIDTH,
+                wrap_width,
             );
 
             if shift {
@@ -399,10 +414,18 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, TAB_BAR_HEIGHT};
+        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
 
         if y >= TAB_BAR_HEIGHT as f64 {
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
+
+            // Calculate wrap width for line wrapping
+            let wrap_width = if self.editor.active().wrap_enabled {
+                Some((self.renderer.as_ref().map(|r| r.width as f32).unwrap_or(800.0) 
+                    - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH)).max(100.0))
+            } else {
+                None
+            };
 
             let buffer = self.editor.active_mut();
             if buffer.selection_anchor.is_none() {
@@ -415,6 +438,7 @@ impl App {
                 GUTTER_WIDTH + LINE_PADDING_LEFT,
                 LINE_HEIGHT,
                 CHAR_WIDTH,
+                wrap_width,
             );
             buffer.cursor = new_pos;
         }
@@ -917,15 +941,17 @@ impl App {
                     self.settings_cursor += 1;
                 }
             }
-            Key::Named(NamedKey::Enter)
-            | Key::Named(NamedKey::Space)
+            Key::Named(NamedKey::Enter) => {
+                // Enter closes settings and saves
+                self.config.save();
+                self.overlay.close();
+            }
+            Key::Named(NamedKey::Space)
             | Key::Named(NamedKey::ArrowLeft)
             | Key::Named(NamedKey::ArrowRight) => {
                 let increment = matches!(
                     key,
-                    Key::Named(NamedKey::ArrowRight)
-                        | Key::Named(NamedKey::Enter)
-                        | Key::Named(NamedKey::Space)
+                    Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Space)
                 );
                 match self.settings_cursor {
                     0 => {
@@ -1053,6 +1079,127 @@ impl App {
             }
         }
     }
+
+    fn handle_menu_action(&mut self, action: MenuAction) {
+        match action {
+            // File
+            MenuAction::New => {
+                self.editor.new_tab();
+                self.editor.active_mut().wrap_enabled = self.config.line_wrap;
+                self.needs_redraw = true;
+            }
+            MenuAction::Open => {
+                self.open_file();
+                self.needs_redraw = true;
+            }
+            MenuAction::Save => {
+                self.save();
+                self.needs_redraw = true;
+            }
+            MenuAction::SaveAs => {
+                self.save_as();
+                self.needs_redraw = true;
+            }
+            MenuAction::Close => {
+                self.close_active_tab_with_confirm();
+                self.needs_redraw = true;
+            }
+            // Edit
+            MenuAction::Undo => {
+                self.editor.active_mut().undo();
+                self.needs_redraw = true;
+            }
+            MenuAction::Redo => {
+                self.editor.active_mut().redo();
+                self.needs_redraw = true;
+            }
+            MenuAction::Cut => {
+                if let Some(text) = self.editor.active_mut().cut() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            MenuAction::Copy => {
+                if let Some(text) = self.editor.active().copy() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            MenuAction::Paste => {
+                if let Some(clip) = &mut self.clipboard {
+                    if let Ok(text) = clip.get_text() {
+                        self.editor.active_mut().insert_text(&text);
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            MenuAction::SelectAll => {
+                let buffer = self.editor.active_mut();
+                buffer.selection_anchor = Some(0);
+                buffer.cursor = buffer.rope.len_chars();
+                self.needs_redraw = true;
+            }
+            MenuAction::Find => {
+                self.overlay.open(ActiveOverlay::Find);
+                self.needs_redraw = true;
+            }
+            MenuAction::FindReplace => {
+                self.overlay.open(ActiveOverlay::FindReplace);
+                self.needs_redraw = true;
+            }
+            // View
+            MenuAction::GotoLine => {
+                self.overlay.open(ActiveOverlay::GotoLine);
+                self.needs_redraw = true;
+            }
+            MenuAction::CommandPalette => {
+                self.overlay.open(ActiveOverlay::CommandPalette);
+                self.needs_redraw = true;
+            }
+            MenuAction::ToggleLineWrap => {
+                self.config.line_wrap = !self.config.line_wrap;
+                for buf in &mut self.editor.buffers {
+                    buf.wrap_enabled = self.config.line_wrap;
+                }
+                self.config.save();
+                self.needs_redraw = true;
+            }
+            MenuAction::NextTheme => {
+                let themes = Theme::all_themes();
+                self.config.theme_index = (self.config.theme_index + 1) % themes.len();
+                self.theme_index = self.config.theme_index;
+                self.theme = themes[self.theme_index].clone();
+                self.config.save();
+                self.needs_redraw = true;
+            }
+            MenuAction::PrevTheme => {
+                let themes = Theme::all_themes();
+                self.config.theme_index = if self.config.theme_index == 0 {
+                    themes.len() - 1
+                } else {
+                    self.config.theme_index - 1
+                };
+                self.theme_index = self.config.theme_index;
+                self.theme = themes[self.theme_index].clone();
+                self.config.save();
+                self.needs_redraw = true;
+            }
+            // Help
+            MenuAction::About => {
+                self.overlay.open(ActiveOverlay::Help);
+                self.needs_redraw = true;
+            }
+            MenuAction::Settings => {
+                self.overlay.open(ActiveOverlay::Settings);
+                self.settings_cursor = 0;
+                self.needs_redraw = true;
+            }
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -1080,6 +1227,9 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window");
             let window = Arc::new(window);
             self.init_gpu(window);
+            
+            // Initialize the native menu bar
+            self.menu.init();
         }
     }
 
@@ -1205,6 +1355,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Process menu events
+        while let Some(action) = AppMenu::try_recv() {
+            self.handle_menu_action(action);
+        }
+        
         let scroll_diff_y =
             (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
         let scroll_diff_x =

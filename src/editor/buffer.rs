@@ -1131,6 +1131,7 @@ impl Buffer {
     }
 
     /// Calculate char index from pixel coordinates (logical, unscaled)
+    /// When wrap_enabled is true, accounts for wrapped lines using the provided wrap_width
     pub fn char_at_pos(
         &self,
         x: f32,
@@ -1138,6 +1139,7 @@ impl Buffer {
         x_offset: f32,
         line_height: f32,
         char_width: f32,
+        wrap_width: Option<f32>,
     ) -> usize {
         let total_lines = self.rope.len_lines();
         if total_lines == 0 {
@@ -1146,17 +1148,103 @@ impl Buffer {
 
         // Adjust for scroll
         let relative_y = y + (self.scroll_y as f32 * line_height);
-        let line_idx = (relative_y / line_height).floor() as usize;
-        let line_idx = line_idx.min(total_lines.saturating_sub(1));
 
-        // Adjust for x_offset (gutter + padding) and horizontal scroll
-        let relative_x = (x - x_offset + self.scroll_x).max(0.0);
-        let col_idx = (relative_x / char_width).round() as usize;
+        if self.wrap_enabled {
+            // When wrapping is enabled, we need to account for visual lines
+            // Each logical line may span multiple visual lines
+            self.char_at_pos_wrapped(relative_y, x, x_offset, line_height, char_width, wrap_width)
+        } else {
+            // No wrapping: 1 logical line = 1 visual line
+            let line_idx = (relative_y / line_height).floor() as usize;
+            let line_idx = line_idx.min(total_lines.saturating_sub(1));
 
-        // Get the actual line and clamp column
-        let line = self.rope.line(line_idx);
+            // Adjust for x_offset (gutter + padding) and horizontal scroll
+            let relative_x = (x - x_offset + self.scroll_x).max(0.0);
+            let col_idx = (relative_x / char_width).round() as usize;
+
+            // Get the actual line and clamp column
+            let line = self.rope.line(line_idx);
+            let line_len = line.len_chars();
+            // Don't include the trailing newline in the column clamp
+            let max_col = if line_len > 0
+                && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r')
+            {
+                if line_len > 1 && line.char(line_len - 1) == '\n' && line.char(line_len - 2) == '\r'
+                {
+                    line_len.saturating_sub(2)
+                } else {
+                    line_len.saturating_sub(1)
+                }
+            } else {
+                line_len
+            };
+
+            let col_idx = col_idx.min(max_col);
+
+            self.rope.line_to_char(line_idx) + col_idx
+        }
+    }
+
+    /// Helper for char_at_pos when line wrapping is enabled
+    fn char_at_pos_wrapped(
+        &self,
+        relative_y: f32,
+        x: f32,
+        x_offset: f32,
+        line_height: f32,
+        char_width: f32,
+        wrap_width: Option<f32>,
+    ) -> usize {
+        let total_lines = self.rope.len_lines();
+
+        // Calculate the visual line index from Y position
+        let visual_line_idx = (relative_y / line_height).floor() as usize;
+
+        // Calculate chars per line from wrap width
+        // wrap_width is the available width for text (editor_width - scrollbar)
+        let chars_per_line = if let Some(ww) = wrap_width {
+            (ww / char_width).max(1.0) as usize
+        } else {
+            // Fallback: assume ~80 chars per line
+            80
+        };
+
+        // We need to find which logical line contains this visual line
+        // and which wrap segment within that logical line
+        let mut visual_line_count = 0usize;
+        let mut target_logical_line = 0usize;
+        let mut wrap_segment = 0usize; // Which wrapped segment of the logical line
+
+        for logical_line in 0..total_lines {
+            let line = self.rope.line(logical_line);
+            let line_text: String = line.into();
+            let line_len_chars = line_text.trim_end_matches(['\n', '\r']).chars().count();
+
+            // Calculate how many visual lines this logical line takes
+            let visual_lines_for_this = if line_len_chars == 0 {
+                1 // Empty line still takes one visual line
+            } else {
+                (line_len_chars + chars_per_line - 1) / chars_per_line
+            };
+
+            if visual_line_count + visual_lines_for_this > visual_line_idx {
+                // Found the right logical line
+                target_logical_line = logical_line;
+                wrap_segment = visual_line_idx.saturating_sub(visual_line_count);
+                break;
+            }
+
+            visual_line_count += visual_lines_for_this;
+            if logical_line == total_lines - 1 {
+                // We've gone past the end, clamp to last line
+                target_logical_line = logical_line;
+                wrap_segment = visual_lines_for_this.saturating_sub(1);
+            }
+        }
+
+        // Now calculate the column within this logical line
+        let line = self.rope.line(target_logical_line);
         let line_len = line.len_chars();
-        // Don't include the trailing newline in the column clamp
         let max_col = if line_len > 0
             && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r')
         {
@@ -1169,9 +1257,15 @@ impl Buffer {
             line_len
         };
 
-        let col_idx = col_idx.min(max_col);
+        // Calculate column based on wrap segment and x position
+        let relative_x = (x - x_offset).max(0.0);
+        let col_in_segment = (relative_x / char_width).round() as usize;
 
-        self.rope.line_to_char(line_idx) + col_idx
+        // Add offset for wrapped segments
+        let col_offset = wrap_segment * chars_per_line;
+        let col_idx = (col_offset + col_in_segment).min(max_col);
+
+        self.rope.line_to_char(target_logical_line) + col_idx
     }
 
     pub fn selection_range(&self) -> Option<(usize, usize)> {

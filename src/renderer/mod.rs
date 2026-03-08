@@ -48,6 +48,9 @@ pub struct Renderer {
     // Syntax highlight cache
     cached_text_hash: u64,
     cached_spans: Vec<crate::syntax::HighlightSpan>,
+    
+    // Current font metrics for rendering calculations
+    current_font_size: f32,
 }
 
 impl Renderer {
@@ -82,7 +85,15 @@ impl Renderer {
         let status_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(12.0, 15.0));
         let cursor_buffer =
             GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        let overlay_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(14.0, 20.0));
+        let mut overlay_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(14.0, 20.0));
+        // Pre-allocate overlay buffer with a large fixed size to avoid resize issues
+        overlay_buffer.set_size(&mut font_system, Some(900.0), Some(600.0));
+        overlay_buffer.set_text(
+            &mut font_system,
+            "",
+            Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+        );
 
         Self {
             font_system,
@@ -105,6 +116,7 @@ impl Renderer {
             cached_text_hash: 0,
             cached_spans: Vec::new(),
             scale_factor: 1.0,
+            current_font_size: FONT_SIZE,
         }
     }
 
@@ -120,7 +132,8 @@ impl Renderer {
     pub fn visible_lines(&self) -> usize {
         let editor_height =
             self.height as f32 - (TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT) * self.scale_factor;
-        (editor_height / (LINE_HEIGHT * self.scale_factor)).floor() as usize
+        let line_height = self.current_font_size * 1.44 * self.scale_factor;
+        (editor_height / line_height).floor() as usize
     }
 
     /// Update all text buffers based on current editor state
@@ -133,6 +146,17 @@ impl Renderer {
         config: &crate::settings::AppConfig,
         settings_cursor: usize,
     ) {
+        // Calculate metrics based on config font size
+        let font_size = config.font_size;
+        let line_height = font_size * 1.44; // Maintain same ratio as default (26/18 ≈ 1.44)
+        
+        // Update stored font size for rendering calculations
+        self.current_font_size = font_size;
+        
+        // Update editor buffer metrics if font size changed
+        self.editor_buffer.set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
+        self.gutter_buffer.set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
+        self.cursor_buffer.set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
         let buffer = editor.active();
         let width = self.width as f32;
         let editor_height = self.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
@@ -192,7 +216,7 @@ impl Renderer {
             Some(GUTTER_WIDTH),
             Some(editor_height),
         );
-        let visible_lines = (editor_height / LINE_HEIGHT).ceil() as usize;
+        let visible_lines = (editor_height / line_height).ceil() as usize;
         let scroll_line = buffer.scroll_y.floor() as usize;
         let total_lines = buffer.line_count();
 
@@ -305,10 +329,11 @@ impl Renderer {
         // --- Cursor ---
         let cursor_line_in_view = buffer.cursor_line() as i64 - scroll_line as i64;
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
+            let char_width = font_size * 0.6;
             self.cursor_buffer.set_size(
                 &mut self.font_system,
-                Some(CHAR_WIDTH * 2.0),
-                Some(LINE_HEIGHT),
+                Some(char_width * 2.0),
+                Some(line_height),
             );
             self.cursor_buffer.set_text(
                 &mut self.font_system,
@@ -359,18 +384,17 @@ impl Renderer {
             } else {
                 (width * 0.5).clamp(300.0, 600.0)
             };
-            let overlay_h = match &overlay.active {
+            let _overlay_h = match &overlay.active {
                 crate::overlay::ActiveOverlay::FindReplace => 52.0,
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0,
                 crate::overlay::ActiveOverlay::Help => 600.0,
                 crate::overlay::ActiveOverlay::Settings => 360.0,
                 _ => 32.0,
             };
-            self.overlay_buffer.set_size(
-                &mut self.font_system,
-                Some(overlay_width - 20.0),
-                Some(overlay_h),
-            );
+            
+            // Don't resize - use pre-allocated buffer size
+            // Just track the current size for rendering bounds
+            let _ = (overlay_width, _overlay_h); // suppress unused warnings
 
             let overlay_text = match &overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
@@ -505,8 +529,9 @@ impl Renderer {
         let status_bar_height = STATUS_BAR_HEIGHT * s;
         let gutter_width = GUTTER_WIDTH * s;
         let line_padding_left = LINE_PADDING_LEFT * s;
-        let line_height = LINE_HEIGHT * s;
-        let char_width = CHAR_WIDTH * s;
+        // Use dynamic font metrics based on current font size
+        let line_height = self.current_font_size * 1.44 * s;
+        let char_width = self.current_font_size * 0.6 * s;
 
         let editor_top = tab_bar_height;
         let editor_left = gutter_width + line_padding_left;
@@ -804,9 +829,8 @@ impl Renderer {
             },
         );
 
-        // Build text areas
-        let mut base_text_areas = Vec::new();
-        let mut overlay_text_areas = Vec::new();
+        // Build base text areas (excluding overlay)
+        let mut base_text_areas: Vec<TextArea> = Vec::new();
 
         // Tab bar text - single buffer with padding-based alignment
         let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0; // vertically center (line_height 16)
@@ -859,7 +883,7 @@ impl Renderer {
         });
 
         // Status bar text (vertically centered)
-        let status_text_top = status_top + (status_bar_height - FONT_SIZE * s) / 2.0;
+        let status_text_top = status_top + (status_bar_height - self.current_font_size * s) / 2.0;
         base_text_areas.push(TextArea {
             buffer: &self.status_buffer,
             left: 10.0 * s,
@@ -877,56 +901,21 @@ impl Renderer {
 
         // Cursor I-beam is rendered as a rect only; no text overlay needed
 
-        // Overlay text area
-        if overlay.is_active() {
-            let is_wide = matches!(
-                overlay.active,
-                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
-            );
-            let overlay_width = if is_wide {
-                (width * 0.8).max(400.0 * s).min(900.0 * s)
-            } else {
-                (width * 0.5).max(300.0 * s).min(600.0 * s)
-            };
-            let overlay_left = (width - overlay_width) / 2.0;
-            let overlay_top_panel = tab_bar_height + 4.0 * s;
-            let overlay_height = match &overlay.active {
-                crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
-                crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
-                crate::overlay::ActiveOverlay::Help => 600.0 * s,
-                crate::overlay::ActiveOverlay::Settings => 360.0 * s,
-                _ => 40.0 * s,
-            };
-            overlay_text_areas.push(TextArea {
-                buffer: &self.overlay_buffer,
-                left: overlay_left + 8.0 * s,
-                top: overlay_top_panel + 6.0 * s,
-                scale: s,
-                bounds: TextBounds {
-                    left: (overlay_left + 8.0 * s) as i32,
-                    top: (overlay_top_panel + 6.0 * s) as i32,
-                    right: (overlay_left + overlay_width - 8.0 * s) as i32,
-                    bottom: (overlay_top_panel + overlay_height) as i32,
-                },
-                default_color: theme.fg.to_glyphon(),
-                custom_glyphs: &[],
-            });
-        }
+        // Prepare base text areas
+        self.text_renderer
+            .prepare(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                base_text_areas,
+                &mut self.swash_cache,
+            )
+            .expect("Failed to prepare base text rendering");
 
         // --- Pass 1: Base Layer (Clear + Shapes + Text) ---
         {
-            self.text_renderer
-                .prepare(
-                    device,
-                    queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    base_text_areas,
-                    &mut self.swash_cache,
-                )
-                .expect("Failed to prepare base text rendering");
-
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("NotepadX Base Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -957,6 +946,41 @@ impl Renderer {
 
         // --- Pass 2: Overlay Layer (Load + Shapes + Text) ---
         if overlay.is_active() {
+            // Build and prepare overlay text area separately
+            let is_wide = matches!(
+                overlay.active,
+                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
+            );
+            let overlay_width = if is_wide {
+                (width * 0.8).max(400.0 * s).min(900.0 * s)
+            } else {
+                (width * 0.5).max(300.0 * s).min(600.0 * s)
+            };
+            let overlay_left = (width - overlay_width) / 2.0;
+            let overlay_top_panel = tab_bar_height + 4.0 * s;
+            let overlay_height = match &overlay.active {
+                crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
+                crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
+                crate::overlay::ActiveOverlay::Help => 600.0 * s,
+                crate::overlay::ActiveOverlay::Settings => 360.0 * s,
+                _ => 40.0 * s,
+            };
+            let overlay_text_areas = vec![TextArea {
+                buffer: &self.overlay_buffer,
+                left: overlay_left + 8.0 * s,
+                top: overlay_top_panel + 6.0 * s,
+                scale: s,
+                bounds: TextBounds {
+                    left: (overlay_left + 8.0 * s) as i32,
+                    top: (overlay_top_panel + 6.0 * s) as i32,
+                    right: (overlay_left + overlay_width - 8.0 * s) as i32,
+                    bottom: (overlay_top_panel + overlay_height) as i32,
+                },
+                default_color: theme.fg.to_glyphon(),
+                custom_glyphs: &[],
+            }];
+
+            // Prepare overlay text separately
             self.text_renderer
                 .prepare(
                     device,

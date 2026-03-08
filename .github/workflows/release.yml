@@ -33,6 +33,14 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -51,7 +59,7 @@ jobs:
           mkdir -p "$APP_DIR/Resources"
           cp target/${{ matrix.target }}/release/notepadx "$APP_DIR/MacOS/NotepadX"
           cp assets/logo.icns "$APP_DIR/Resources/AppIcon.icns"
-          cat > "$APP_DIR/Info.plist" << 'PLIST'
+          cat > "$APP_DIR/Info.plist" << PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -63,9 +71,9 @@ jobs:
             <key>CFBundleIdentifier</key>
             <string>com.notepadx.app</string>
             <key>CFBundleVersion</key>
-            <string>0.1.0</string>
+            <string>${VERSION}</string>
             <key>CFBundleShortVersionString</key>
-            <string>0.1.0</string>
+            <string>${VERSION}</string>
             <key>CFBundleExecutable</key>
             <string>NotepadX</string>
             <key>CFBundleIconFile</key>
