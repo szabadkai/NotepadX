@@ -1,166 +1,202 @@
 # NotepadX
 
-A GPU-accelerated, cross-platform text editor built with Rust, wgpu, and winit.
+Fast native text editing with a GPU render pipeline.
+
+NotepadX is a Rust-built editor focused on one thing: making everyday editing feel immediate, even on large files, without shipping a browser in the box.
 
 ![Status](https://img.shields.io/badge/status-alpha-orange)
+![Rust](https://img.shields.io/badge/rust-2021-orange)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
-## Features
+## Why This Exists
 
-- **GPU-accelerated rendering** via wgpu
-- **Multi-tab editing** with file type detection
-- **6 built-in color themes** — Notepad++ Classic, Catppuccin Mocha, One Dark, Monokai, Nord, Dracula
-- **Command palette** for quick access to all actions
-- **Find & Replace** with live match highlighting
-- **Syntax-aware editing** — auto-indent, comment toggling, bracket auto-close
-- **Clipboard support** (Copy, Cut, Paste)
-- **Undo/Redo**
-- **Smooth scrolling**
+Most editors pick two out of three: speed, native feel, modern UX.
 
-## Installation
+NotepadX is an attempt to keep all three:
+
+- **Native and lean**: Rust + winit + wgpu, no webview runtime
+- **Fast rendering**: GPU text/UI rendering through wgpu + glyphon
+- **Practical editing model**: rope-based buffer, multi-tab workflow, keyboard-first commands
+- **Large-file friendly direction**: memory-mapped and background indexing/search infrastructure
+
+## What You Can Do Today
+
+- Open and edit files in multiple tabs
+- Fast find/replace with live match feedback
+- Go-to-line and command palette overlays
+- Undo/redo, duplicate line, comment toggling, bracket auto-close
+- Clipboard operations (copy/cut/paste)
+- Smooth scrolling and selection behavior
+- Built-in theme switching
+- Optional tree-sitter syntax highlighting for multiple languages
+
+## Language Support
+
+Default build includes:
+
+- JavaScript
+- Python
+- JSON
+
+Full syntax bundle (feature flag) includes:
+
+- JavaScript / TypeScript
+- Python / JSON
+- HTML / CSS
+- TOML / Bash
+- YAML / XML
+
+## Install / Build
+
+### From source
 
 ```bash
+git clone https://github.com/<your-org>/notepadx.git
+cd notepadx
 cargo build --release
 ```
 
-The binary will be at `target/release/notepadx`.
-
-### macOS: Removing Quarantine
-
-If you download a pre-built release on macOS, the app may be quarantined by Gatekeeper (since it's not signed with an Apple Developer certificate). To remove the quarantine:
+Binary output:
 
 ```bash
-# Remove quarantine from the app bundle
-xattr -cr /path/to/NotepadX.app
+target/release/notepadx
+```
 
-# Or if running the binary directly
+Build with all syntax grammars:
+
+```bash
+cargo build --release --features full-syntax
+```
+
+### Run
+
+```bash
+# Start empty
+target/release/notepadx
+
+# Open a file
+target/release/notepadx path/to/file.rs
+```
+
+### macOS quarantine note
+
+If macOS Gatekeeper blocks a downloaded build:
+
+```bash
+xattr -cr /path/to/NotepadX.app
+# or
 xattr -cr /path/to/notepadx
 ```
 
-Alternatively, right-click the app and select "Open" from the context menu, then click "Open" in the dialog that appears.
+## Keyboard-First Workflow
 
-## Usage
+On macOS use Cmd, on Linux/Windows use Ctrl for equivalent shortcuts.
 
-```bash
-# Open with no file (untitled buffer)
-notepadx
-
-# Open a file
-notepadx path/to/file.rs
-
-# Open via drag & drop (drop files onto the window)
-```
-
-## Keyboard Shortcuts
-
-> **Note:** On macOS, `Cmd` is used. On Linux/Windows, `Ctrl` is used instead.
-
-### File Operations
+### Core shortcuts
 
 | Shortcut | Action |
 |---|---|
-| `Cmd+N` | New tab |
-| `Cmd+O` | Open file |
-| `Cmd+S` | Save |
-| `Cmd+Shift+S` | Save as |
-| `Cmd+W` | Close tab |
+| Cmd+N | New tab |
+| Cmd+O | Open file |
+| Cmd+S | Save |
+| Cmd+Shift+S | Save as |
+| Cmd+W | Close tab |
+| Cmd+Z | Undo |
+| Cmd+Shift+Z / Cmd+Y | Redo |
+| Cmd+F | Find |
+| Cmd+H | Find & Replace |
+| Cmd+G | Go to line |
+| Cmd+Shift+P | Command palette |
+| Cmd+K | Cycle theme |
+| F1 | Show keyboard shortcuts |
 
-### Editing
+### Editing behavior
 
-| Shortcut | Action |
-|---|---|
-| `Cmd+Z` | Undo |
-| `Cmd+Shift+Z` / `Cmd+Y` | Redo |
-| `Cmd+C` | Copy |
-| `Cmd+X` | Cut |
-| `Cmd+V` | Paste |
-| `Cmd+A` | Select all |
-| `Cmd+Shift+D` | Duplicate line |
-| `Cmd+/` | Toggle comment |
-| `Tab` | Insert 4 spaces |
-
-### Navigation
-
-| Shortcut | Action |
-|---|---|
-| `←` `→` `↑` `↓` | Move cursor |
-| `Shift+Arrow` | Extend selection |
-| `Home` / `End` | Line start / end |
-| `Cmd+↑` / `Cmd+↓` | Document start / end |
-| `Opt+←` / `Opt+→` | Word left / right |
-| `PageUp` / `PageDown` | Page up / down |
-| `Cmd+]` / `Cmd+[` | Next / previous tab |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-
-### Search & Navigation
-
-| Shortcut | Action |
-|---|---|
-| `Cmd+F` | Find |
-| `Cmd+H` | Find & Replace |
-| `Cmd+G` | Go to line |
-| `Cmd+Shift+P` | Command palette |
-| `↑` / `↓` (in Find) | Previous / next match |
-| `Tab` (in Find & Replace) | Toggle find / replace field |
-
-### Editing Helpers
-
-| Shortcut | Action |
-|---|---|
-| `Opt+Backspace` | Delete word left |
-| `Opt+Delete` | Delete word right |
-
-### Other
-
-| Shortcut | Action |
-|---|---|
-| `Cmd+K` | Cycle color theme |
-| `F1` | Show keyboard shortcuts |
-| `Escape` | Close overlay / clear selection |
-
-### Auto-Behaviors
-
-- **Bracket auto-close** — Typing `(`, `[`, `{`, `"`, `'` automatically inserts the closing pair
-- **Bracket skip-over** — Typing a closing bracket when it's already the next character skips over it
-- **Smart indent** — Enter preserves indentation; adds extra indent after `{`, `(`, `[`; splits bracket pairs into three lines
+- Auto-close for (), [], {}, "", ''
+- Skip-over when a closing bracket already exists
+- Smart indentation on Enter around bracketed blocks
 
 ## Themes
 
-Cycle through themes with `Cmd+K`:
+NotepadX currently ships with **20 built-in themes**:
 
-1. **Notepad++ Classic** — Light theme
-2. **Catppuccin Mocha** — Warm dark theme
-3. **One Dark** — Atom-inspired dark theme
-4. **Monokai** — Classic dark theme
-5. **Nord** — Arctic dark theme
-6. **Dracula** — Purple dark theme
+- Notepad++ Classic (light)
+- Dracula
+- Monokai
+- SynthWave '84
+- Cyberpunk
+- Tokyo Night
+- Night Owl
+- Cobalt2
+- Shades of Purple
+- Ayu Mirage
+- Palenight
+- Andromeda
+- Panda
+- Outrun
+- Horizon
+- LaserWave
+- SweetPop
+- Radical
+- Firefly Pro
+- Hopscotch
 
-## Architecture
+## Architecture Snapshot
 
-```
+```text
 src/
-├── main.rs              # Application entry, event loop, keybindings
-├── editor/
-│   ├── mod.rs           # Editor state, tab management
-│   └── buffer.rs        # Text buffer, cursor, selections, editing ops
-├── renderer/
-│   └── mod.rs           # GPU rendering, UI layout, text rendering
-├── overlay/
-│   ├── mod.rs           # Overlay state management
-│   ├── find.rs          # Find & replace logic
-│   ├── goto.rs          # Go-to-line logic
-│   └── palette.rs       # Command palette
-└── theme/
-    └── mod.rs           # Color themes
+    main.rs            app setup, event loop, key handling
+    editor/            buffer model, tabs, editing operations
+    overlay/           find/replace, goto line, command palette, results
+    renderer/          wgpu pipeline, text and UI draw path
+    syntax/            tree-sitter integration and highlighting
+    theme/             color systems and theme definitions
+    settings/          app configuration load/save
+    menu/              native menu integration
 ```
 
-## Dependencies
+Core stack:
 
-- **wgpu** — GPU rendering backend
-- **winit** — Cross-platform windowing
-- **glyphon** — GPU text rendering
-- **ropey** — Rope data structure for efficient text manipulation
-- **tree-sitter** — Syntax highlighting (planned)
-- **arboard** — Cross-platform clipboard
+- wgpu + winit for native rendering/windowing
+- glyphon for text shaping and GPU text rendering
+- ropey for scalable text storage/editing
+- tree-sitter + tree-sitter-highlight for syntax
+- memmap2 + regex for large-file search/indexing paths
+
+## Current Status
+
+NotepadX is in **alpha**.
+
+What is solid:
+
+- Daily editing workflow
+- Core overlays (find, replace, goto, command palette)
+- Theme and settings system
+
+What is actively improving:
+
+- Session persistence depth
+- Broader language and highlighting polish
+- More performance profiling and tuning on huge files
+
+## Why Hackers Might Care
+
+- It is a real native editor with a modern GPU pipeline
+- The codebase is compact enough to understand and modify
+- It is built to explore performance-sensitive editor design in Rust
+- Contributions can land in visible, user-facing behavior quickly
+
+## Contributing
+
+Issues and PRs are welcome.
+
+Helpful areas:
+
+- Profiling and rendering performance
+- Search/indexing improvements for very large files
+- Syntax/highlighting edge cases
+- UX polish in overlays and keyboard flows
+- Cross-platform testing and packaging
 
 ## License
 
