@@ -29,6 +29,14 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
+/// Convert a character index into a byte offset within `s`, clamping to `s.len()`.
+fn char_offset_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
 struct App {
     // Core state
     editor: Editor,
@@ -468,6 +476,149 @@ impl App {
         self.needs_redraw = true;
     }
 
+    fn overlay_cursor_from_x(&self, x: f32, focus_replace: bool) -> usize {
+        let win_w = self
+            .renderer
+            .as_ref()
+            .map(|r| r.width as f32 / r.scale_factor.max(1.0))
+            .unwrap_or(800.0);
+        let is_wide = matches!(
+            self.overlay.active,
+            ActiveOverlay::Help | ActiveOverlay::Settings
+        );
+        let overlay_width = if is_wide {
+            (win_w * 0.8).clamp(400.0, 900.0)
+        } else {
+            (win_w * 0.5).clamp(300.0, 600.0)
+        };
+        let overlay_left = (win_w - overlay_width) / 2.0;
+        let text_left = overlay_left + 8.0;
+        let char_w = renderer::OVERLAY_CHAR_WIDTH;
+        let prefix_chars = match self.overlay.active {
+            ActiveOverlay::Find => 6.0,
+            ActiveOverlay::FindReplace => 9.0,
+            _ => 0.0,
+        };
+        let rel_x = (x - text_left - prefix_chars * char_w).max(0.0);
+        let char_idx = (rel_x / char_w).round() as usize;
+
+        if focus_replace {
+            char_offset_to_byte(&self.overlay.replace_input, char_idx)
+        } else {
+            char_offset_to_byte(&self.overlay.input, char_idx)
+        }
+    }
+
+    fn handle_overlay_drag(&mut self) {
+        if !matches!(self.overlay.active, ActiveOverlay::Find | ActiveOverlay::FindReplace) {
+            return;
+        }
+
+        let (mx, _) = self.mouse_pos;
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0);
+        let x = (mx / scale) as f32;
+
+        if self.overlay.active == ActiveOverlay::FindReplace && self.overlay.focus_replace {
+            if self.overlay.replace_sel_anchor.is_none() {
+                self.overlay.replace_sel_anchor = Some(self.overlay.replace_cursor_pos);
+            }
+            self.overlay.replace_cursor_pos = self.overlay_cursor_from_x(x, true);
+        } else {
+            if self.overlay.input_sel_anchor.is_none() {
+                self.overlay.input_sel_anchor = Some(self.overlay.cursor_pos);
+            }
+            self.overlay.cursor_pos = self.overlay_cursor_from_x(x, false);
+        }
+
+        self.needs_redraw = true;
+    }
+
+    fn handle_overlay_click(&mut self) {
+        use crate::overlay::ActiveOverlay;
+        use renderer::TAB_BAR_HEIGHT;
+
+        let (mx, my) = self.mouse_pos;
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0);
+        let x = (mx / scale) as f32;
+        let y = (my / scale) as f32;
+
+        // Replicate the renderer's overlay geometry (unscaled logical pixels)
+        let win_w = self
+            .renderer
+            .as_ref()
+            .map(|r| r.width as f32 / r.scale_factor.max(1.0))
+            .unwrap_or(800.0);
+
+        let is_wide = matches!(
+            self.overlay.active,
+            ActiveOverlay::Help | ActiveOverlay::Settings
+        );
+        let overlay_width = if is_wide {
+            (win_w * 0.8).clamp(400.0, 900.0)
+        } else {
+            (win_w * 0.5).clamp(300.0, 600.0)
+        };
+        let overlay_left = (win_w - overlay_width) / 2.0;
+        let overlay_top = TAB_BAR_HEIGHT + 4.0;
+        let overlay_height = match &self.overlay.active {
+            ActiveOverlay::FindReplace => 60.0,
+            ActiveOverlay::CommandPalette => 300.0,
+            ActiveOverlay::Help => 600.0,
+            ActiveOverlay::Settings => 360.0,
+            _ => 40.0,
+        };
+
+        // Ignore clicks outside the overlay panel
+        if x < overlay_left
+            || x > overlay_left + overlay_width
+            || y < overlay_top
+            || y > overlay_top + overlay_height
+        {
+            return;
+        }
+
+        // Text inside the overlay starts at overlay_left + 8px horizontal, overlay_top + 6px vertical
+        let text_top = overlay_top + 6.0;
+        let line_height = renderer::OVERLAY_LINE_HEIGHT;
+
+        match &self.overlay.active {
+            ActiveOverlay::Find => {
+                let cursor = self.overlay_cursor_from_x(x, false);
+                self.overlay.focus_replace = false;
+                self.overlay.cursor_pos = cursor;
+                self.overlay.input_sel_anchor = Some(cursor);
+                self.overlay.replace_sel_anchor = None;
+            }
+            ActiveOverlay::FindReplace => {
+                let in_replace_row = y >= text_top + line_height;
+                if in_replace_row {
+                    let cursor = self.overlay_cursor_from_x(x, true);
+                    self.overlay.focus_replace = true;
+                    self.overlay.replace_cursor_pos = cursor;
+                    self.overlay.replace_sel_anchor = Some(cursor);
+                    self.overlay.input_sel_anchor = None;
+                } else {
+                    let cursor = self.overlay_cursor_from_x(x, false);
+                    self.overlay.focus_replace = false;
+                    self.overlay.cursor_pos = cursor;
+                    self.overlay.input_sel_anchor = Some(cursor);
+                    self.overlay.replace_sel_anchor = None;
+                }
+            }
+            _ => {} // Help, Settings, Palette, Goto — no editable text fields to target
+        }
+
+        self.needs_redraw = true;
+    }
+
     fn handle_key_event(&mut self, event: KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
@@ -845,6 +996,10 @@ impl App {
                 self.overlay.backspace();
                 self.on_overlay_input_changed();
             }
+            Key::Named(NamedKey::Delete) => {
+                self.overlay.delete_forward();
+                self.on_overlay_input_changed();
+            }
             Key::Named(NamedKey::ArrowLeft) => {
                 self.overlay.move_input_left();
             }
@@ -879,6 +1034,21 @@ impl App {
             // Select all in overlay input
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "a" => {
                 self.overlay.select_all();
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
+                if let Some(text) = self.overlay.get_selected_text() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "x" => {
+                if let Some(text) = self.overlay.cut_selected_text() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                    self.on_overlay_input_changed();
+                }
             }
             // Paste into overlay input
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "v" => {
@@ -1373,17 +1543,46 @@ impl App {
                 self.needs_redraw = true;
             }
             MenuAction::Cut => {
-                if let Some(text) = self.editor.active_mut().cut() {
-                    if let Some(clip) = &mut self.clipboard {
-                        let _ = clip.set_text(text);
+                if matches!(
+                    self.overlay.active,
+                    ActiveOverlay::Find
+                        | ActiveOverlay::FindReplace
+                        | ActiveOverlay::GotoLine
+                        | ActiveOverlay::CommandPalette
+                ) {
+                    if let Some(text) = self.overlay.cut_selected_text() {
+                        if let Some(clip) = &mut self.clipboard {
+                            let _ = clip.set_text(text);
+                        }
+                        self.on_overlay_input_changed();
+                    }
+                } else if !self.overlay.is_active() {
+                    if let Some(text) = self.editor.active_mut().cut() {
+                        if let Some(clip) = &mut self.clipboard {
+                            let _ = clip.set_text(text);
+                        }
                     }
                 }
                 self.needs_redraw = true;
             }
             MenuAction::Copy => {
-                if let Some(text) = self.editor.active().copy() {
-                    if let Some(clip) = &mut self.clipboard {
-                        let _ = clip.set_text(text);
+                if matches!(
+                    self.overlay.active,
+                    ActiveOverlay::Find
+                        | ActiveOverlay::FindReplace
+                        | ActiveOverlay::GotoLine
+                        | ActiveOverlay::CommandPalette
+                ) {
+                    if let Some(text) = self.overlay.get_selected_text() {
+                        if let Some(clip) = &mut self.clipboard {
+                            let _ = clip.set_text(text);
+                        }
+                    }
+                } else if !self.overlay.is_active() {
+                    if let Some(text) = self.editor.active().copy() {
+                        if let Some(clip) = &mut self.clipboard {
+                            let _ = clip.set_text(text);
+                        }
                     }
                 }
                 self.needs_redraw = true;
@@ -1391,10 +1590,16 @@ impl App {
             MenuAction::Paste => {
                 if let Some(clip) = &mut self.clipboard {
                     if let Ok(text) = clip.get_text() {
-                        if self.overlay.is_active() {
+                        if matches!(
+                            self.overlay.active,
+                            ActiveOverlay::Find
+                                | ActiveOverlay::FindReplace
+                                | ActiveOverlay::GotoLine
+                                | ActiveOverlay::CommandPalette
+                        ) {
                             self.overlay.insert_str(&text);
                             self.on_overlay_input_changed();
-                        } else {
+                        } else if !self.overlay.is_active() {
                             self.editor.active_mut().insert_text(&text);
                         }
                     }
@@ -1402,9 +1607,19 @@ impl App {
                 self.needs_redraw = true;
             }
             MenuAction::SelectAll => {
-                let buffer = self.editor.active_mut();
-                buffer.selection_anchor = Some(0);
-                buffer.cursor = buffer.rope.len_chars();
+                if matches!(
+                    self.overlay.active,
+                    ActiveOverlay::Find
+                        | ActiveOverlay::FindReplace
+                        | ActiveOverlay::GotoLine
+                        | ActiveOverlay::CommandPalette
+                ) {
+                    self.overlay.select_all();
+                } else if !self.overlay.is_active() {
+                    let buffer = self.editor.active_mut();
+                    buffer.selection_anchor = Some(0);
+                    buffer.cursor = buffer.rope.len_chars();
+                }
                 self.needs_redraw = true;
             }
             MenuAction::Find => {
@@ -1540,7 +1755,9 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                if self.is_mouse_down && !self.overlay.is_active() && !self.suppress_drag {
+                if self.is_mouse_down && self.overlay.is_active() {
+                    self.handle_overlay_drag();
+                } else if self.is_mouse_down && !self.overlay.is_active() && !self.suppress_drag {
                     self.handle_mouse_drag();
                 }
             }

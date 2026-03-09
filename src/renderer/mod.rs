@@ -23,6 +23,9 @@ pub const RESULTS_PANEL_MIN_HEIGHT: f32 = 120.0;
 pub const FONT_SIZE: f32 = 18.0;
 pub const LINE_HEIGHT: f32 = 26.0;
 pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6; // Monospace character width approximation
+pub const OVERLAY_FONT_SIZE: f32 = 14.0;
+pub const OVERLAY_LINE_HEIGHT: f32 = 20.0;
+pub const OVERLAY_CHAR_WIDTH: f32 = OVERLAY_FONT_SIZE * 0.6;
 
 /// Persistent text buffers for glyphon rendering
 pub struct Renderer {
@@ -89,7 +92,10 @@ impl Renderer {
         let status_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(12.0, 15.0));
         let cursor_buffer =
             GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        let mut overlay_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(14.0, 20.0));
+        let mut overlay_buffer = GlyphonBuffer::new(
+            &mut font_system,
+            Metrics::new(OVERLAY_FONT_SIZE, OVERLAY_LINE_HEIGHT),
+        );
         // Pre-allocate overlay buffer with a large fixed size to avoid resize issues
         overlay_buffer.set_size(&mut font_system, Some(900.0), Some(600.0));
         overlay_buffer.set_text(
@@ -1076,6 +1082,60 @@ impl Renderer {
                 h: overlay_height,
                 color: border_color,
             });
+
+            let overlay_char_width = OVERLAY_CHAR_WIDTH * s;
+            let overlay_line_height = OVERLAY_LINE_HEIGHT * s;
+            let selection_color = [
+                theme.selection.r,
+                theme.selection.g,
+                theme.selection.b,
+                theme.selection.a.max(0.4),
+            ];
+
+            match overlay.active {
+                crate::overlay::ActiveOverlay::Find => {
+                    if let Some((start, end)) = overlay.find_selection_char_range() {
+                        overlay_rects.push(Rect {
+                            x: overlay_left
+                                + 8.0 * s
+                                + 6.0 * overlay_char_width
+                                + start as f32 * overlay_char_width,
+                            y: overlay_top_panel + 6.0 * s,
+                            w: (end - start) as f32 * overlay_char_width,
+                            h: overlay_line_height,
+                            color: selection_color,
+                        });
+                    }
+                }
+                crate::overlay::ActiveOverlay::FindReplace => {
+                    if let Some((start, end)) = overlay.find_selection_char_range() {
+                        overlay_rects.push(Rect {
+                            x: overlay_left
+                                + 8.0 * s
+                                + 9.0 * overlay_char_width
+                                + start as f32 * overlay_char_width,
+                            y: overlay_top_panel + 6.0 * s,
+                            w: (end - start) as f32 * overlay_char_width,
+                            h: overlay_line_height,
+                            color: selection_color,
+                        });
+                    }
+
+                    if let Some((start, end)) = overlay.replace_selection_char_range() {
+                        overlay_rects.push(Rect {
+                            x: overlay_left
+                                + 8.0 * s
+                                + 9.0 * overlay_char_width
+                                + start as f32 * overlay_char_width,
+                            y: overlay_top_panel + 6.0 * s + overlay_line_height,
+                            w: (end - start) as f32 * overlay_char_width,
+                            h: overlay_line_height,
+                            color: selection_color,
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
         let editor_height = height - tab_bar_height - status_bar_height - results_panel_height_px;
 

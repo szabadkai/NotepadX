@@ -24,11 +24,13 @@ pub struct OverlayState {
     pub active: ActiveOverlay,
     pub input: String,
     pub cursor_pos: usize,
+    pub input_sel_anchor: Option<usize>,
 
     // Replace field
     pub replace_input: String,
     pub replace_cursor_pos: usize,
     pub focus_replace: bool,
+    pub replace_sel_anchor: Option<usize>,
 
     // Find state
     pub find: find::FindState,
@@ -49,9 +51,11 @@ impl OverlayState {
             active: ActiveOverlay::None,
             input: String::new(),
             cursor_pos: 0,
+            input_sel_anchor: None,
             replace_input: String::new(),
             replace_cursor_pos: 0,
             focus_replace: false,
+            replace_sel_anchor: None,
             find: find::FindState::new(),
             results_panel: results_panel::ResultsPanel::new(),
         }
@@ -61,18 +65,22 @@ impl OverlayState {
         self.active = overlay;
         self.input.clear();
         self.cursor_pos = 0;
+        self.input_sel_anchor = None;
         self.replace_input.clear();
         self.replace_cursor_pos = 0;
         self.focus_replace = false;
+        self.replace_sel_anchor = None;
     }
 
     pub fn close(&mut self) {
         self.active = ActiveOverlay::None;
         self.input.clear();
         self.cursor_pos = 0;
+        self.input_sel_anchor = None;
         self.replace_input.clear();
         self.replace_cursor_pos = 0;
         self.focus_replace = false;
+        self.replace_sel_anchor = None;
         self.find.reset();
     }
 
@@ -84,10 +92,92 @@ impl OverlayState {
     pub fn toggle_focus(&mut self) {
         if self.active == ActiveOverlay::FindReplace {
             self.focus_replace = !self.focus_replace;
+            self.input_sel_anchor = None;
+            self.replace_sel_anchor = None;
+        }
+    }
+
+    pub fn delete_selection(&mut self) -> bool {
+        if self.focus_replace {
+            if let Some(anchor) = self.replace_sel_anchor.take() {
+                if anchor != self.replace_cursor_pos {
+                    let start = anchor.min(self.replace_cursor_pos);
+                    let end = anchor.max(self.replace_cursor_pos);
+                    self.replace_input.drain(start..end);
+                    self.replace_cursor_pos = start;
+                    return true;
+                }
+            }
+        } else if let Some(anchor) = self.input_sel_anchor.take() {
+            if anchor != self.cursor_pos {
+                let start = anchor.min(self.cursor_pos);
+                let end = anchor.max(self.cursor_pos);
+                self.input.drain(start..end);
+                self.cursor_pos = start;
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn find_selection_char_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.input_sel_anchor?;
+        if anchor == self.cursor_pos {
+            return None;
+        }
+
+        let start = self.input[..anchor.min(self.cursor_pos)].chars().count();
+        let end = self.input[..anchor.max(self.cursor_pos)].chars().count();
+        Some((start, end))
+    }
+
+    pub fn replace_selection_char_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.replace_sel_anchor?;
+        if anchor == self.replace_cursor_pos {
+            return None;
+        }
+
+        let start = self.replace_input[..anchor.min(self.replace_cursor_pos)]
+            .chars()
+            .count();
+        let end = self.replace_input[..anchor.max(self.replace_cursor_pos)]
+            .chars()
+            .count();
+        Some((start, end))
+    }
+
+    pub fn get_selected_text(&self) -> Option<String> {
+        if self.focus_replace {
+            let anchor = self.replace_sel_anchor?;
+            if anchor == self.replace_cursor_pos {
+                return None;
+            }
+            let start = anchor.min(self.replace_cursor_pos);
+            let end = anchor.max(self.replace_cursor_pos);
+            Some(self.replace_input[start..end].to_string())
+        } else {
+            let anchor = self.input_sel_anchor?;
+            if anchor == self.cursor_pos {
+                return None;
+            }
+            let start = anchor.min(self.cursor_pos);
+            let end = anchor.max(self.cursor_pos);
+            Some(self.input[start..end].to_string())
+        }
+    }
+
+    pub fn cut_selected_text(&mut self) -> Option<String> {
+        let selected = self.get_selected_text()?;
+        if self.delete_selection() {
+            Some(selected)
+        } else {
+            None
         }
     }
 
     pub fn insert_char(&mut self, ch: char) {
+        self.delete_selection();
         if self.focus_replace {
             self.replace_input.insert(self.replace_cursor_pos, ch);
             self.replace_cursor_pos += ch.len_utf8();
@@ -98,6 +188,7 @@ impl OverlayState {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.delete_selection();
         if self.focus_replace {
             self.replace_input.insert_str(self.replace_cursor_pos, s);
             self.replace_cursor_pos += s.len();
@@ -108,6 +199,10 @@ impl OverlayState {
     }
 
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+
         if self.focus_replace {
             if self.replace_cursor_pos > 0 {
                 let prev = self.replace_input[..self.replace_cursor_pos]
@@ -129,8 +224,33 @@ impl OverlayState {
         }
     }
 
+    pub fn delete_forward(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+
+        if self.focus_replace {
+            if self.replace_cursor_pos < self.replace_input.len() {
+                let next = self.replace_input[self.replace_cursor_pos..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| self.replace_cursor_pos + i)
+                    .unwrap_or(self.replace_input.len());
+                self.replace_input.drain(self.replace_cursor_pos..next);
+            }
+        } else if self.cursor_pos < self.input.len() {
+            let next = self.input[self.cursor_pos..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor_pos + i)
+                .unwrap_or(self.input.len());
+            self.input.drain(self.cursor_pos..next);
+        }
+    }
+
     pub fn move_input_left(&mut self) {
         if self.focus_replace {
+            self.replace_sel_anchor = None;
             if self.replace_cursor_pos > 0 {
                 self.replace_cursor_pos = self.replace_input[..self.replace_cursor_pos]
                     .char_indices()
@@ -138,17 +258,21 @@ impl OverlayState {
                     .map(|(i, _)| i)
                     .unwrap_or(0);
             }
-        } else if self.cursor_pos > 0 {
-            self.cursor_pos = self.input[..self.cursor_pos]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+        } else {
+            self.input_sel_anchor = None;
+            if self.cursor_pos > 0 {
+                self.cursor_pos = self.input[..self.cursor_pos]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
         }
     }
 
     pub fn move_input_right(&mut self) {
         if self.focus_replace {
+            self.replace_sel_anchor = None;
             if self.replace_cursor_pos < self.replace_input.len() {
                 self.replace_cursor_pos = self.replace_input[self.replace_cursor_pos..]
                     .char_indices()
@@ -156,12 +280,26 @@ impl OverlayState {
                     .map(|(i, _)| self.replace_cursor_pos + i)
                     .unwrap_or(self.replace_input.len());
             }
-        } else if self.cursor_pos < self.input.len() {
-            self.cursor_pos = self.input[self.cursor_pos..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor_pos + i)
-                .unwrap_or(self.input.len());
+        } else {
+            self.input_sel_anchor = None;
+            if self.cursor_pos < self.input.len() {
+                self.cursor_pos = self.input[self.cursor_pos..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| self.cursor_pos + i)
+                    .unwrap_or(self.input.len());
+            }
+        }
+    }
+
+    /// Select all text in the active field.
+    pub fn select_all(&mut self) {
+        if self.focus_replace {
+            self.replace_sel_anchor = Some(0);
+            self.replace_cursor_pos = self.replace_input.len();
+        } else {
+            self.input_sel_anchor = Some(0);
+            self.cursor_pos = self.input.len();
         }
     }
 }
