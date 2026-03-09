@@ -5,12 +5,23 @@ edition = "2021"
 description = "A fast, beautiful, cross-platform text editor"
 license = "MIT"
 
+[features]
+default = ["lang-js", "lang-python", "lang-json"]
+full-syntax = ["lang-js", "lang-ts", "lang-python", "lang-json", "lang-html", "lang-css", "lang-toml", "lang-bash", "lang-yaml", "lang-xml"]
+lang-js = ["dep:tree-sitter-javascript"]
+lang-ts = ["dep:tree-sitter-typescript"]
+lang-python = ["dep:tree-sitter-python"]
+lang-json = ["dep:tree-sitter-json"]
+lang-html = ["dep:tree-sitter-html"]
+lang-css = ["dep:tree-sitter-css"]
+lang-toml = ["dep:tree-sitter-toml-ng"]
+lang-bash = ["dep:tree-sitter-bash"]
+lang-yaml = ["dep:tree-sitter-yaml"]
+lang-xml = ["dep:tree-sitter-xml"]
+
 [dependencies]
 # Windowing
 winit = "0.30"
-
-# GPU rendering
-wgpu = "23"
 
 # Text shaping & layout
 glyphon = "0.7"
@@ -28,14 +39,14 @@ env_logger = "0.11"
 # Error handling
 anyhow = "1.0"
 
-# Regex search
-regex = "1"
+# Regex search (minimal — no Unicode tables or DFA)
+regex = { version = "1", default-features = false, features = ["std"] }
 
 # Memory-mapped I/O for large-file search
 memmap2 = "0.9"
 
-# Clipboard
-arboard = "3"
+# Clipboard (text only, no image support)
+arboard = { version = "3", default-features = false }
 
 # File dialog
 rfd = "0.15"
@@ -48,7 +59,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # PNG decoding for app icon
-image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.17"
 
 # Vertex data
 bytemuck = { version = "1.19", features = ["derive"] }
@@ -59,16 +70,26 @@ muda = "0.15"
 # Syntax highlighting (tree-sitter)
 tree-sitter = "0.24"
 tree-sitter-highlight = "0.24"
-tree-sitter-javascript = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-json = "0.24"
-tree-sitter-html = "0.23"
-tree-sitter-css = "0.23"
-tree-sitter-toml-ng = "0.7"
-tree-sitter-bash = "0.23"
-tree-sitter-yaml = "0.7"
-tree-sitter-xml = "0.7"
+tree-sitter-javascript = { version = "0.23", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-html = { version = "0.23", optional = true }
+tree-sitter-css = { version = "0.23", optional = true }
+tree-sitter-toml-ng = { version = "0.7", optional = true }
+tree-sitter-bash = { version = "0.23", optional = true }
+tree-sitter-yaml = { version = "0.7", optional = true }
+tree-sitter-xml = { version = "0.7", optional = true }
+
+# GPU rendering (platform-specific backends)
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "23", default-features = false, features = ["metal", "wgsl"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { version = "23", default-features = false, features = ["dx12", "wgsl"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "23", default-features = false, features = ["wgc", "wgsl"] }
 
 [build-dependencies]
 winres = "0.1"

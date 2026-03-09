@@ -72,6 +72,7 @@ struct LangDef {
 /// Get all supported language definitions
 fn language_defs() -> Vec<LangDef> {
     vec![
+        #[cfg(feature = "lang-js")]
         LangDef {
             extensions: &["js", "mjs", "cjs", "jsx"],
             name: "javascript",
@@ -80,6 +81,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: tree_sitter_javascript::INJECTIONS_QUERY,
             locals_query: tree_sitter_javascript::LOCALS_QUERY,
         },
+        #[cfg(feature = "lang-ts")]
         LangDef {
             extensions: &["ts", "tsx"],
             name: "typescript",
@@ -88,6 +90,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: tree_sitter_typescript::LOCALS_QUERY,
         },
+        #[cfg(feature = "lang-python")]
         LangDef {
             extensions: &["py", "pyi"],
             name: "python",
@@ -96,6 +99,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: "",
         },
+        #[cfg(feature = "lang-json")]
         LangDef {
             extensions: &["json", "jsonc"],
             name: "json",
@@ -104,6 +108,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: "",
         },
+        #[cfg(feature = "lang-html")]
         LangDef {
             extensions: &["html", "htm"],
             name: "html",
@@ -112,6 +117,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: tree_sitter_html::INJECTIONS_QUERY,
             locals_query: "",
         },
+        #[cfg(feature = "lang-css")]
         LangDef {
             extensions: &["css", "scss"],
             name: "css",
@@ -120,6 +126,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: "",
         },
+        #[cfg(feature = "lang-toml")]
         LangDef {
             extensions: &["toml"],
             name: "toml",
@@ -128,6 +135,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: "",
         },
+        #[cfg(feature = "lang-bash")]
         LangDef {
             extensions: &["sh", "bash", "zsh"],
             name: "bash",
@@ -136,6 +144,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: "",
         },
+        #[cfg(feature = "lang-yaml")]
         LangDef {
             extensions: &["yml", "yaml"],
             name: "yaml",
@@ -144,6 +153,7 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: "",
         },
+        #[cfg(feature = "lang-xml")]
         LangDef {
             extensions: &["xml", "svg", "xsl", "xslt"],
             name: "xml",

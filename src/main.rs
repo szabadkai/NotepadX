@@ -1686,11 +1686,14 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             // Build window icon from embedded logo.png
             let icon_bytes = include_bytes!("../assets/logo.png");
-            let icon = image::load_from_memory(icon_bytes).ok().and_then(|img| {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
-            });
+            let icon = (|| -> Option<winit::window::Icon> {
+                let decoder = png::Decoder::new(std::io::Cursor::new(icon_bytes as &[u8]));
+                let mut reader = decoder.read_info().ok()?;
+                let mut buf = vec![0u8; reader.output_buffer_size()];
+                let info = reader.next_frame(&mut buf).ok()?;
+                buf.truncate(info.buffer_size());
+                winit::window::Icon::from_rgba(buf, info.width, info.height).ok()
+            })();
 
             let mut attrs = WindowAttributes::default()
                 .with_title("NotepadX")
