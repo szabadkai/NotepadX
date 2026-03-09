@@ -576,7 +576,7 @@ impl Buffer {
 
     // --- Word-wise Movement ---
 
-    fn is_word_char(ch: char) -> bool {
+    pub fn is_word_char(ch: char) -> bool {
         ch.is_alphanumeric() || ch == '_'
     }
 
@@ -1169,7 +1169,9 @@ impl Buffer {
             let max_col = if line_len > 0
                 && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r')
             {
-                if line_len > 1 && line.char(line_len - 1) == '\n' && line.char(line_len - 2) == '\r'
+                if line_len > 1
+                    && line.char(line_len - 1) == '\n'
+                    && line.char(line_len - 2) == '\r'
                 {
                     line_len.saturating_sub(2)
                 } else {
@@ -1224,7 +1226,7 @@ impl Buffer {
             let visual_lines_for_this = if line_len_chars == 0 {
                 1 // Empty line still takes one visual line
             } else {
-                (line_len_chars + chars_per_line - 1) / chars_per_line
+                line_len_chars.div_ceil(chars_per_line)
             };
 
             if visual_line_count + visual_lines_for_this > visual_line_idx {

@@ -48,7 +48,7 @@ pub struct Renderer {
     // Syntax highlight cache
     cached_text_hash: u64,
     cached_spans: Vec<crate::syntax::HighlightSpan>,
-    
+
     // Current font metrics for rendering calculations
     current_font_size: f32,
 }
@@ -149,14 +149,17 @@ impl Renderer {
         // Calculate metrics based on config font size
         let font_size = config.font_size;
         let line_height = font_size * 1.44; // Maintain same ratio as default (26/18 ≈ 1.44)
-        
+
         // Update stored font size for rendering calculations
         self.current_font_size = font_size;
-        
+
         // Update editor buffer metrics if font size changed
-        self.editor_buffer.set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
-        self.gutter_buffer.set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
-        self.cursor_buffer.set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
+        self.editor_buffer
+            .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
+        self.gutter_buffer
+            .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
+        self.cursor_buffer
+            .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
         let buffer = editor.active();
         let width = self.width as f32;
         let editor_height = self.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
@@ -391,7 +394,7 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Settings => 360.0,
                 _ => 32.0,
             };
-            
+
             // Don't resize - use pre-allocated buffer size
             // Just track the current size for rendering bounds
             let _ = (overlay_width, _overlay_h); // suppress unused warnings

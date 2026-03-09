@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(test)]
+mod tests;
+
 /// Persistent application settings, saved to a JSON config file
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     /// Selected theme index (0..N)
     pub theme_index: usize,

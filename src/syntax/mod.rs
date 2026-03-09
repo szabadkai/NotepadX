@@ -160,6 +160,12 @@ pub struct SyntaxHighlighter {
     configs: Vec<(Vec<String>, HighlightConfiguration)>,
 }
 
+impl Default for SyntaxHighlighter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SyntaxHighlighter {
     pub fn new() -> Self {
         let mut configs = Vec::new();

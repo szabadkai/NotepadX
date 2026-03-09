@@ -2,6 +2,9 @@ pub mod find;
 pub mod goto;
 pub mod palette;
 
+#[cfg(test)]
+mod tests;
+
 /// Which overlay is currently active
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ActiveOverlay {
@@ -28,6 +31,12 @@ pub struct OverlayState {
 
     // Find state
     pub find: find::FindState,
+}
+
+impl Default for OverlayState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OverlayState {

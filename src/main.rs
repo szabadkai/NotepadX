@@ -39,7 +39,7 @@ struct App {
     config: AppConfig,
     // Settings overlay: which item is focused (0-based row)
     settings_cursor: usize,
-    
+
     // Native menu bar
     menu: AppMenu,
 
@@ -326,7 +326,10 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        use renderer::{
+            CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH,
+            TAB_BAR_HEIGHT,
+        };
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
@@ -370,8 +373,15 @@ impl App {
 
             // Calculate wrap width for line wrapping
             let wrap_width = if self.editor.active().wrap_enabled {
-                Some((self.renderer.as_ref().map(|r| r.width as f32).unwrap_or(800.0) 
-                    - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH)).max(100.0))
+                Some(
+                    (self
+                        .renderer
+                        .as_ref()
+                        .map(|r| r.width as f32)
+                        .unwrap_or(800.0)
+                        - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
+                        .max(100.0),
+                )
             } else {
                 None
             };
@@ -414,15 +424,25 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        use renderer::{
+            CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH,
+            TAB_BAR_HEIGHT,
+        };
 
         if y >= TAB_BAR_HEIGHT as f64 {
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
 
             // Calculate wrap width for line wrapping
             let wrap_width = if self.editor.active().wrap_enabled {
-                Some((self.renderer.as_ref().map(|r| r.width as f32).unwrap_or(800.0) 
-                    - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH)).max(100.0))
+                Some(
+                    (self
+                        .renderer
+                        .as_ref()
+                        .map(|r| r.width as f32)
+                        .unwrap_or(800.0)
+                        - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
+                        .max(100.0),
+                )
             } else {
                 None
             };
@@ -1227,7 +1247,7 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window");
             let window = Arc::new(window);
             self.init_gpu(window);
-            
+
             // Initialize the native menu bar
             self.menu.init();
         }
@@ -1359,7 +1379,7 @@ impl ApplicationHandler for App {
         while let Some(action) = AppMenu::try_recv() {
             self.handle_menu_action(action);
         }
-        
+
         let scroll_diff_y =
             (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
         let scroll_diff_x =

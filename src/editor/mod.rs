@@ -1,5 +1,8 @@
 pub mod buffer;
 
+#[cfg(test)]
+mod buffer_tests;
+
 pub use buffer::Buffer;
 
 /// The editor state managing all open buffers

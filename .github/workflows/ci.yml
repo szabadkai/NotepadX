@@ -127,3 +127,6 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test --lib --test integration_tests

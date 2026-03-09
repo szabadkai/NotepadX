@@ -18,6 +18,12 @@ pub struct FindState {
     pub replace_text: String,
 }
 
+impl Default for FindState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FindState {
     pub fn new() -> Self {
         Self {
