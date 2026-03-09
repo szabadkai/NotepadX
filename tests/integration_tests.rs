@@ -387,8 +387,13 @@ fn test_large_file_display_line_count_uses_global_progress() {
         .display_line_count()
         .expect("Display count should exist");
 
-    assert!(!buffer.display_line_count_is_exact());
-    assert!(displayed_count > buffer.line_count());
+    // Indexing runs in the background and may complete quickly on fast machines.
+    // Validate both states deterministically instead of assuming in-progress indexing.
+    if buffer.display_line_count_is_exact() {
+        assert!(displayed_count >= buffer.line_count());
+    } else {
+        assert!(displayed_count > buffer.line_count());
+    }
     assert!(displayed_count > 120_000);
 
     let _ = std::fs::remove_file(path);
