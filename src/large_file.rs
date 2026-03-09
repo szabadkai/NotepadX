@@ -525,10 +525,7 @@ fn search_mmap(
     options: &SearchOptions,
     cancelled: Option<&AtomicBool>,
 ) -> Result<SearchResult> {
-    let scan_limit = options
-        .max_scan_bytes
-        .unwrap_or(file_size)
-        .min(file_size) as usize;
+    let scan_limit = options.max_scan_bytes.unwrap_or(file_size).min(file_size) as usize;
     let data = &mmap[..scan_limit];
     let chunk_bytes = options.chunk_bytes.max(4096);
     let mut total_matches = 0usize;

@@ -88,12 +88,8 @@ impl AppMenu {
             None,
         );
 
-        let save_workspace_item = MenuItem::with_id(
-            MenuId::new("save_workspace"),
-            "Save Workspace",
-            true,
-            None,
-        );
+        let save_workspace_item =
+            MenuItem::with_id(MenuId::new("save_workspace"), "Save Workspace", true, None);
 
         let close_item = MenuItem::with_id(
             MenuId::new("close"),

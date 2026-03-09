@@ -580,6 +580,62 @@ impl Buffer {
         });
     }
 
+    /// Replace a character range and record a single undo operation.
+    /// Returns the removed text.
+    pub fn replace_range_chars(&mut self, start: usize, end: usize, replacement: &str) -> String {
+        if self.is_read_only() {
+            return String::new();
+        }
+
+        let start = start.min(self.rope.len_chars());
+        let end = end.min(self.rope.len_chars());
+        if start > end {
+            return String::new();
+        }
+
+        let removed: String = self.rope.slice(start..end).to_string();
+        let cursor_before = self.cursor;
+        self.rope.remove(start..end);
+        self.rope.insert(start, replacement);
+        self.cursor = start + replacement.chars().count();
+        self.selection_anchor = None;
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.undo_stack.push(EditOperation {
+            offset: start,
+            removed: removed.clone(),
+            inserted: replacement.to_string(),
+            cursor_before,
+        });
+
+        removed
+    }
+
+    /// Replace full buffer text and record a single undo operation.
+    pub fn replace_all_text_snapshot(&mut self, new_text: &str) {
+        if self.is_read_only() {
+            return;
+        }
+
+        let old_text = self.rope.to_string();
+        if old_text == new_text {
+            return;
+        }
+
+        let cursor_before = self.cursor;
+        self.rope = Rope::from_str(new_text);
+        self.cursor = self.cursor.min(self.rope.len_chars());
+        self.selection_anchor = None;
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.undo_stack.push(EditOperation {
+            offset: 0,
+            removed: old_text,
+            inserted: new_text.to_string(),
+            cursor_before,
+        });
+    }
+
     /// Delete the character before the cursor (backspace)
     pub fn backspace(&mut self) {
         if self.is_read_only() {

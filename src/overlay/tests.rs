@@ -389,7 +389,11 @@ mod cases {
         state.open(ActiveOverlay::Find);
 
         // Simulate having some matches
-        state.find.matches.push(find::Match { start: 0, end: 5 });
+        state.find.matches.push(find::Match {
+            start: 0,
+            end: 5,
+            captures: Vec::new(),
+        });
         state.find.current_match = 1;
 
         state.close();

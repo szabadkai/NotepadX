@@ -1,3 +1,4 @@
+use regex::RegexBuilder;
 use ropey::Rope;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -18,9 +19,11 @@ struct SearchWorkerResult {
 /// A found match in the buffer
 #[derive(Clone, Debug)]
 pub struct Match {
-    /// Byte offset in the rope
+    /// Byte offsets in the UTF-8 text snapshot that produced this match.
     pub start: usize,
     pub end: usize,
+    /// Captured groups (1..N) for regex matches. Empty for plain-text matches.
+    pub captures: Vec<Option<String>>,
 }
 
 /// Find & Replace state
@@ -32,6 +35,7 @@ pub struct FindState {
     pub use_regex: bool,
     pub whole_word: bool,
     pub replace_text: String,
+    pub regex_error: Option<String>,
     pub total_matches: Option<usize>,
     pub search_complete: bool,
     /// Progress: bytes scanned so far (for large-file search progress bar).
@@ -61,6 +65,7 @@ impl FindState {
             use_regex: false,
             whole_word: false,
             replace_text: String::new(),
+            regex_error: None,
             total_matches: Some(0),
             search_complete: true,
             bytes_scanned: Arc::new(AtomicU64::new(0)),
@@ -98,19 +103,19 @@ impl FindState {
     pub fn reset(&mut self) {
         self.stop_search_worker();
         self.reset_results();
+        self.regex_error = None;
         self.search_complete = true;
     }
 
-    /// Search the rope for all occurrences of the query
-    pub fn search(&mut self, rope: &Rope, query: &str) {
-        self.stop_search_worker();
-        self.reset_results();
-        self.search_complete = true;
-
-        if query.is_empty() {
-            return;
+    fn effective_query(&self, query: &str) -> (String, bool) {
+        if self.whole_word && !self.use_regex {
+            (format!(r"\b{}\b", regex::escape(query)), true)
+        } else {
+            (query.to_string(), self.use_regex)
         }
+    }
 
+    fn search_plain(&mut self, rope: &Rope, query: &str) {
         let text = rope.to_string();
 
         if self.case_sensitive {
@@ -120,6 +125,7 @@ impl FindState {
                 self.matches.push(Match {
                     start: abs_pos,
                     end: abs_pos + query.len(),
+                    captures: Vec::new(),
                 });
                 start = abs_pos + 1;
             }
@@ -150,9 +156,57 @@ impl FindState {
                 self.matches.push(Match {
                     start: orig_start,
                     end: orig_end,
+                    captures: Vec::new(),
                 });
                 start = lower_start + 1;
             }
+        }
+    }
+
+    fn search_regex(&mut self, rope: &Rope, pattern: &str) {
+        let regex = match RegexBuilder::new(pattern)
+            .case_insensitive(!self.case_sensitive)
+            .build()
+        {
+            Ok(regex) => regex,
+            Err(err) => {
+                self.regex_error = Some(err.to_string());
+                return;
+            }
+        };
+
+        self.regex_error = None;
+        let text = rope.to_string();
+        for captures in regex.captures_iter(&text) {
+            if let Some(found) = captures.get(0) {
+                let groups = (1..captures.len())
+                    .map(|i| captures.get(i).map(|m| m.as_str().to_string()))
+                    .collect();
+                self.matches.push(Match {
+                    start: found.start(),
+                    end: found.end(),
+                    captures: groups,
+                });
+            }
+        }
+    }
+
+    /// Search the rope for all occurrences of the query
+    pub fn search(&mut self, rope: &Rope, query: &str) {
+        self.stop_search_worker();
+        self.reset_results();
+        self.search_complete = true;
+        self.regex_error = None;
+
+        if query.is_empty() {
+            return;
+        }
+
+        let (effective_query, use_regex) = self.effective_query(query);
+        if use_regex {
+            self.search_regex(rope, &effective_query);
+        } else {
+            self.search_plain(rope, query);
         }
 
         self.total_matches = Some(self.matches.len());
@@ -169,10 +223,24 @@ impl FindState {
             self.stop_search_worker();
             self.reset_results();
             self.search_complete = false;
+            self.regex_error = None;
 
             if query.is_empty() {
                 self.search_complete = true;
                 return;
+            }
+
+            let (effective_query, use_regex) = self.effective_query(query);
+
+            if use_regex {
+                if let Err(err) = RegexBuilder::new(&effective_query)
+                    .case_insensitive(!self.case_sensitive)
+                    .build()
+                {
+                    self.regex_error = Some(err.to_string());
+                    self.search_complete = true;
+                    return;
+                }
             }
 
             let effective_max_scan_bytes =
@@ -193,7 +261,7 @@ impl FindState {
             self.incremental_results = Arc::clone(&incremental);
             let search_options = SearchOptions {
                 case_sensitive: self.case_sensitive,
-                use_regex: self.use_regex,
+                use_regex,
                 whole_word: self.whole_word,
                 max_results,
                 max_scan_bytes: effective_max_scan_bytes,
@@ -202,7 +270,7 @@ impl FindState {
                 ..SearchOptions::default()
             };
             let search_path_buf = large_file.path.clone();
-            let query = query.to_string();
+            let query = effective_query;
             let worker_cancel = Arc::clone(&cancel);
             let handle = std::thread::spawn(move || {
                 let result = search_path_with_cancel(
@@ -253,6 +321,7 @@ impl FindState {
                         .map(|m| Match {
                             start: m.start,
                             end: m.end,
+                            captures: Vec::new(),
                         })
                         .collect();
                     self.matches.extend(new_matches);
@@ -277,6 +346,7 @@ impl FindState {
                 .map(|m| Match {
                     start: m.start,
                     end: m.end,
+                    captures: Vec::new(),
                 })
                 .collect();
             self.total_matches = Some(result.total_matches);
@@ -352,20 +422,23 @@ impl FindState {
     }
 
     /// Replace the current match with `replacement` in the rope.
-    /// Returns (removed_text, start_offset) or None if no current match.
+    /// Returns (removed_text, start_byte_offset, inserted_text) or None if no current match.
     pub fn replace_current(
         &mut self,
         rope: &mut Rope,
         replacement: &str,
-    ) -> Option<(String, usize)> {
+    ) -> Option<(String, usize, String)> {
         let m = self.matches.get(self.current_match)?.clone();
-        let removed: String = rope.slice(m.start..m.end).to_string();
-        rope.remove(m.start..m.end);
-        rope.insert(m.start, replacement);
-        let result = (removed, m.start);
+        let start_char = rope.byte_to_char(m.start);
+        let end_char = rope.byte_to_char(m.end);
+        let removed: String = rope.slice(start_char..end_char).to_string();
+        let inserted = expand_replacement(replacement, &removed, &m.captures);
+        rope.remove(start_char..end_char);
+        rope.insert(start_char, &inserted);
+        let result = (removed, m.start, inserted.clone());
 
         // Remove this match and adjust subsequent matches
-        let delta = replacement.len() as isize - (m.end - m.start) as isize;
+        let delta = inserted.len() as isize - (m.end - m.start) as isize;
         self.matches.remove(self.current_match);
         for m in self.matches.iter_mut().skip(self.current_match) {
             m.start = (m.start as isize + delta) as usize;
@@ -383,9 +456,12 @@ impl FindState {
         let mut results = Vec::new();
         // Replace in reverse order to keep offsets valid
         for m in self.matches.iter().rev() {
-            let removed: String = rope.slice(m.start..m.end).to_string();
-            rope.remove(m.start..m.end);
-            rope.insert(m.start, replacement);
+            let start_char = rope.byte_to_char(m.start);
+            let end_char = rope.byte_to_char(m.end);
+            let removed: String = rope.slice(start_char..end_char).to_string();
+            let inserted = expand_replacement(replacement, &removed, &m.captures);
+            rope.remove(start_char..end_char);
+            rope.insert(start_char, &inserted);
             results.push((removed, m.start));
         }
         results.reverse();
@@ -401,5 +477,157 @@ impl Drop for FindState {
         if let Some(handle) = self.search_thread.take() {
             let _ = handle.join();
         }
+    }
+}
+
+fn capture_at<'a>(full_match: &'a str, captures: &'a [Option<String>], index: usize) -> &'a str {
+    if index == 0 {
+        return full_match;
+    }
+    captures
+        .get(index.saturating_sub(1))
+        .and_then(|g| g.as_deref())
+        .unwrap_or("")
+}
+
+fn decode_escape(next: char) -> Option<char> {
+    match next {
+        'n' => Some('\n'),
+        't' => Some('\t'),
+        'r' => Some('\r'),
+        '\\' => Some('\\'),
+        _ => None,
+    }
+}
+
+fn expand_replacement(template: &str, full_match: &str, captures: &[Option<String>]) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                if i + 1 >= chars.len() {
+                    out.push('\\');
+                    i += 1;
+                    continue;
+                }
+
+                let next = chars[i + 1];
+                if let Some(decoded) = decode_escape(next) {
+                    out.push(decoded);
+                    i += 2;
+                    continue;
+                }
+
+                if next.is_ascii_digit() {
+                    let mut j = i + 1;
+                    while j < chars.len() && chars[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    let num = chars[i + 1..j].iter().collect::<String>();
+                    let idx = num.parse::<usize>().unwrap_or(0);
+                    out.push_str(capture_at(full_match, captures, idx));
+                    i = j;
+                    continue;
+                }
+
+                out.push(next);
+                i += 2;
+            }
+            '$' => {
+                if i + 1 >= chars.len() {
+                    out.push('$');
+                    i += 1;
+                    continue;
+                }
+
+                if chars[i + 1] == '&' {
+                    out.push_str(full_match);
+                    i += 2;
+                    continue;
+                }
+
+                if chars[i + 1] == '{' {
+                    let mut j = i + 2;
+                    while j < chars.len() && chars[j] != '}' {
+                        j += 1;
+                    }
+                    if j < chars.len() && chars[j] == '}' {
+                        let token = chars[i + 2..j].iter().collect::<String>();
+                        if let Ok(idx) = token.parse::<usize>() {
+                            out.push_str(capture_at(full_match, captures, idx));
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                }
+
+                if chars[i + 1].is_ascii_digit() {
+                    let mut j = i + 1;
+                    while j < chars.len() && chars[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    let num = chars[i + 1..j].iter().collect::<String>();
+                    let idx = num.parse::<usize>().unwrap_or(0);
+                    out.push_str(capture_at(full_match, captures, idx));
+                    i = j;
+                    continue;
+                }
+
+                out.push('$');
+                i += 1;
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_expands_groups_and_escapes() {
+        let mut state = FindState::new();
+        state.use_regex = true;
+        let mut rope = Rope::from_str("left right");
+
+        state.search(&rope, r"(\w+)\s+(\w+)");
+        let (_removed, _start, inserted) = state
+            .replace_current(&mut rope, "$2,$1\\n")
+            .expect("expected match to replace");
+
+        assert_eq!(inserted, "right,left\n");
+        assert_eq!(rope.to_string(), "right,left\n");
+    }
+
+    #[test]
+    fn invalid_regex_sets_error_and_no_matches() {
+        let mut state = FindState::new();
+        state.use_regex = true;
+        let rope = Rope::from_str("abc");
+
+        state.search(&rope, "[abc");
+
+        assert!(state.regex_error.is_some());
+        assert!(state.matches.is_empty());
+    }
+
+    #[test]
+    fn whole_word_only_matches_complete_words() {
+        let mut state = FindState::new();
+        state.whole_word = true;
+        let rope = Rope::from_str("is this island is");
+
+        state.search(&rope, "is");
+
+        assert_eq!(state.matches.len(), 2);
     }
 }

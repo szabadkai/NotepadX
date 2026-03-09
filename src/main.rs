@@ -19,7 +19,11 @@ use overlay::{ActiveOverlay, OverlayState};
 use renderer::Renderer;
 use session::{WorkspaceState, WORKSPACE_FILE_EXTENSION};
 use settings::AppConfig;
-use std::{path::PathBuf, sync::Arc, time::{Duration, Instant}};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use syntax::SyntaxHighlighter;
 use theme::Theme;
 use winit::{
@@ -180,10 +184,7 @@ impl App {
     }
 
     fn workspace_file_dialog() -> rfd::FileDialog {
-        rfd::FileDialog::new().add_filter(
-            "NotepadX Workspace",
-            &[WORKSPACE_FILE_EXTENSION],
-        )
+        rfd::FileDialog::new().add_filter("NotepadX Workspace", &[WORKSPACE_FILE_EXTENSION])
     }
 
     fn normalize_workspace_path(mut path: PathBuf) -> PathBuf {
@@ -627,7 +628,10 @@ impl App {
     }
 
     fn handle_overlay_drag(&mut self) {
-        if !matches!(self.overlay.active, ActiveOverlay::Find | ActiveOverlay::FindReplace) {
+        if !matches!(
+            self.overlay.active,
+            ActiveOverlay::Find | ActiveOverlay::FindReplace
+        ) {
             return;
         }
 
@@ -687,6 +691,13 @@ impl App {
         let overlay_top = TAB_BAR_HEIGHT + 4.0;
         let overlay_height = match &self.overlay.active {
             ActiveOverlay::FindReplace => 60.0,
+            ActiveOverlay::Find => {
+                if self.overlay.find.regex_error.is_some() {
+                    60.0
+                } else {
+                    40.0
+                }
+            }
             ActiveOverlay::CommandPalette => 300.0,
             ActiveOverlay::Help => 600.0,
             ActiveOverlay::Settings => 360.0,
@@ -705,6 +716,49 @@ impl App {
         // Text inside the overlay starts at overlay_left + 8px horizontal, overlay_top + 6px vertical
         let text_top = overlay_top + 6.0;
         let line_height = renderer::OVERLAY_LINE_HEIGHT;
+
+        // Toggle pills on the first row for Find / FindReplace
+        if matches!(
+            self.overlay.active,
+            ActiveOverlay::Find | ActiveOverlay::FindReplace
+        ) {
+            let pill_gap = 6.0;
+            let pill_h = 18.0;
+            let pill_regex_w = 40.0;
+            let pill_word_w = 28.0;
+            let pill_case_w = 36.0;
+            let pill_y = text_top;
+            let right = overlay_left + overlay_width - 8.0;
+
+            let regex_x = right - pill_regex_w;
+            let word_x = regex_x - pill_gap - pill_word_w;
+            let case_x = word_x - pill_gap - pill_case_w;
+
+            let in_row = y >= pill_y && y <= pill_y + pill_h;
+            if in_row {
+                if x >= case_x && x <= case_x + pill_case_w {
+                    self.overlay.find.case_sensitive = !self.overlay.find.case_sensitive;
+                    self.refresh_find_results();
+                    self.jump_to_current_match();
+                    self.needs_redraw = true;
+                    return;
+                }
+                if x >= word_x && x <= word_x + pill_word_w {
+                    self.overlay.find.whole_word = !self.overlay.find.whole_word;
+                    self.refresh_find_results();
+                    self.jump_to_current_match();
+                    self.needs_redraw = true;
+                    return;
+                }
+                if x >= regex_x && x <= regex_x + pill_regex_w {
+                    self.overlay.find.use_regex = !self.overlay.find.use_regex;
+                    self.refresh_find_results();
+                    self.jump_to_current_match();
+                    self.needs_redraw = true;
+                    return;
+                }
+            }
+        }
 
         match &self.overlay.active {
             ActiveOverlay::Find => {
@@ -1061,7 +1115,7 @@ impl App {
         self.needs_redraw = true;
     }
 
-    fn handle_overlay_key(&mut self, event: KeyEvent, cmd_or_ctrl: bool, _shift: bool) {
+    fn handle_overlay_key(&mut self, event: KeyEvent, cmd_or_ctrl: bool, shift: bool) {
         // Settings overlay has its own key handling
         if self.overlay.active == ActiveOverlay::Settings {
             self.handle_settings_key(&event.logical_key);
@@ -1069,23 +1123,46 @@ impl App {
             return;
         }
 
+        let option_key = self.modifiers.alt_key();
+
         match &event.logical_key {
             Key::Named(NamedKey::Enter) => {
                 if self.overlay.active == ActiveOverlay::FindReplace && self.overlay.focus_replace {
-                    // Replace current match
-                    let replacement = self.overlay.replace_input.clone();
-                    if !self.editor.active().is_large_file() {
-                        let rope = &mut self.editor.active_mut().rope;
-                        if let Some((_removed, offset)) =
-                            self.overlay.find.replace_current(rope, &replacement)
-                        {
-                            // offset is a byte offset from find; convert to char
-                            let char_offset = self.editor.active().rope.byte_to_char(offset);
-                            self.editor.active_mut().cursor =
-                                char_offset + replacement.chars().count();
-                            self.editor.active_mut().dirty = true;
-                            // Re-search to update matches
-                            self.refresh_find_results();
+                    if cmd_or_ctrl && shift {
+                        // Cmd+Shift+Enter => replace all matches
+                        if !self.editor.active().is_large_file() {
+                            let replacement = self.overlay.replace_input.clone();
+                            let mut new_rope = self.editor.active().rope.clone();
+                            let replaced =
+                                self.overlay.find.replace_all(&mut new_rope, &replacement);
+                            if !replaced.is_empty() {
+                                let new_text = new_rope.to_string();
+                                let first_match_byte = replaced.first().map(|(_, start)| *start);
+                                let buffer = self.editor.active_mut();
+                                buffer.replace_all_text_snapshot(&new_text);
+                                if let Some(start) = first_match_byte {
+                                    buffer.cursor = buffer.rope.byte_to_char(start);
+                                }
+                                self.refresh_find_results();
+                            }
+                        }
+                    } else {
+                        // Replace current match
+                        let replacement = self.overlay.replace_input.clone();
+                        if !self.editor.active().is_large_file() {
+                            let mut preview_rope = self.editor.active().rope.clone();
+                            if let Some((removed, start_byte, inserted)) = self
+                                .overlay
+                                .find
+                                .replace_current(&mut preview_rope, &replacement)
+                            {
+                                let start_char = self.editor.active().rope.byte_to_char(start_byte);
+                                let end_char = start_char + removed.chars().count();
+                                self.editor
+                                    .active_mut()
+                                    .replace_range_chars(start_char, end_char, &inserted);
+                                self.refresh_find_results();
+                            }
                         }
                     }
                 } else if cmd_or_ctrl
@@ -1148,6 +1225,40 @@ impl App {
                     self.overlay.find.next_match();
                     self.jump_to_current_match();
                 }
+            }
+            // Cmd+Option+C/W/R toggles find flags
+            Key::Character(c)
+                if cmd_or_ctrl
+                    && option_key
+                    && (self.overlay.active == ActiveOverlay::Find
+                        || self.overlay.active == ActiveOverlay::FindReplace)
+                    && c.as_str() == "c" =>
+            {
+                self.overlay.find.case_sensitive = !self.overlay.find.case_sensitive;
+                self.refresh_find_results();
+                self.jump_to_current_match();
+            }
+            Key::Character(c)
+                if cmd_or_ctrl
+                    && option_key
+                    && (self.overlay.active == ActiveOverlay::Find
+                        || self.overlay.active == ActiveOverlay::FindReplace)
+                    && c.as_str() == "w" =>
+            {
+                self.overlay.find.whole_word = !self.overlay.find.whole_word;
+                self.refresh_find_results();
+                self.jump_to_current_match();
+            }
+            Key::Character(c)
+                if cmd_or_ctrl
+                    && option_key
+                    && (self.overlay.active == ActiveOverlay::Find
+                        || self.overlay.active == ActiveOverlay::FindReplace)
+                    && c.as_str() == "r" =>
+            {
+                self.overlay.find.use_regex = !self.overlay.find.use_regex;
+                self.refresh_find_results();
+                self.jump_to_current_match();
             }
             // Select all in overlay input
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "a" => {
@@ -1522,7 +1633,9 @@ impl App {
                 end: m.end,
             })
             .collect();
-        self.overlay.results_panel.open_with_matches(&matches, &query);
+        self.overlay
+            .results_panel
+            .open_with_matches(&matches, &query);
 
         // Load context for visible results
         if let Some(path) = self.editor.active().file_path.as_ref() {

@@ -105,7 +105,10 @@ impl Renderer {
             Shaping::Advanced,
         );
 
-        let mut results_panel_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(13.0, RESULTS_PANEL_ROW_HEIGHT));
+        let mut results_panel_buffer = GlyphonBuffer::new(
+            &mut font_system,
+            Metrics::new(13.0, RESULTS_PANEL_ROW_HEIGHT),
+        );
         results_panel_buffer.set_size(&mut font_system, Some(900.0), Some(800.0));
         results_panel_buffer.set_text(
             &mut font_system,
@@ -178,8 +181,9 @@ impl Renderer {
     /// Visible lines accounting for results panel
     pub fn visible_lines_with_panel(&self, overlay: &crate::overlay::OverlayState) -> usize {
         let panel_height = self.results_panel_height(overlay) * self.scale_factor;
-        let editor_height =
-            self.height as f32 - (TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT) * self.scale_factor - panel_height;
+        let editor_height = self.height as f32
+            - (TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT) * self.scale_factor
+            - panel_height;
         let line_height = self.current_font_size * 1.44 * self.scale_factor;
         (editor_height / line_height).floor().max(1.0) as usize
     }
@@ -211,8 +215,10 @@ impl Renderer {
         let buffer = editor.active();
         let width = self.width as f32 / self.scale_factor.max(1.0);
         let results_panel_h = self.results_panel_height(overlay);
-        let editor_height =
-            self.height as f32 / self.scale_factor.max(1.0) - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT - results_panel_h;
+        let editor_height = self.height as f32 / self.scale_factor.max(1.0)
+            - TAB_BAR_HEIGHT
+            - STATUS_BAR_HEIGHT
+            - results_panel_h;
 
         // --- Tab Bar ---
         self.tab_bar_buffer
@@ -433,12 +439,23 @@ impl Renderer {
             })
             .unwrap_or_else(|| "?".to_string());
         let search_info = if !overlay.find.search_complete {
-            let scanned = overlay.find.bytes_scanned.load(std::sync::atomic::Ordering::Relaxed);
+            let scanned = overlay
+                .find
+                .bytes_scanned
+                .load(std::sync::atomic::Ordering::Relaxed);
             if overlay.find.search_file_size > 0 && scanned > 0 {
-                let pct = (scanned as f64 / overlay.find.search_file_size as f64 * 100.0).min(100.0);
-                format!("    │    Searching {:.0}% ({} matches)", pct, overlay.find.matches.len())
+                let pct =
+                    (scanned as f64 / overlay.find.search_file_size as f64 * 100.0).min(100.0);
+                format!(
+                    "    │    Searching {:.0}% ({} matches)",
+                    pct,
+                    overlay.find.matches.len()
+                )
             } else if !overlay.find.matches.is_empty() {
-                format!("    │    Searching… ({} matches)", overlay.find.matches.len())
+                format!(
+                    "    │    Searching… ({} matches)",
+                    overlay.find.matches.len()
+                )
             } else {
                 "    │    Searching…".to_string()
             }
@@ -472,6 +489,13 @@ impl Renderer {
                 (width * 0.5).clamp(300.0, 600.0)
             };
             let _overlay_h = match &overlay.active {
+                crate::overlay::ActiveOverlay::Find => {
+                    if overlay.find.regex_error.is_some() {
+                        52.0
+                    } else {
+                        32.0
+                    }
+                }
                 crate::overlay::ActiveOverlay::FindReplace => 52.0,
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0,
                 crate::overlay::ActiveOverlay::Help => 600.0,
@@ -487,23 +511,64 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Find => {
                     let count = overlay.find.match_count_label();
                     let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    format!("Find: {}│{}  {}", before, after, count)
+                    let flags = format!(
+                        "[{}Aa] [{}W] [{}.*]",
+                        if overlay.find.case_sensitive {
+                            "x"
+                        } else {
+                            " "
+                        },
+                        if overlay.find.whole_word { "x" } else { " " },
+                        if overlay.find.use_regex { "x" } else { " " }
+                    );
+                    if let Some(err) = &overlay.find.regex_error {
+                        format!(
+                            "Find: {}│{}  {}  {}\n! Regex: {}",
+                            before, after, count, flags, err
+                        )
+                    } else {
+                        format!("Find: {}│{}  {}  {}", before, after, count, flags)
+                    }
                 }
                 crate::overlay::ActiveOverlay::FindReplace => {
                     let count = overlay.find.match_count_label();
+                    let flags = format!(
+                        "[{}Aa] [{}W] [{}.*]",
+                        if overlay.find.case_sensitive {
+                            "x"
+                        } else {
+                            " "
+                        },
+                        if overlay.find.whole_word { "x" } else { " " },
+                        if overlay.find.use_regex { "x" } else { " " }
+                    );
                     if !overlay.focus_replace {
                         let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                        format!(
-                            "Find:    {}│{}  {}\nReplace: {}",
-                            before, after, count, overlay.replace_input
-                        )
+                        if let Some(err) = &overlay.find.regex_error {
+                            format!(
+                                "Find:    {}│{}  {}  {}\nReplace: {}\n! Regex: {}",
+                                before, after, count, flags, overlay.replace_input, err
+                            )
+                        } else {
+                            format!(
+                                "Find:    {}│{}  {}  {}\nReplace: {}",
+                                before, after, count, flags, overlay.replace_input
+                            )
+                        }
                     } else {
                         let (before, after) =
                             overlay.replace_input.split_at(overlay.replace_cursor_pos);
-                        format!(
-                            "Find:    {}  {}\nReplace: {}│{}",
-                            overlay.input, count, before, after
-                        )
+                        if let Some(err) = &overlay.find.regex_error {
+                            format!(
+                                "Find:    {}  {}  {}\nReplace: {}│{}\n! Regex: {}",
+                                overlay.input, count, flags, before, after, err
+                            )
+                        } else {
+                            format!(
+                                "Find:    {}  {}  {}\nReplace: {}│{}",
+                                overlay.input, count, flags, before, after
+                            )
+                        }
                     }
                 }
                 crate::overlay::ActiveOverlay::GotoLine => {
@@ -537,6 +602,9 @@ impl Renderer {
                     text.push_str("           F1: Help\n");
                     text.push_str("           Esc: Close Overlay\n\n");
                     text.push_str("Help:      TAB toggles fields in Replace.\n");
+                    text.push_str("           Cmd+Shift+Enter: Replace All.\n");
+                    text.push_str("           Cmd+Opt+C/W/R: Case/Word/Regex.\n");
+                    text.push_str("           Click [Aa] [W] [.*] to toggle.\n");
                     text.push_str("           ENTER/Arrows for search results.");
                     text
                 }
@@ -613,11 +681,16 @@ impl Renderer {
             let start = panel.scroll_offset;
             let end = (start + viewport_rows).min(panel.results.len());
 
-            let mut text = format!("  {} — \"{}\"  [Esc to close]\n", panel.status_label(), panel.query);
+            let mut text = format!(
+                "  {} — \"{}\"  [Esc to close]\n",
+                panel.status_label(),
+                panel.query
+            );
             for i in start..end {
                 let r = &panel.results[i];
                 let marker = if i == panel.selected { "▶ " } else { "  " };
-                let line_num = r.line_number
+                let line_num = r
+                    .line_number
                     .map(|n| format!("{:>6}:", n + 1))
                     .unwrap_or_else(|| format!("{:>6}:", r.byte_offset));
 
@@ -750,7 +823,8 @@ impl Renderer {
         }
 
         // 2b. Gutter Background
-        let editor_height_px = height - tab_bar_height - status_bar_height - results_panel_height_px;
+        let editor_height_px =
+            height - tab_bar_height - status_bar_height - results_panel_height_px;
         base_rects.push(Rect {
             x: 0.0,
             y: editor_top,
@@ -850,16 +924,19 @@ impl Renderer {
 
             for (match_idx, m) in overlay.find.matches.iter().enumerate() {
                 // Compute rope-relative byte offsets
-                let (rope_start, rope_end) = if let (Some(ws), Some(we)) = (window_start, window_end) {
-                    // Skip matches entirely outside the loaded window
-                    if m.end <= ws || m.start >= we {
-                        continue;
-                    }
-                    (m.start.saturating_sub(ws).min(we - ws),
-                     m.end.saturating_sub(ws).min(we - ws))
-                } else {
-                    (m.start, m.end)
-                };
+                let (rope_start, rope_end) =
+                    if let (Some(ws), Some(we)) = (window_start, window_end) {
+                        // Skip matches entirely outside the loaded window
+                        if m.end <= ws || m.start >= we {
+                            continue;
+                        }
+                        (
+                            m.start.saturating_sub(ws).min(we - ws),
+                            m.end.saturating_sub(ws).min(we - ws),
+                        )
+                    } else {
+                        (m.start, m.end)
+                    };
 
                 let rope_len = buffer.rope.len_bytes();
                 if rope_start >= rope_len || rope_end > rope_len {
@@ -996,7 +1073,12 @@ impl Renderer {
                             y: tick_y,
                             w: SCROLLBAR_WIDTH * s,
                             h: 2.0 * s,
-                            color: [theme.find_match_active.r, theme.find_match_active.g, theme.find_match_active.b, theme.find_match_active.a.max(0.6)],
+                            color: [
+                                theme.find_match_active.r,
+                                theme.find_match_active.g,
+                                theme.find_match_active.b,
+                                theme.find_match_active.a.max(0.6),
+                            ],
                         });
                     }
                 }
@@ -1011,7 +1093,12 @@ impl Renderer {
                         y: tick_y,
                         w: SCROLLBAR_WIDTH * s,
                         h: 2.0 * s,
-                        color: [theme.find_match_active.r, theme.find_match_active.g, theme.find_match_active.b, theme.find_match_active.a.max(0.6)],
+                        color: [
+                            theme.find_match_active.r,
+                            theme.find_match_active.g,
+                            theme.find_match_active.b,
+                            theme.find_match_active.a.max(0.6),
+                        ],
                     });
                 }
             }
@@ -1033,6 +1120,13 @@ impl Renderer {
             let overlay_height = match &overlay.active {
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
                 crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
+                crate::overlay::ActiveOverlay::Find => {
+                    if overlay.find.regex_error.is_some() {
+                        60.0 * s
+                    } else {
+                        40.0 * s
+                    }
+                }
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 _ => 40.0 * s,
@@ -1106,6 +1200,62 @@ impl Renderer {
                             color: selection_color,
                         });
                     }
+
+                    let pill_h = 18.0 * s;
+                    let pill_gap = 6.0 * s;
+                    let pill_regex_w = 40.0 * s;
+                    let pill_word_w = 28.0 * s;
+                    let pill_case_w = 36.0 * s;
+                    let right = overlay_left + overlay_width - 8.0 * s;
+                    let y = overlay_top_panel + 6.0 * s;
+                    let regex_x = right - pill_regex_w;
+                    let word_x = regex_x - pill_gap - pill_word_w;
+                    let case_x = word_x - pill_gap - pill_case_w;
+                    let active = [
+                        theme.selection.r,
+                        theme.selection.g,
+                        theme.selection.b,
+                        0.45,
+                    ];
+                    let inactive = [
+                        theme.tab_bar_bg.r,
+                        theme.tab_bar_bg.g,
+                        theme.tab_bar_bg.b,
+                        1.0,
+                    ];
+                    overlay_rects.push(Rect {
+                        x: case_x,
+                        y,
+                        w: pill_case_w,
+                        h: pill_h,
+                        color: if overlay.find.case_sensitive {
+                            active
+                        } else {
+                            inactive
+                        },
+                    });
+                    overlay_rects.push(Rect {
+                        x: word_x,
+                        y,
+                        w: pill_word_w,
+                        h: pill_h,
+                        color: if overlay.find.whole_word {
+                            active
+                        } else {
+                            inactive
+                        },
+                    });
+                    overlay_rects.push(Rect {
+                        x: regex_x,
+                        y,
+                        w: pill_regex_w,
+                        h: pill_h,
+                        color: if overlay.find.use_regex {
+                            active
+                        } else {
+                            inactive
+                        },
+                    });
                 }
                 crate::overlay::ActiveOverlay::FindReplace => {
                     if let Some((start, end)) = overlay.find_selection_char_range() {
@@ -1133,6 +1283,62 @@ impl Renderer {
                             color: selection_color,
                         });
                     }
+
+                    let pill_h = 18.0 * s;
+                    let pill_gap = 6.0 * s;
+                    let pill_regex_w = 40.0 * s;
+                    let pill_word_w = 28.0 * s;
+                    let pill_case_w = 36.0 * s;
+                    let right = overlay_left + overlay_width - 8.0 * s;
+                    let y = overlay_top_panel + 6.0 * s;
+                    let regex_x = right - pill_regex_w;
+                    let word_x = regex_x - pill_gap - pill_word_w;
+                    let case_x = word_x - pill_gap - pill_case_w;
+                    let active = [
+                        theme.selection.r,
+                        theme.selection.g,
+                        theme.selection.b,
+                        0.45,
+                    ];
+                    let inactive = [
+                        theme.tab_bar_bg.r,
+                        theme.tab_bar_bg.g,
+                        theme.tab_bar_bg.b,
+                        1.0,
+                    ];
+                    overlay_rects.push(Rect {
+                        x: case_x,
+                        y,
+                        w: pill_case_w,
+                        h: pill_h,
+                        color: if overlay.find.case_sensitive {
+                            active
+                        } else {
+                            inactive
+                        },
+                    });
+                    overlay_rects.push(Rect {
+                        x: word_x,
+                        y,
+                        w: pill_word_w,
+                        h: pill_h,
+                        color: if overlay.find.whole_word {
+                            active
+                        } else {
+                            inactive
+                        },
+                    });
+                    overlay_rects.push(Rect {
+                        x: regex_x,
+                        y,
+                        w: pill_regex_w,
+                        h: pill_h,
+                        color: if overlay.find.use_regex {
+                            active
+                        } else {
+                            inactive
+                        },
+                    });
                 }
                 _ => {}
             }
@@ -1299,6 +1505,13 @@ impl Renderer {
             let overlay_height = match &overlay.active {
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
                 crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
+                crate::overlay::ActiveOverlay::Find => {
+                    if overlay.find.regex_error.is_some() {
+                        60.0 * s
+                    } else {
+                        40.0 * s
+                    }
+                }
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 _ => 40.0 * s,

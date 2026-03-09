@@ -105,10 +105,13 @@ impl ResultsPanel {
                     // read_lines_around returns the line containing byte_offset,
                     // so the match is at (byte_offset - line_start_in_file).
                     // We approximate line start from context.
-                    let before_bytes: usize =
-                        before.iter().map(|l| l.len() + 1).sum::<usize>();
-                    let _approx_window_start =
-                        self.results[i].byte_offset.saturating_sub(before_bytes + self.results[i].byte_offset.min(4096 * (self.context_lines + 1)));
+                    let before_bytes: usize = before.iter().map(|l| l.len() + 1).sum::<usize>();
+                    let _approx_window_start = self.results[i].byte_offset.saturating_sub(
+                        before_bytes
+                            + self.results[i]
+                                .byte_offset
+                                .min(4096 * (self.context_lines + 1)),
+                    );
                     // Simpler: the byte offset within the match line
                     // We passed byte_offset to read_lines_around which finds the line containing it
                     // So col = byte_offset - start_of_this_line in the file
