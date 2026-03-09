@@ -326,10 +326,7 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{
-            CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH,
-            TAB_BAR_HEIGHT,
-        };
+        use renderer::{GUTTER_WIDTH, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
@@ -370,6 +367,8 @@ impl App {
         else if y >= TAB_BAR_HEIGHT as f64 {
             let shift = self.modifiers.shift_key();
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
+            let line_height = self.config.font_size * 1.44;
+            let char_width = self.config.font_size * 0.6;
 
             // Calculate wrap width for line wrapping
             let wrap_width = if self.editor.active().wrap_enabled {
@@ -377,7 +376,7 @@ impl App {
                     (self
                         .renderer
                         .as_ref()
-                        .map(|r| r.width as f32)
+                        .map(|r| r.width as f32 / r.scale_factor.max(1.0))
                         .unwrap_or(800.0)
                         - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
                         .max(100.0),
@@ -391,8 +390,8 @@ impl App {
                 x as f32,
                 editor_y as f32,
                 GUTTER_WIDTH + LINE_PADDING_LEFT,
-                LINE_HEIGHT,
-                CHAR_WIDTH,
+                line_height,
+                char_width,
                 wrap_width,
             );
 
@@ -424,10 +423,9 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{
-            CHAR_WIDTH, GUTTER_WIDTH, LINE_HEIGHT, LINE_PADDING_LEFT, SCROLLBAR_WIDTH,
-            TAB_BAR_HEIGHT,
-        };
+        use renderer::{GUTTER_WIDTH, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        let line_height = self.config.font_size * 1.44;
+        let char_width = self.config.font_size * 0.6;
 
         if y >= TAB_BAR_HEIGHT as f64 {
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
@@ -438,7 +436,7 @@ impl App {
                     (self
                         .renderer
                         .as_ref()
-                        .map(|r| r.width as f32)
+                        .map(|r| r.width as f32 / r.scale_factor.max(1.0))
                         .unwrap_or(800.0)
                         - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
                         .max(100.0),
@@ -456,8 +454,8 @@ impl App {
                 x as f32,
                 editor_y as f32,
                 GUTTER_WIDTH + LINE_PADDING_LEFT,
-                LINE_HEIGHT,
-                CHAR_WIDTH,
+                line_height,
+                char_width,
                 wrap_width,
             );
             buffer.cursor = new_pos;
@@ -715,7 +713,6 @@ impl App {
         // Keep cursor visible
         if let Some(renderer) = &self.renderer {
             let visible = renderer.visible_lines();
-            self.editor.active_mut().ensure_cursor_visible(visible);
             let win_width = self
                 .window
                 .as_ref()
@@ -730,6 +727,15 @@ impl App {
                 - renderer::GUTTER_WIDTH
                 - renderer::LINE_PADDING_LEFT
                 - renderer::SCROLLBAR_WIDTH;
+            let wrap_width = if self.editor.active().wrap_enabled {
+                Some(editor_width.max(100.0))
+            } else {
+                None
+            };
+            let char_width = self.config.font_size * 0.6;
+            self.editor
+                .active_mut()
+                .ensure_cursor_visible(visible, wrap_width, char_width);
             self.editor
                 .active_mut()
                 .ensure_cursor_visible_x(renderer::CHAR_WIDTH, editor_width);
@@ -864,7 +870,29 @@ impl App {
                     buffer.cursor = buffer.rope.line_to_char(target);
                     if let Some(renderer) = &self.renderer {
                         let visible = renderer.visible_lines();
-                        buffer.ensure_cursor_visible(visible);
+                        let char_width = self.config.font_size * 0.6;
+                        let wrap_width = if buffer.wrap_enabled {
+                            let win_width = self
+                                .window
+                                .as_ref()
+                                .map(|w| w.inner_size().width)
+                                .unwrap_or(1200) as f32
+                                / self
+                                    .window
+                                    .as_ref()
+                                    .map(|w| w.scale_factor() as f32)
+                                    .unwrap_or(1.0);
+                            Some(
+                                (win_width
+                                    - renderer::GUTTER_WIDTH
+                                    - renderer::LINE_PADDING_LEFT
+                                    - renderer::SCROLLBAR_WIDTH)
+                                    .max(100.0),
+                            )
+                        } else {
+                            None
+                        };
+                        buffer.ensure_cursor_visible(visible, wrap_width, char_width);
                     }
                 }
                 self.overlay.close();
@@ -1066,7 +1094,29 @@ impl App {
             buffer.cursor = buffer.rope.byte_to_char(start_byte);
             if let Some(renderer) = &self.renderer {
                 let visible = renderer.visible_lines();
-                buffer.ensure_cursor_visible(visible);
+                let char_width = self.config.font_size * 0.6;
+                let wrap_width = if buffer.wrap_enabled {
+                    let win_width = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().width)
+                        .unwrap_or(1200) as f32
+                        / self
+                            .window
+                            .as_ref()
+                            .map(|w| w.scale_factor() as f32)
+                            .unwrap_or(1.0);
+                    Some(
+                        (win_width
+                            - renderer::GUTTER_WIDTH
+                            - renderer::LINE_PADDING_LEFT
+                            - renderer::SCROLLBAR_WIDTH)
+                            .max(100.0),
+                    )
+                } else {
+                    None
+                };
+                buffer.ensure_cursor_visible(visible, wrap_width, char_width);
             }
         }
     }
@@ -1328,9 +1378,41 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                let visible_lines = self
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| renderer.visible_lines())
+                    .unwrap_or(1);
+                let char_width = self.config.font_size * 0.6;
+                let wrap_width = if self.editor.active().wrap_enabled {
+                    let scale = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.scale_factor() as f32)
+                        .unwrap_or(1.0);
+                    let win_width = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().width as f32 / scale)
+                        .unwrap_or(1200.0);
+                    Some(
+                        (win_width
+                            - renderer::GUTTER_WIDTH
+                            - renderer::LINE_PADDING_LEFT
+                            - renderer::SCROLLBAR_WIDTH)
+                            .max(100.0),
+                    )
+                } else {
+                    None
+                };
                 match delta {
                     MouseScrollDelta::LineDelta(x, y) => {
-                        self.editor.active_mut().scroll(-y as f64 * 3.0);
+                        self.editor.active_mut().scroll(
+                            -y as f64 * 3.0,
+                            visible_lines,
+                            wrap_width,
+                            char_width,
+                        );
                         if x.abs() > 0.0 {
                             self.editor
                                 .active_mut()
@@ -1339,7 +1421,12 @@ impl ApplicationHandler for App {
                     }
                     MouseScrollDelta::PixelDelta(pos) => {
                         let lines = -pos.y / renderer::LINE_HEIGHT as f64;
-                        self.editor.active_mut().scroll_direct(lines);
+                        self.editor.active_mut().scroll_direct(
+                            lines,
+                            visible_lines,
+                            wrap_width,
+                            char_width,
+                        );
                         if pos.x.abs() > 0.0 {
                             self.editor
                                 .active_mut()

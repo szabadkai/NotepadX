@@ -161,8 +161,10 @@ impl Renderer {
         self.cursor_buffer
             .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
         let buffer = editor.active();
-        let width = self.width as f32;
-        let editor_height = self.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+        let width = self.width as f32 / self.scale_factor.max(1.0);
+        let editor_height = self.height as f32 / self.scale_factor.max(1.0)
+            - TAB_BAR_HEIGHT
+            - STATUS_BAR_HEIGHT;
 
         // --- Tab Bar ---
         self.tab_bar_buffer
@@ -219,18 +221,32 @@ impl Renderer {
             Some(GUTTER_WIDTH),
             Some(editor_height),
         );
+        let char_width = font_size * 0.6;
         let visible_lines = (editor_height / line_height).ceil() as usize;
         let scroll_line = buffer.scroll_y.floor() as usize;
-        let total_lines = buffer.line_count();
+
+        // --- Editor Text (with syntax highlighting) ---
+        let editor_left = GUTTER_WIDTH + LINE_PADDING_LEFT;
+        let editor_width = width - editor_left - SCROLLBAR_WIDTH;
+        // Use finite width for line wrapping, or None for unlimited (horizontal scroll)
+        let buf_width = if buffer.wrap_enabled {
+            Some(editor_width)
+        } else {
+            None
+        };
+        let visible_visual_lines =
+            buffer.visual_lines(scroll_line, visible_lines + 2, buf_width, char_width);
 
         let mut gutter_text = String::new();
-        for i in 0..visible_lines {
-            let line_num = scroll_line + i;
-            if line_num < total_lines {
-                gutter_text.push_str(&format!("{:>4}\n", line_num + 1));
+        for line in &visible_visual_lines {
+            if line.starts_logical_line {
+                gutter_text.push_str(&format!("{:>4}\n", line.logical_line + 1));
             } else {
-                gutter_text.push_str("   ~\n");
+                gutter_text.push_str("    \n");
             }
+        }
+        for _ in visible_visual_lines.len()..visible_lines {
+            gutter_text.push_str("   ~\n");
         }
         self.gutter_buffer.set_text(
             &mut self.font_system,
@@ -243,28 +259,15 @@ impl Renderer {
         self.gutter_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        // --- Editor Text (with syntax highlighting) ---
-        let editor_left = GUTTER_WIDTH + LINE_PADDING_LEFT;
-        let editor_width = width - editor_left - SCROLLBAR_WIDTH;
-        // Use finite width for line wrapping, or None for unlimited (horizontal scroll)
-        let buf_width = if buffer.wrap_enabled {
-            Some(editor_width)
-        } else {
-            None
-        };
         self.editor_buffer
             .set_size(&mut self.font_system, buf_width, Some(editor_height));
 
         let mut visible_text = String::new();
-        for i in 0..visible_lines + 1 {
-            let line_idx = scroll_line + i;
-            if line_idx < total_lines {
-                let line = buffer.rope.line(line_idx);
-                let line_str: String = line.into();
-                let trimmed = line_str.trim_end_matches(['\n', '\r']);
-                visible_text.push_str(trimmed);
+        for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+            if visual_line.start_char < visual_line.end_char {
+                visible_text.push_str(&buffer.rope.slice(visual_line.start_char..visual_line.end_char).to_string());
             }
-            if i < visible_lines {
+            if i + 1 < visible_visual_lines.len() {
                 visible_text.push('\n');
             }
         }
@@ -330,13 +333,15 @@ impl Renderer {
             .shape_until_scroll(&mut self.font_system, false);
 
         // --- Cursor ---
-        let cursor_line_in_view = buffer.cursor_line() as i64 - scroll_line as i64;
+        let (cursor_visual_line, _cursor_visual_col) =
+            buffer.visual_position_of_char(buffer.cursor, buf_width, char_width);
+        let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-            let char_width = font_size * 0.6;
+            let caret_height = font_size.max(1.0);
             self.cursor_buffer.set_size(
                 &mut self.font_system,
                 Some(char_width * 2.0),
-                Some(line_height),
+                Some(caret_height),
             );
             self.cursor_buffer.set_text(
                 &mut self.font_system,
@@ -361,6 +366,7 @@ impl Renderer {
             .language_index
             .map(|i| syntax.language_name(i))
             .unwrap_or("Plain Text");
+        let total_lines = buffer.line_count();
         let status_text = format!(
             "  Ln {}, Col {}    │    {} lines    │    {}    │    {}    │    {}    │    NotepadX v0.1",
             line, col, total_lines, lang_name, encoding, line_ending
@@ -542,7 +548,16 @@ impl Renderer {
 
         let buffer = editor.active();
         let scroll_line = buffer.scroll_y.floor() as usize;
+        let scroll_line_offset = (buffer.scroll_y - scroll_line as f64) as f32;
         let visible_lines = self.visible_lines();
+        let wrap_width = if buffer.wrap_enabled {
+            Some((width - editor_left - SCROLLBAR_WIDTH * s).max(char_width))
+        } else {
+            None
+        };
+        let visible_visual_lines =
+            buffer.visual_lines(scroll_line, visible_lines + 2, wrap_width, char_width);
+        let scroll_y_px = scroll_line_offset * line_height;
 
         // Collect UI rectangles
         let mut base_rects = Vec::new();
@@ -616,11 +631,13 @@ impl Renderer {
         });
 
         // 3. Active Line Highlight
-        let cursor_line_in_view = buffer.cursor_line() as i64 - scroll_line as i64;
+        let (cursor_visual_line, cursor_visual_col) =
+            buffer.visual_position_of_char(buffer.cursor, wrap_width, char_width);
+        let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
             base_rects.push(Rect {
                 x: gutter_width,
-                y: editor_top + cursor_line_in_view as f32 * line_height,
+                y: editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px,
                 w: width - gutter_width,
                 h: line_height,
                 color: [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
@@ -629,26 +646,30 @@ impl Renderer {
 
         // 4. Cursor I-beam (thin 2px line)
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-            let col = buffer.cursor_col();
+            let caret_height = (self.current_font_size * s).max(1.0);
+            let caret_y = editor_top
+                + cursor_line_in_view as f32 * line_height
+                - scroll_y_px
+                + ((line_height - caret_height) / 2.0).max(0.0);
             base_rects.push(Rect {
-                x: editor_left + col as f32 * char_width - buffer.scroll_x * s,
-                y: editor_top + cursor_line_in_view as f32 * line_height,
+                x: editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s,
+                y: caret_y,
                 w: 2.0 * s,
-                h: line_height,
+                h: caret_height,
                 color: [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
             });
         }
 
         // 4. Bracket Matching Highlight
         if let Some(match_char) = buffer.find_matching_bracket() {
-            let match_line = buffer.rope.char_to_line(match_char);
-            let match_line_in_view = match_line as i64 - scroll_line as i64;
+            let (match_visual_line, match_visual_col) =
+                buffer.visual_position_of_char(match_char, wrap_width, char_width);
+            let match_line_in_view = match_visual_line as i64 - scroll_line as i64;
 
             if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
-                let match_col = match_char - buffer.rope.line_to_char(match_line);
                 base_rects.push(Rect {
-                    x: editor_left + match_col as f32 * char_width - buffer.scroll_x * s,
-                    y: editor_top + match_line_in_view as f32 * line_height,
+                    x: editor_left + match_visual_col as f32 * char_width - buffer.scroll_x * s,
+                    y: editor_top + match_line_in_view as f32 * line_height - scroll_y_px,
                     w: char_width,
                     h: line_height,
                     color: [theme.selection.r, theme.selection.g, theme.selection.b, 0.4],
@@ -658,75 +679,48 @@ impl Renderer {
 
         // 5. Selection Highlight
         if let Some((start, end)) = buffer.selection_range() {
-            let start_line = buffer.rope.char_to_line(start);
-            let end_line = buffer.rope.char_to_line(end);
+            for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                let sel_start = start.max(visual_line.start_char);
+                let sel_end = end.min(visual_line.end_char);
 
-            for i in 0..visible_lines + 1 {
-                let line_idx = scroll_line + i;
-                if line_idx >= start_line && line_idx <= end_line {
-                    let line_start_char = buffer.rope.line_to_char(line_idx);
-                    let line_end_char = buffer.rope.line_to_char(line_idx + 1);
+                if sel_start < sel_end {
+                    let col_start = sel_start - visual_line.start_char;
+                    let col_end = sel_end - visual_line.start_char;
 
-                    let sel_start = start.max(line_start_char);
-                    let sel_end = end.min(line_end_char);
-
-                    if sel_start < sel_end {
-                        let col_start = sel_start - line_start_char;
-                        let col_end = sel_end - line_start_char;
-
-                        base_rects.push(Rect {
-                            x: editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
-                            y: editor_top + i as f32 * line_height,
-                            w: (col_end - col_start) as f32 * char_width,
-                            h: line_height,
-                            color: [
-                                theme.selection.r,
-                                theme.selection.g,
-                                theme.selection.b,
-                                theme.selection.a.max(0.4),
-                            ],
-                        });
-                    }
+                    base_rects.push(Rect {
+                        x: editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
+                        y: editor_top + i as f32 * line_height - scroll_y_px,
+                        w: (col_end - col_start) as f32 * char_width,
+                        h: line_height,
+                        color: [
+                            theme.selection.r,
+                            theme.selection.g,
+                            theme.selection.b,
+                            theme.selection.a.max(0.4),
+                        ],
+                    });
                 }
             }
         }
 
         // 5b. Find Match Highlights
         if overlay.is_active() && !overlay.find.matches.is_empty() {
-            let total_lines = buffer.rope.len_lines();
             for (match_idx, m) in overlay.find.matches.iter().enumerate() {
                 // find matches store byte offsets; convert to char indices
                 let match_start_char = buffer.rope.byte_to_char(m.start);
                 let match_end_char = buffer.rope.byte_to_char(m.end);
-                let match_start_line = buffer.rope.char_to_line(match_start_char);
-                let match_end_line = buffer.rope.char_to_line(match_end_char);
 
                 let is_current = match_idx == overlay.find.current_match;
                 let highlight_alpha = if is_current { 0.6 } else { 0.3 };
 
-                for line_idx in match_start_line..=match_end_line {
-                    let view_line = line_idx as i64 - scroll_line as i64;
-                    if view_line < 0 || view_line >= visible_lines as i64 {
-                        continue;
-                    }
-                    if line_idx >= total_lines {
-                        break;
-                    }
-
-                    let line_start_char = buffer.rope.line_to_char(line_idx);
-                    let line_end_char = if line_idx + 1 < total_lines {
-                        buffer.rope.line_to_char(line_idx + 1)
-                    } else {
-                        buffer.rope.len_chars()
-                    };
-
-                    let col_start = match_start_char.max(line_start_char) - line_start_char;
-                    let col_end = match_end_char.min(line_end_char) - line_start_char;
+                for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                    let col_start = match_start_char.max(visual_line.start_char) - visual_line.start_char;
+                    let col_end = match_end_char.min(visual_line.end_char) - visual_line.start_char;
 
                     if col_start < col_end {
                         base_rects.push(Rect {
                             x: editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
-                            y: editor_top + view_line as f32 * line_height,
+                            y: editor_top + i as f32 * line_height - scroll_y_px,
                             w: (col_end - col_start) as f32 * char_width,
                             h: line_height,
                             color: [
@@ -856,7 +850,7 @@ impl Renderer {
         base_text_areas.push(TextArea {
             buffer: &self.gutter_buffer,
             left: 0.0,
-            top: tab_bar_height,
+            top: tab_bar_height - scroll_y_px,
             scale: s,
             bounds: TextBounds {
                 left: 0,
@@ -873,7 +867,7 @@ impl Renderer {
         base_text_areas.push(TextArea {
             buffer: &self.editor_buffer,
             left: editor_left - scroll_x_px,
-            top: tab_bar_height,
+            top: tab_bar_height - scroll_y_px,
             scale: s,
             bounds: TextBounds {
                 left: editor_left as i32,

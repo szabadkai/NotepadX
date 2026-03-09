@@ -174,6 +174,20 @@ mod tests {
     }
 
     #[test]
+    fn test_char_at_pos_with_wrap_respects_visual_scroll() {
+        let mut buffer = Buffer::new();
+        buffer.wrap_enabled = true;
+        buffer.rope = Rope::from_str("abcdefghijklmnopqrstuvwxyz0123456789");
+        buffer.scroll_y = 3.0;
+        buffer.scroll_y_target = 3.0;
+
+        let wrap_width = Some(100.0f32);
+        let pos = buffer.char_at_pos(8.0, 0.0, 8.0, 26.0, 10.0, wrap_width);
+
+        assert_eq!(pos, 30);
+    }
+
+    #[test]
     fn test_char_at_pos_with_wrap_empty_line() {
         let mut buffer = Buffer::new();
         buffer.wrap_enabled = true;
@@ -350,5 +364,17 @@ mod tests {
 
         // Should be on second line (after "short\n")
         assert!(pos >= 6, "Position should be after first line's newline");
+    }
+
+    #[test]
+    fn test_visual_position_of_char_wrap_boundary_stays_on_current_row() {
+        let mut buffer = Buffer::new();
+        buffer.wrap_enabled = true;
+        buffer.rope = Rope::from_str("0123456789");
+
+        let (visual_line, col) = buffer.visual_position_of_char(10, Some(50.0), 10.0);
+
+        assert_eq!(visual_line, 1);
+        assert_eq!(col, 5);
     }
 }

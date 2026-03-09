@@ -1,7 +1,16 @@
 use anyhow::Result;
 use encoding_rs::Encoding;
-use ropey::Rope;
+use ropey::{Rope, RopeSlice};
 use std::path::PathBuf;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisualLine {
+    pub logical_line: usize,
+    pub line_start_char: usize,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub starts_logical_line: bool,
+}
 
 /// A single editor buffer backed by a Rope data structure
 pub struct Buffer {
@@ -1073,15 +1082,184 @@ impl Buffer {
         }
     }
 
+    fn line_len_without_ending(line: RopeSlice<'_>) -> usize {
+        let line_len = line.len_chars();
+        if line_len > 0 && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r') {
+            if line_len > 1 && line.char(line_len - 1) == '\n' && line.char(line_len - 2) == '\r' {
+                line_len.saturating_sub(2)
+            } else {
+                line_len.saturating_sub(1)
+            }
+        } else {
+            line_len
+        }
+    }
+
+    fn chars_per_visual_line(&self, wrap_width: Option<f32>, char_width: f32) -> usize {
+        if !self.wrap_enabled {
+            return usize::MAX;
+        }
+
+        match wrap_width {
+            Some(width) if char_width > 0.0 => (width / char_width).floor().max(1.0) as usize,
+            _ => 80,
+        }
+    }
+
+    fn visual_lines_for_len(&self, line_len: usize, chars_per_visual_line: usize) -> usize {
+        if !self.wrap_enabled || chars_per_visual_line == usize::MAX {
+            1
+        } else if line_len == 0 {
+            1
+        } else {
+            line_len.div_ceil(chars_per_visual_line)
+        }
+    }
+
+    pub fn visual_line_count(&self, wrap_width: Option<f32>, char_width: f32) -> usize {
+        let chars_per_visual_line = self.chars_per_visual_line(wrap_width, char_width);
+
+        (0..self.rope.len_lines())
+            .map(|logical_line| {
+                let line_len = Self::line_len_without_ending(self.rope.line(logical_line));
+                self.visual_lines_for_len(line_len, chars_per_visual_line)
+            })
+            .sum::<usize>()
+            .max(1)
+    }
+
+    pub fn visual_lines(
+        &self,
+        start_visual_line: usize,
+        max_visual_lines: usize,
+        wrap_width: Option<f32>,
+        char_width: f32,
+    ) -> Vec<VisualLine> {
+        if max_visual_lines == 0 {
+            return Vec::new();
+        }
+
+        let chars_per_visual_line = self.chars_per_visual_line(wrap_width, char_width);
+        let mut visual_line_idx = 0usize;
+        let mut visible = Vec::with_capacity(max_visual_lines);
+
+        for logical_line in 0..self.rope.len_lines() {
+            let line = self.rope.line(logical_line);
+            let line_start_char = self.rope.line_to_char(logical_line);
+            let line_len = Self::line_len_without_ending(line);
+            let visual_segments = self.visual_lines_for_len(line_len, chars_per_visual_line);
+
+            for segment in 0..visual_segments {
+                if visual_line_idx >= start_visual_line && visible.len() < max_visual_lines {
+                    let start_col = if chars_per_visual_line == usize::MAX {
+                        0
+                    } else {
+                        segment * chars_per_visual_line
+                    };
+                    let end_col = if line_len == 0 {
+                        0
+                    } else if chars_per_visual_line == usize::MAX {
+                        line_len
+                    } else {
+                        (start_col + chars_per_visual_line).min(line_len)
+                    };
+
+                    visible.push(VisualLine {
+                        logical_line,
+                        line_start_char,
+                        start_char: line_start_char + start_col,
+                        end_char: line_start_char + end_col,
+                        starts_logical_line: segment == 0,
+                    });
+                }
+
+                visual_line_idx += 1;
+                if visible.len() == max_visual_lines {
+                    return visible;
+                }
+            }
+        }
+
+        visible
+    }
+
+    pub fn visual_position_of_char(
+        &self,
+        char_idx: usize,
+        wrap_width: Option<f32>,
+        char_width: f32,
+    ) -> (usize, usize) {
+        let char_idx = char_idx.min(self.rope.len_chars());
+        let logical_line = self.rope.char_to_line(char_idx);
+        let chars_per_visual_line = self.chars_per_visual_line(wrap_width, char_width);
+
+        if !self.wrap_enabled || chars_per_visual_line == usize::MAX {
+            let col = char_idx - self.rope.line_to_char(logical_line);
+            return (logical_line, col);
+        }
+
+        let mut visual_line = 0usize;
+        for prior_line in 0..logical_line {
+            let line_len = Self::line_len_without_ending(self.rope.line(prior_line));
+            visual_line += self.visual_lines_for_len(line_len, chars_per_visual_line);
+        }
+
+        let line_start_char = self.rope.line_to_char(logical_line);
+        let line_len = Self::line_len_without_ending(self.rope.line(logical_line));
+        let raw_col = (char_idx - line_start_char).min(line_len);
+
+        if line_len == 0 {
+            return (visual_line, 0);
+        }
+
+        let at_exact_wrap_boundary =
+            raw_col == line_len && raw_col > 0 && raw_col % chars_per_visual_line == 0;
+        let segment = if at_exact_wrap_boundary {
+            raw_col.saturating_sub(1) / chars_per_visual_line
+        } else {
+            raw_col / chars_per_visual_line
+        };
+        let col = if at_exact_wrap_boundary {
+            chars_per_visual_line
+        } else {
+            raw_col % chars_per_visual_line
+        };
+
+        (visual_line + segment, col)
+    }
+
+    fn max_vertical_scroll(
+        &self,
+        visible_lines: usize,
+        wrap_width: Option<f32>,
+        char_width: f32,
+    ) -> f64 {
+        self.visual_line_count(wrap_width, char_width)
+            .saturating_sub(visible_lines)
+            .max(0) as f64
+    }
+
     /// Scroll by a number of lines (animated — for mouse wheel clicks)
-    pub fn scroll(&mut self, delta_lines: f64) {
-        let max_scroll = (self.rope.len_lines() as f64 - 1.0).max(0.0);
+    pub fn scroll(
+        &mut self,
+        delta_lines: f64,
+        visible_lines: usize,
+        wrap_width: Option<f32>,
+        char_width: f32,
+    ) {
+        let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);
         self.scroll_y_target = (self.scroll_y_target + delta_lines).clamp(0.0, max_scroll);
     }
 
     /// Scroll by a pixel amount directly (no animation — for trackpad)
-    pub fn scroll_direct(&mut self, delta_lines: f64) {
-        let max_scroll = (self.rope.len_lines() as f64 - 1.0).max(0.0);
+    pub fn scroll_direct(
+        &mut self,
+        delta_lines: f64,
+        visible_lines: usize,
+        wrap_width: Option<f32>,
+        char_width: f32,
+    ) {
+        let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);
         self.scroll_y = (self.scroll_y + delta_lines).clamp(0.0, max_scroll);
         self.scroll_y_target = self.scroll_y;
     }
@@ -1104,15 +1282,22 @@ impl Buffer {
     }
 
     /// Ensure cursor is visible on screen
-    pub fn ensure_cursor_visible(&mut self, visible_lines: usize) {
-        let cursor_line = self.cursor_line() as f64;
+    pub fn ensure_cursor_visible(
+        &mut self,
+        visible_lines: usize,
+        wrap_width: Option<f32>,
+        char_width: f32,
+    ) {
+        let cursor_line = self.visual_position_of_char(self.cursor, wrap_width, char_width).0 as f64;
         let scroll = self.scroll_y_target;
         let margin = 3.0; // Keep 3 lines of context
+        let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);
 
         if cursor_line < scroll + margin {
-            self.scroll_y_target = (cursor_line - margin).max(0.0);
+            self.scroll_y_target = (cursor_line - margin).clamp(0.0, max_scroll);
         } else if cursor_line > scroll + visible_lines as f64 - margin {
-            self.scroll_y_target = cursor_line - visible_lines as f64 + margin;
+            self.scroll_y_target =
+                (cursor_line - visible_lines as f64 + margin).clamp(0.0, max_scroll);
         }
     }
 
@@ -1197,77 +1382,21 @@ impl Buffer {
         char_width: f32,
         wrap_width: Option<f32>,
     ) -> usize {
-        let total_lines = self.rope.len_lines();
+        let total_visual_lines = self.visual_line_count(wrap_width, char_width);
+        let visual_line_idx = ((relative_y / line_height).floor().max(0.0) as usize)
+            .min(total_visual_lines.saturating_sub(1));
+        let visual_line = self
+            .visual_lines(visual_line_idx, 1, wrap_width, char_width)
+            .into_iter()
+            .next();
 
-        // Calculate the visual line index from Y position
-        let visual_line_idx = (relative_y / line_height).floor() as usize;
-
-        // Calculate chars per line from wrap width
-        // wrap_width is the available width for text (editor_width - scrollbar)
-        let chars_per_line = if let Some(ww) = wrap_width {
-            (ww / char_width).max(1.0) as usize
-        } else {
-            // Fallback: assume ~80 chars per line
-            80
-        };
-
-        // We need to find which logical line contains this visual line
-        // and which wrap segment within that logical line
-        let mut visual_line_count = 0usize;
-        let mut target_logical_line = 0usize;
-        let mut wrap_segment = 0usize; // Which wrapped segment of the logical line
-
-        for logical_line in 0..total_lines {
-            let line = self.rope.line(logical_line);
-            let line_text: String = line.into();
-            let line_len_chars = line_text.trim_end_matches(['\n', '\r']).chars().count();
-
-            // Calculate how many visual lines this logical line takes
-            let visual_lines_for_this = if line_len_chars == 0 {
-                1 // Empty line still takes one visual line
-            } else {
-                line_len_chars.div_ceil(chars_per_line)
-            };
-
-            if visual_line_count + visual_lines_for_this > visual_line_idx {
-                // Found the right logical line
-                target_logical_line = logical_line;
-                wrap_segment = visual_line_idx.saturating_sub(visual_line_count);
-                break;
-            }
-
-            visual_line_count += visual_lines_for_this;
-            if logical_line == total_lines - 1 {
-                // We've gone past the end, clamp to last line
-                target_logical_line = logical_line;
-                wrap_segment = visual_lines_for_this.saturating_sub(1);
-            }
-        }
-
-        // Now calculate the column within this logical line
-        let line = self.rope.line(target_logical_line);
-        let line_len = line.len_chars();
-        let max_col = if line_len > 0
-            && (line.char(line_len - 1) == '\n' || line.char(line_len - 1) == '\r')
-        {
-            if line_len > 1 && line.char(line_len - 1) == '\n' && line.char(line_len - 2) == '\r' {
-                line_len.saturating_sub(2)
-            } else {
-                line_len.saturating_sub(1)
-            }
-        } else {
-            line_len
-        };
-
-        // Calculate column based on wrap segment and x position
         let relative_x = (x - x_offset).max(0.0);
         let col_in_segment = (relative_x / char_width).round() as usize;
 
-        // Add offset for wrapped segments
-        let col_offset = wrap_segment * chars_per_line;
-        let col_idx = (col_offset + col_in_segment).min(max_col);
-
-        self.rope.line_to_char(target_logical_line) + col_idx
+        match visual_line {
+            Some(line) => line.start_char + col_in_segment.min(line.end_char - line.start_char),
+            None => 0,
+        }
     }
 
     pub fn selection_range(&self) -> Option<(usize, usize)> {
