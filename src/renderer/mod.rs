@@ -27,6 +27,19 @@ pub const OVERLAY_FONT_SIZE: f32 = 14.0;
 pub const OVERLAY_LINE_HEIGHT: f32 = 20.0;
 pub const OVERLAY_CHAR_WIDTH: f32 = OVERLAY_FONT_SIZE * 0.6;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayTextPassLayer {
+    TabBar,
+    OverlayPanel,
+}
+
+fn overlay_text_pass_layers() -> [OverlayTextPassLayer; 2] {
+    [
+        OverlayTextPassLayer::TabBar,
+        OverlayTextPassLayer::OverlayPanel,
+    ]
+}
+
 /// Persistent text buffers for glyphon rendering
 pub struct Renderer {
     pub font_system: FontSystem,
@@ -1516,20 +1529,44 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 _ => 40.0 * s,
             };
-            let overlay_text_areas = vec![TextArea {
-                buffer: &self.overlay_buffer,
-                left: overlay_left + 8.0 * s,
-                top: overlay_top_panel + 6.0 * s,
-                scale: s,
-                bounds: TextBounds {
-                    left: (overlay_left + 8.0 * s) as i32,
-                    top: (overlay_top_panel + 6.0 * s) as i32,
-                    right: (overlay_left + overlay_width - 8.0 * s) as i32,
-                    bottom: (overlay_top_panel + overlay_height) as i32,
-                },
-                default_color: theme.fg.to_glyphon(),
-                custom_glyphs: &[],
-            }];
+            let mut overlay_text_areas = Vec::with_capacity(overlay_text_pass_layers().len());
+            for layer in overlay_text_pass_layers() {
+                match layer {
+                    OverlayTextPassLayer::TabBar => {
+                        let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0;
+                        overlay_text_areas.push(TextArea {
+                            buffer: &self.tab_bar_buffer,
+                            left: 0.0,
+                            top: tab_text_top,
+                            scale: s,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: 0,
+                                right: width as i32,
+                                bottom: tab_bar_height as i32,
+                            },
+                            default_color: theme.tab_active_fg.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+                    OverlayTextPassLayer::OverlayPanel => {
+                        overlay_text_areas.push(TextArea {
+                            buffer: &self.overlay_buffer,
+                            left: overlay_left + 8.0 * s,
+                            top: overlay_top_panel + 6.0 * s,
+                            scale: s,
+                            bounds: TextBounds {
+                                left: (overlay_left + 8.0 * s) as i32,
+                                top: (overlay_top_panel + 6.0 * s) as i32,
+                                right: (overlay_left + overlay_width - 8.0 * s) as i32,
+                                bottom: (overlay_top_panel + overlay_height) as i32,
+                            },
+                            default_color: theme.fg.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
+            }
 
             // Prepare overlay text separately
             self.text_renderer
@@ -1707,5 +1744,21 @@ impl ShapeRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         pass.draw(0..vertices.len() as u32, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{overlay_text_pass_layers, OverlayTextPassLayer};
+
+    #[test]
+    fn overlay_pass_keeps_tab_text_before_overlay_text() {
+        assert_eq!(
+            overlay_text_pass_layers(),
+            [
+                OverlayTextPassLayer::TabBar,
+                OverlayTextPassLayer::OverlayPanel,
+            ]
+        );
     }
 }
