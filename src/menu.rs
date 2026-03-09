@@ -7,8 +7,10 @@ pub enum MenuAction {
     // File
     New,
     Open,
+    OpenWorkspace,
     Save,
     SaveAs,
+    SaveWorkspace,
     Close,
     // Edit
     Undo,
@@ -79,6 +81,20 @@ impl AppMenu {
             )),
         );
 
+        let open_workspace_item = MenuItem::with_id(
+            MenuId::new("open_workspace"),
+            "Open Workspace...",
+            true,
+            None,
+        );
+
+        let save_workspace_item = MenuItem::with_id(
+            MenuId::new("save_workspace"),
+            "Save Workspace",
+            true,
+            None,
+        );
+
         let close_item = MenuItem::with_id(
             MenuId::new("close"),
             "Close",
@@ -88,9 +104,11 @@ impl AppMenu {
 
         let _ = file_menu.append(&new_item);
         let _ = file_menu.append(&open_item);
+        let _ = file_menu.append(&open_workspace_item);
         let _ = file_menu.append(&PredefinedMenuItem::separator());
         let _ = file_menu.append(&save_item);
         let _ = file_menu.append(&save_as_item);
+        let _ = file_menu.append(&save_workspace_item);
         let _ = file_menu.append(&PredefinedMenuItem::separator());
         let _ = file_menu.append(&close_item);
 
@@ -272,8 +290,10 @@ impl AppMenu {
             let action = match event.id.0.as_str() {
                 "new" => MenuAction::New,
                 "open" => MenuAction::Open,
+                "open_workspace" => MenuAction::OpenWorkspace,
                 "save" => MenuAction::Save,
                 "save_as" => MenuAction::SaveAs,
+                "save_workspace" => MenuAction::SaveWorkspace,
                 "close" => MenuAction::Close,
                 "undo" => MenuAction::Undo,
                 "redo" => MenuAction::Redo,

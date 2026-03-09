@@ -10,8 +10,10 @@ pub struct Command {
 pub enum CommandId {
     NewTab,
     OpenFile,
+    OpenWorkspace,
     Save,
     SaveAs,
+    SaveWorkspace,
     CloseTab,
     Undo,
     Redo,
@@ -43,6 +45,11 @@ pub fn all_commands() -> Vec<Command> {
             id: CommandId::OpenFile,
         },
         Command {
+            name: "Open Workspace",
+            shortcut: "",
+            id: CommandId::OpenWorkspace,
+        },
+        Command {
             name: "Save",
             shortcut: "Cmd+S",
             id: CommandId::Save,
@@ -51,6 +58,11 @@ pub fn all_commands() -> Vec<Command> {
             name: "Save As",
             shortcut: "Cmd+Shift+S",
             id: CommandId::SaveAs,
+        },
+        Command {
+            name: "Save Workspace",
+            shortcut: "",
+            id: CommandId::SaveWorkspace,
         },
         Command {
             name: "Close Tab",

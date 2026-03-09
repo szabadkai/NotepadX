@@ -6,6 +6,7 @@ mod large_file;
 mod menu;
 mod overlay;
 mod renderer;
+mod session;
 mod settings;
 mod syntax;
 mod theme;
@@ -16,8 +17,9 @@ use menu::{AppMenu, MenuAction};
 use overlay::palette::CommandId;
 use overlay::{ActiveOverlay, OverlayState};
 use renderer::Renderer;
+use session::{WorkspaceState, WORKSPACE_FILE_EXTENSION};
 use settings::AppConfig;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use syntax::SyntaxHighlighter;
 use theme::Theme;
 use winit::{
@@ -75,6 +77,9 @@ struct App {
     needs_redraw: bool,
     last_large_file_index_version: Option<u64>,
     pending_find_jump: bool,
+    current_workspace_path: Option<PathBuf>,
+    last_saved_session_json: Option<String>,
+    next_session_sync: Instant,
 }
 
 impl App {
@@ -113,6 +118,117 @@ impl App {
             needs_redraw: true,
             last_large_file_index_version: None,
             pending_find_jump: false,
+            current_workspace_path: None,
+            last_saved_session_json: None,
+            next_session_sync: Instant::now() + Duration::from_millis(1000),
+        }
+    }
+
+    fn session_snapshot_json(&self) -> Option<String> {
+        serde_json::to_string(&self.editor.workspace_state_snapshot()).ok()
+    }
+
+    fn sync_session_baseline(&mut self) {
+        self.last_saved_session_json = self.session_snapshot_json();
+    }
+
+    fn persist_session_now(&mut self) {
+        let snapshot = self.editor.workspace_state_snapshot();
+        let Ok(json) = serde_json::to_string(&snapshot) else {
+            log::error!("Failed to serialize session snapshot");
+            return;
+        };
+
+        if self.last_saved_session_json.as_deref() == Some(json.as_str()) {
+            return;
+        }
+
+        if let Err(err) = snapshot.save_last_session() {
+            log::error!("Failed to save session: {}", err);
+            return;
+        }
+
+        self.last_saved_session_json = Some(json);
+    }
+
+    fn persist_session_if_due(&mut self) {
+        let now = Instant::now();
+        if now < self.next_session_sync {
+            return;
+        }
+
+        self.next_session_sync = now + Duration::from_millis(1000);
+        self.persist_session_now();
+    }
+
+    fn apply_workspace_state(&mut self, state: WorkspaceState, workspace_path: Option<PathBuf>) {
+        self.editor
+            .restore_workspace_state(&state, Some(&self.syntax), &self.config);
+        self.current_workspace_path = workspace_path;
+        self.sync_session_baseline();
+        self.needs_redraw = true;
+    }
+
+    fn restore_last_session(&mut self) {
+        match WorkspaceState::load_last_session() {
+            Ok(state) => self.apply_workspace_state(state, None),
+            Err(err) => {
+                log::debug!("No previous session restored: {}", err);
+                self.sync_session_baseline();
+            }
+        }
+    }
+
+    fn workspace_file_dialog() -> rfd::FileDialog {
+        rfd::FileDialog::new().add_filter(
+            "NotepadX Workspace",
+            &[WORKSPACE_FILE_EXTENSION],
+        )
+    }
+
+    fn normalize_workspace_path(mut path: PathBuf) -> PathBuf {
+        if path.extension().is_none() {
+            path.set_extension(WORKSPACE_FILE_EXTENSION);
+        }
+        path
+    }
+
+    fn open_workspace(&mut self) {
+        let Some(path) = Self::workspace_file_dialog().pick_file() else {
+            return;
+        };
+
+        match WorkspaceState::load_from_path(&path) {
+            Ok(state) => {
+                self.apply_workspace_state(state, Some(path));
+                self.persist_session_now();
+            }
+            Err(err) => {
+                log::error!("Open workspace failed: {}", err);
+            }
+        }
+    }
+
+    fn save_workspace(&mut self) {
+        let path = match self.current_workspace_path.clone() {
+            Some(path) => path,
+            None => {
+                let Some(path) = Self::workspace_file_dialog().save_file() else {
+                    return;
+                };
+                Self::normalize_workspace_path(path)
+            }
+        };
+
+        let snapshot = self.editor.workspace_state_snapshot();
+        match snapshot.save_to_path(&path) {
+            Ok(()) => {
+                self.current_workspace_path = Some(path);
+                self.persist_session_now();
+            }
+            Err(err) => {
+                log::error!("Save workspace failed: {}", err);
+            }
         }
     }
 
@@ -326,6 +442,7 @@ impl App {
         };
         if can_close {
             self.editor.close_active_tab();
+            self.persist_session_now();
         }
     }
 
@@ -751,6 +868,7 @@ impl App {
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "n" => {
                 self.editor.new_tab();
                 self.editor.active_mut().wrap_enabled = self.config.line_wrap;
+                self.persist_session_now();
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "w" => {
                 self.close_active_tab_with_confirm();
@@ -1160,11 +1278,17 @@ impl App {
 
     fn execute_command(&mut self, cmd: CommandId) {
         match cmd {
-            CommandId::NewTab => self.editor.new_tab(),
+            CommandId::NewTab => {
+                self.editor.new_tab();
+                self.editor.active_mut().wrap_enabled = self.config.line_wrap;
+                self.persist_session_now();
+            }
             CommandId::OpenFile => self.open_file(),
+            CommandId::OpenWorkspace => self.open_workspace(),
             CommandId::Save => self.save(),
             CommandId::SaveAs => self.save_as(),
-            CommandId::CloseTab => self.editor.close_active_tab(),
+            CommandId::SaveWorkspace => self.save_workspace(),
+            CommandId::CloseTab => self.close_active_tab_with_confirm(),
             CommandId::Undo => self.editor.active_mut().undo(),
             CommandId::Redo => self.editor.active_mut().redo(),
             CommandId::SelectAll => self.editor.active_mut().select_all(),
@@ -1479,6 +1603,8 @@ impl App {
         if buffer.file_path.is_some() {
             if let Err(e) = buffer.save() {
                 log::error!("Save failed: {}", e);
+            } else {
+                self.persist_session_now();
             }
         } else {
             self.save_as();
@@ -1489,6 +1615,8 @@ impl App {
         if let Some(path) = rfd::FileDialog::new().save_file() {
             if let Err(e) = self.editor.active_mut().save_as(path) {
                 log::error!("Save As failed: {}", e);
+            } else {
+                self.persist_session_now();
             }
         }
     }
@@ -1505,6 +1633,7 @@ impl App {
                 if self.editor.active().is_large_file() {
                     self.editor.active_mut().wrap_enabled = false;
                 }
+                self.persist_session_now();
             }
         }
     }
@@ -1521,12 +1650,20 @@ impl App {
                 self.open_file();
                 self.needs_redraw = true;
             }
+            MenuAction::OpenWorkspace => {
+                self.open_workspace();
+                self.needs_redraw = true;
+            }
             MenuAction::Save => {
                 self.save();
                 self.needs_redraw = true;
             }
             MenuAction::SaveAs => {
                 self.save_as();
+                self.needs_redraw = true;
+            }
+            MenuAction::SaveWorkspace => {
+                self.save_workspace();
                 self.needs_redraw = true;
             }
             MenuAction::Close => {
@@ -1718,6 +1855,7 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                self.persist_session_now();
                 event_loop.exit();
             }
 
@@ -1864,6 +2002,7 @@ impl ApplicationHandler for App {
                     if self.editor.active().is_large_file() {
                         self.editor.active_mut().wrap_enabled = false;
                     }
+                    self.persist_session_now();
                 }
                 self.needs_redraw = true;
             }
@@ -1903,6 +2042,8 @@ impl ApplicationHandler for App {
             }
         }
 
+        self.persist_session_if_due();
+
         let scroll_diff_y =
             (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
         let scroll_diff_x =
@@ -1932,6 +2073,9 @@ fn main() -> Result<()> {
                 log::error!("Failed to open {}: {}", path.display(), e);
             }
         }
+        app.sync_session_baseline();
+    } else {
+        app.restore_last_session();
     }
 
     event_loop.run_app(&mut app)?;

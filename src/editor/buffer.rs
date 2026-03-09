@@ -1,5 +1,7 @@
 use crate::large_file::{should_use_large_file_mode, LargeFileState};
+use crate::session::{StoredLineEnding, WorkspaceTabState};
 use crate::settings::AppConfig;
+use crate::syntax::SyntaxHighlighter;
 use anyhow::Result;
 use encoding_rs::Encoding;
 use ropey::{Rope, RopeSlice};
@@ -271,6 +273,96 @@ impl Buffer {
             large_file: Some(large_file),
             wrap_enabled: false,
         })
+    }
+
+    pub fn from_workspace_tab_state(
+        state: &WorkspaceTabState,
+        syntax: Option<&SyntaxHighlighter>,
+        config: &AppConfig,
+    ) -> Result<Option<Self>> {
+        let mut buffer = if let Some(contents) = state.contents.as_ref() {
+            Self {
+                rope: Rope::from_str(contents),
+                file_path: state.file_path.clone(),
+                dirty: state.dirty,
+                cursor: 0,
+                selection_anchor: None,
+                desired_col: None,
+                scroll_y: state.scroll_y.max(0.0),
+                scroll_y_target: state.scroll_y.max(0.0),
+                scroll_x: state.scroll_x.max(0.0),
+                scroll_x_target: state.scroll_x.max(0.0),
+                undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
+                encoding: "UTF-8",
+                line_ending: match StoredLineEnding::detect(contents) {
+                    StoredLineEnding::Lf => LineEnding::Lf,
+                    StoredLineEnding::CrLf => LineEnding::CrLf,
+                },
+                language_index: None,
+                is_binary: false,
+                large_file: None,
+                wrap_enabled: state.wrap_enabled,
+            }
+        } else if let Some(path) = state.file_path.as_deref() {
+            if !path.exists() {
+                return Ok(None);
+            }
+
+            let mut buffer = Self::from_file_with_config(path, config)?;
+            buffer.wrap_enabled = if buffer.is_large_file() {
+                false
+            } else {
+                state.wrap_enabled
+            };
+            buffer
+        } else {
+            let mut buffer = Self::new();
+            buffer.wrap_enabled = state.wrap_enabled;
+            buffer
+        };
+
+        if let Some(syntax) = syntax {
+            if !buffer.is_large_file() && !buffer.is_binary {
+                let filename = buffer.display_name();
+                buffer.language_index = syntax.detect_language(&filename);
+            }
+        }
+
+        buffer.cursor = state.cursor.min(buffer.rope.len_chars());
+        buffer.selection_anchor = state
+            .selection_anchor
+            .map(|anchor| anchor.min(buffer.rope.len_chars()));
+        buffer.scroll_y = state.scroll_y.max(0.0);
+        buffer.scroll_y_target = buffer.scroll_y;
+        buffer.scroll_x = state.scroll_x.max(0.0);
+        buffer.scroll_x_target = buffer.scroll_x;
+        buffer.desired_col = None;
+
+        Ok(Some(buffer))
+    }
+
+    pub fn workspace_tab_state(&self) -> WorkspaceTabState {
+        WorkspaceTabState {
+            file_path: self.file_path.clone(),
+            contents: if self.file_path.is_none() || self.dirty {
+                Some(self.rope.to_string())
+            } else {
+                None
+            },
+            dirty: self.dirty,
+            cursor: self.cursor.min(self.rope.len_chars()),
+            selection_anchor: self
+                .selection_anchor
+                .map(|anchor| anchor.min(self.rope.len_chars())),
+            scroll_y: self.scroll_y.max(0.0),
+            scroll_x: self.scroll_x.max(0.0),
+            wrap_enabled: self.wrap_enabled,
+            line_ending: match self.line_ending {
+                LineEnding::Lf => StoredLineEnding::Lf,
+                LineEnding::CrLf => StoredLineEnding::CrLf,
+            },
+        }
     }
 
     pub fn is_large_file(&self) -> bool {

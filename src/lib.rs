@@ -7,6 +7,7 @@ pub mod large_file;
 pub mod menu;
 pub mod overlay;
 pub mod renderer;
+pub mod session;
 pub mod settings;
 pub mod syntax;
 pub mod theme;

@@ -5,9 +5,11 @@
 //! - Double-click with line wrap
 //! - Overlay rendering behavior
 
-use notepadx::editor::Buffer;
+use notepadx::editor::buffer::LineEnding;
+use notepadx::editor::{Buffer, Editor};
 use notepadx::overlay::find::FindState;
 use notepadx::overlay::{ActiveOverlay, OverlayState};
+use notepadx::session::{StoredLineEnding, WorkspaceState, WorkspaceTabState};
 use notepadx::settings::AppConfig;
 use std::fs::File;
 use std::io::Write;
@@ -448,6 +450,106 @@ fn test_config_handles_missing_fields() {
     // Missing fields should use defaults
     assert!(config.line_wrap); // default
     assert!(!config.auto_save); // default
+}
+
+#[test]
+fn test_workspace_snapshot_embeds_dirty_file_contents() {
+    let path = temp_path("dirty-session");
+    std::fs::write(&path, b"on-disk\n").expect("Should create temp file");
+
+    let mut editor = Editor::new();
+    editor.active_mut().file_path = Some(path.clone());
+    editor.active_mut().rope = ropey::Rope::from_str("unsaved\r\nchanges\r\n");
+    editor.active_mut().dirty = true;
+    editor.active_mut().cursor = 4;
+    editor.active_mut().selection_anchor = Some(1);
+    editor.active_mut().scroll_y = 6.0;
+    editor.active_mut().scroll_x = 12.0;
+    editor.active_mut().line_ending = LineEnding::CrLf;
+
+    let snapshot = editor.workspace_state_snapshot();
+    let tab = snapshot
+        .buffers
+        .first()
+        .expect("Snapshot should include active buffer");
+
+    assert_eq!(tab.file_path.as_ref(), Some(&path));
+    assert_eq!(tab.contents.as_deref(), Some("unsaved\r\nchanges\r\n"));
+    assert!(tab.dirty);
+    assert_eq!(tab.cursor, 4);
+    assert_eq!(tab.selection_anchor, Some(1));
+    assert_eq!(tab.scroll_y, 6.0);
+    assert_eq!(tab.scroll_x, 12.0);
+    assert_eq!(tab.line_ending, StoredLineEnding::CrLf);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_workspace_restore_dedupes_paths_and_keeps_untitled_state() {
+    let path = temp_path("workspace-restore");
+    std::fs::write(&path, b"alpha\n").expect("Should create temp file");
+
+    let state = WorkspaceState {
+        version: 1,
+        active_buffer: 2,
+        buffers: vec![
+            WorkspaceTabState {
+                file_path: Some(path.clone()),
+                contents: None,
+                dirty: false,
+                cursor: 2,
+                selection_anchor: Some(1),
+                scroll_y: 3.0,
+                scroll_x: 4.0,
+                wrap_enabled: false,
+                line_ending: StoredLineEnding::Lf,
+            },
+            WorkspaceTabState {
+                file_path: Some(path.clone()),
+                contents: None,
+                dirty: false,
+                cursor: 0,
+                selection_anchor: None,
+                scroll_y: 0.0,
+                scroll_x: 0.0,
+                wrap_enabled: true,
+                line_ending: StoredLineEnding::Lf,
+            },
+            WorkspaceTabState {
+                file_path: None,
+                contents: Some("scratch pad".into()),
+                dirty: true,
+                cursor: 7,
+                selection_anchor: Some(2),
+                scroll_y: 5.0,
+                scroll_x: 9.0,
+                wrap_enabled: true,
+                line_ending: StoredLineEnding::Lf,
+            },
+        ],
+    };
+
+    let mut editor = Editor::new();
+    editor.restore_workspace_state(&state, None, &AppConfig::default());
+
+    assert_eq!(editor.buffers.len(), 2);
+    assert_eq!(editor.active_buffer, 1);
+    assert_eq!(editor.buffers[0].file_path.as_ref(), Some(&path));
+    assert!(!editor.buffers[0].dirty);
+    assert_eq!(editor.buffers[0].cursor, 2);
+    assert_eq!(editor.buffers[0].selection_anchor, Some(1));
+    assert_eq!(editor.buffers[0].scroll_y, 3.0);
+    assert_eq!(editor.buffers[0].scroll_x, 4.0);
+    assert!(editor.buffers[1].file_path.is_none());
+    assert_eq!(editor.buffers[1].rope.to_string(), "scratch pad");
+    assert!(editor.buffers[1].dirty);
+    assert_eq!(editor.buffers[1].cursor, 7);
+    assert_eq!(editor.buffers[1].selection_anchor, Some(2));
+    assert_eq!(editor.buffers[1].scroll_y, 5.0);
+    assert_eq!(editor.buffers[1].scroll_x, 9.0);
+
+    let _ = std::fs::remove_file(path);
 }
 
 // ============================================================================

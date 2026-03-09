@@ -3,6 +3,9 @@ pub mod buffer;
 #[cfg(test)]
 mod buffer_tests;
 
+use std::collections::HashSet;
+
+use crate::session::WorkspaceState;
 use crate::settings::AppConfig;
 pub use buffer::Buffer;
 
@@ -120,6 +123,59 @@ impl Editor {
         } else {
             self.active_buffer -= 1;
         }
+    }
+
+    pub fn workspace_state_snapshot(&self) -> WorkspaceState {
+        WorkspaceState {
+            version: 1,
+            active_buffer: self.active_buffer,
+            buffers: self
+                .buffers
+                .iter()
+                .map(Buffer::workspace_tab_state)
+                .collect(),
+        }
+    }
+
+    pub fn restore_workspace_state(
+        &mut self,
+        state: &WorkspaceState,
+        syntax: Option<&crate::syntax::SyntaxHighlighter>,
+        config: &AppConfig,
+    ) {
+        let mut seen_paths = HashSet::new();
+        let mut buffers = Vec::new();
+        let mut active_buffer = 0;
+
+        for (saved_index, saved_buffer) in state.buffers.iter().enumerate() {
+            if let Some(path) = saved_buffer.file_path.as_ref() {
+                if !seen_paths.insert(path.clone()) {
+                    continue;
+                }
+            }
+
+            match Buffer::from_workspace_tab_state(saved_buffer, syntax, config) {
+                Ok(Some(buffer)) => {
+                    if saved_index == state.active_buffer {
+                        active_buffer = buffers.len();
+                    }
+                    buffers.push(buffer);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::warn!("Skipping restored tab: {}", err);
+                }
+            }
+        }
+
+        if buffers.is_empty() {
+            *self = Self::new();
+            self.active_mut().wrap_enabled = config.line_wrap;
+            return;
+        }
+
+        self.buffers = buffers;
+        self.active_buffer = active_buffer.min(self.buffers.len().saturating_sub(1));
     }
 }
 
