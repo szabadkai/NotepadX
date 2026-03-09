@@ -1,5 +1,7 @@
 use muda::accelerator::{Accelerator, Code, Modifiers};
-use muda::{AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(target_os = "macos")]
+use muda::AboutMetadata;
+use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
 /// Menu action identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +280,9 @@ impl AppMenu {
     pub fn init(&self) {
         #[cfg(target_os = "macos")]
         self.menu.init_for_nsapp();
+
+        #[cfg(not(target_os = "macos"))]
+        let _ = &self.menu;
     }
 
     /// Try to receive a menu event from the global menu event channel
