@@ -6,8 +6,22 @@
 //! - Overlay rendering behavior
 
 use notepadx::editor::Buffer;
+use notepadx::overlay::find::FindState;
 use notepadx::overlay::{ActiveOverlay, OverlayState};
 use notepadx::settings::AppConfig;
+use std::fs::File;
+use std::io::Write;
+use std::thread;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn temp_path(name: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("notepadx-{name}-{nanos}.log"))
+}
 
 // ============================================================================
 // Settings Integration Tests
@@ -28,11 +42,11 @@ fn test_settings_row_count_matches_actual_rows() {
     const SETTINGS_ROW_COUNT: usize = 8;
 
     // Each row index should have a corresponding handler
-    let mut tested_rows = vec![false; SETTINGS_ROW_COUNT];
+    let mut tested_rows = [false; SETTINGS_ROW_COUNT];
 
     // Mark rows that would be handled (based on handle_settings_key implementation)
-    for i in 0..SETTINGS_ROW_COUNT {
-        tested_rows[i] = true; // All 8 rows are handled
+    for row in tested_rows.iter_mut().take(SETTINGS_ROW_COUNT) {
+        *row = true; // All 8 rows are handled
     }
 
     // All rows should be tested/handled
@@ -71,9 +85,7 @@ fn test_settings_navigation_bounds() {
 
     // Try to go up from 0 (should stay at 0)
     for _ in 0..100 {
-        if cursor > 0 {
-            cursor -= 1;
-        }
+        cursor = cursor.saturating_sub(1);
     }
     assert_eq!(cursor, 0);
 
@@ -255,6 +267,10 @@ fn test_config_serialization_all_fields() {
         use_spaces: false,
         highlight_current_line: false,
         show_whitespace: true,
+        large_file_threshold_mb: 64,
+        large_file_preview_kb: 512,
+        large_file_search_results_limit: 500,
+        large_file_search_scan_limit_mb: 32,
     };
 
     let json = serde_json::to_string(&config).expect("Should serialize");
@@ -272,6 +288,149 @@ fn test_config_serialization_all_fields() {
         restored.highlight_current_line
     );
     assert_eq!(config.show_whitespace, restored.show_whitespace);
+}
+
+#[test]
+fn test_large_file_mode_uses_preview_window() {
+    let path = temp_path("preview");
+    let content = "line with target\n".repeat(131072);
+    std::fs::write(&path, content.as_bytes()).expect("Should create temp file");
+
+    let config = AppConfig {
+        large_file_threshold_mb: 1,
+        large_file_preview_kb: 16,
+        ..AppConfig::default()
+    };
+
+    let buffer = Buffer::from_file_with_config(&path, &config).expect("Should open large file");
+
+    assert!(buffer.is_large_file());
+    assert!(buffer.rope.len_bytes() < content.len());
+    assert!(!buffer.wrap_enabled);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_large_file_scroll_loads_later_window() {
+    let path = temp_path("scroll-window");
+    let content: String = (0..200_000).map(|i| format!("line-{i}\n")).collect();
+    std::fs::write(&path, content.as_bytes()).expect("Should create temp file");
+
+    let config = AppConfig {
+        large_file_threshold_mb: 1,
+        large_file_preview_kb: 32,
+        ..AppConfig::default()
+    };
+
+    let mut buffer = Buffer::from_file_with_config(&path, &config).expect("Should open large file");
+    assert!(buffer.rope.to_string().contains("line-0"));
+
+    for _ in 0..32 {
+        buffer.scroll(10_000.0, 40, None, 10.0);
+    }
+
+    let shifted_start = buffer
+        .large_file
+        .as_ref()
+        .expect("Large-file state should exist")
+        .window_start_byte;
+    assert!(shifted_start > 0);
+    assert!(!buffer.rope.to_string().contains("line-0\n"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_large_file_goto_uses_global_line_number() {
+    let path = temp_path("goto-global");
+    let content: String = (0..200_000).map(|i| format!("line-{i}\n")).collect();
+    std::fs::write(&path, content.as_bytes()).expect("Should create temp file");
+
+    let config = AppConfig {
+        large_file_threshold_mb: 1,
+        large_file_preview_kb: 32,
+        ..AppConfig::default()
+    };
+
+    let mut buffer = Buffer::from_file_with_config(&path, &config).expect("Should open large file");
+    buffer
+        .goto_line_zero_based(120_000, config.large_file_preview_bytes())
+        .expect("Goto should succeed");
+
+    assert!(buffer.display_cursor_line() >= 120_000);
+    assert!(buffer.rope.to_string().contains("line-120000"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_large_file_display_line_count_uses_global_progress() {
+    let path = temp_path("display-line-count");
+    let content: String = (0..200_000).map(|i| format!("line-{i}\n")).collect();
+    std::fs::write(&path, content.as_bytes()).expect("Should create temp file");
+
+    let config = AppConfig {
+        large_file_threshold_mb: 1,
+        large_file_preview_kb: 32,
+        ..AppConfig::default()
+    };
+
+    let mut buffer = Buffer::from_file_with_config(&path, &config).expect("Should open large file");
+    buffer
+        .goto_line_zero_based(120_000, config.large_file_preview_bytes())
+        .expect("Goto should succeed");
+
+    let displayed_count = buffer
+        .display_line_count()
+        .expect("Display count should exist");
+
+    assert!(!buffer.display_line_count_is_exact());
+    assert!(displayed_count > buffer.line_count());
+    assert!(displayed_count > 120_000);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_large_file_search_scans_full_medium_file() {
+    let path = temp_path("search-medium-large-file");
+    let mut file = File::create(&path).expect("Should create temp file");
+
+    for _ in 0..1536 {
+        file.write_all(&[b'a'; 1024]).expect("Should write filler");
+    }
+    file.write_all(b"unique-needle-near-end\n")
+        .expect("Should write match");
+
+    let config = AppConfig {
+        large_file_threshold_mb: 1,
+        large_file_preview_kb: 32,
+        large_file_search_scan_limit_mb: 1,
+        ..AppConfig::default()
+    };
+
+    let buffer = Buffer::from_file_with_config(&path, &config).expect("Should open large file");
+    let mut find = FindState::new();
+    find.search_in_buffer(
+        &buffer,
+        "unique-needle-near-end",
+        config.large_file_search_results_limit,
+        config.large_file_search_scan_limit_bytes(),
+    );
+
+    for _ in 0..100 {
+        if find.poll_async_results() && find.search_complete {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(find.total_matches, Some(1));
+    assert!(find.search_complete);
+    assert_eq!(find.matches.len(), 1);
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

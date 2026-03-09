@@ -135,7 +135,7 @@ mod tests {
         );
 
         // Should be somewhere on second line ("world")
-        assert!(pos >= 6 && pos <= 11);
+        assert!((6..=11).contains(&pos));
     }
 
     #[test]

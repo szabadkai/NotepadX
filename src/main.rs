@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod editor;
+mod large_file;
 mod menu;
 mod overlay;
 mod renderer;
@@ -64,6 +65,8 @@ struct App {
 
     // Animation
     needs_redraw: bool,
+    last_large_file_index_version: Option<u64>,
+    pending_find_jump: bool,
 }
 
 impl App {
@@ -100,6 +103,8 @@ impl App {
             last_click_pos: (0.0, 0.0),
             suppress_drag: false,
             needs_redraw: true,
+            last_large_file_index_version: None,
+            pending_find_jump: false,
         }
     }
 
@@ -478,7 +483,12 @@ impl App {
         // --- Global shortcuts (work even with overlay open) ---
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                if self.overlay.is_active() {
+                // Close results panel first, then overlay
+                if self.overlay.results_panel.visible {
+                    self.overlay.results_panel.close();
+                    self.needs_redraw = true;
+                    return;
+                } else if self.overlay.is_active() {
                     self.overlay.close();
                     self.needs_redraw = true;
                     return;
@@ -532,6 +542,44 @@ impl App {
         if self.overlay.is_active() {
             self.handle_overlay_key(event, cmd_or_ctrl, shift);
             return;
+        }
+
+        // --- Results panel keyboard navigation ---
+        if self.overlay.results_panel.visible {
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.overlay.results_panel.select_next();
+                    self.jump_to_results_panel_selection();
+                    self.needs_redraw = true;
+                    return;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.overlay.results_panel.select_prev();
+                    self.jump_to_results_panel_selection();
+                    self.needs_redraw = true;
+                    return;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.jump_to_results_panel_selection();
+                    self.needs_redraw = true;
+                    return;
+                }
+                // Copy selected result line
+                Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
+                    if let Some(r) = self
+                        .overlay
+                        .results_panel
+                        .results
+                        .get(self.overlay.results_panel.selected)
+                    {
+                        if let Some(clip) = &mut self.clipboard {
+                            let _ = clip.set_text(r.line_text.clone());
+                        }
+                    }
+                    return;
+                }
+                _ => {} // fall through to normal shortcuts
+            }
         }
 
         let alt = self.modifiers.alt_key();
@@ -757,19 +805,26 @@ impl App {
                 if self.overlay.active == ActiveOverlay::FindReplace && self.overlay.focus_replace {
                     // Replace current match
                     let replacement = self.overlay.replace_input.clone();
-                    let rope = &mut self.editor.active_mut().rope;
-                    if let Some((_removed, offset)) =
-                        self.overlay.find.replace_current(rope, &replacement)
-                    {
-                        // offset is a byte offset from find; convert to char
-                        let char_offset = self.editor.active().rope.byte_to_char(offset);
-                        self.editor.active_mut().cursor = char_offset + replacement.chars().count();
-                        self.editor.active_mut().dirty = true;
-                        // Re-search to update matches
-                        let query = self.overlay.input.clone();
-                        let rope = &self.editor.active().rope;
-                        self.overlay.find.search(rope, &query);
+                    if !self.editor.active().is_large_file() {
+                        let rope = &mut self.editor.active_mut().rope;
+                        if let Some((_removed, offset)) =
+                            self.overlay.find.replace_current(rope, &replacement)
+                        {
+                            // offset is a byte offset from find; convert to char
+                            let char_offset = self.editor.active().rope.byte_to_char(offset);
+                            self.editor.active_mut().cursor =
+                                char_offset + replacement.chars().count();
+                            self.editor.active_mut().dirty = true;
+                            // Re-search to update matches
+                            self.refresh_find_results();
+                        }
                     }
+                } else if cmd_or_ctrl
+                    && (self.overlay.active == ActiveOverlay::Find
+                        || self.overlay.active == ActiveOverlay::FindReplace)
+                {
+                    // Cmd+Enter in find → open results panel
+                    self.open_results_panel();
                 } else {
                     self.execute_overlay_action();
                 }
@@ -821,6 +876,19 @@ impl App {
                     self.jump_to_current_match();
                 }
             }
+            // Select all in overlay input
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "a" => {
+                self.overlay.select_all();
+            }
+            // Paste into overlay input
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "v" => {
+                if let Some(clip) = &mut self.clipboard {
+                    if let Ok(text) = clip.get_text() {
+                        self.overlay.insert_str(&text);
+                        self.on_overlay_input_changed();
+                    }
+                }
+            }
             Key::Named(NamedKey::Space) => {
                 self.overlay.insert_char(' ');
                 self.on_overlay_input_changed();
@@ -838,8 +906,7 @@ impl App {
         match self.overlay.active {
             ActiveOverlay::Find | ActiveOverlay::FindReplace => {
                 if !self.overlay.focus_replace {
-                    let rope = &self.editor.active().rope;
-                    self.overlay.find.search(rope, &self.overlay.input.clone());
+                    self.refresh_find_results();
                     self.jump_to_current_match();
                 }
             }
@@ -865,9 +932,11 @@ impl App {
             ActiveOverlay::GotoLine => {
                 if let Some(line) = overlay::goto::goto_line(&self.overlay.input) {
                     let buffer = self.editor.active_mut();
-                    let total = buffer.line_count();
-                    let target = line.min(total.saturating_sub(1));
-                    buffer.cursor = buffer.rope.line_to_char(target);
+                    if let Err(e) =
+                        buffer.goto_line_zero_based(line, self.config.large_file_preview_bytes())
+                    {
+                        log::error!("Goto line failed: {}", e);
+                    }
                     if let Some(renderer) = &self.renderer {
                         let visible = renderer.visible_lines();
                         let char_width = self.config.font_size * 0.6;
@@ -1090,8 +1159,18 @@ impl App {
         if let Some(m) = self.overlay.find.current() {
             let start_byte = m.start;
             let buffer = self.editor.active_mut();
-            // Find matches store byte offsets; convert to char index
-            buffer.cursor = buffer.rope.byte_to_char(start_byte);
+            if buffer.is_large_file() {
+                if let Err(e) = buffer.focus_large_file_offset(
+                    start_byte as u64,
+                    self.config.large_file_preview_bytes(),
+                ) {
+                    log::error!("Failed to focus large-file match: {}", e);
+                    return;
+                }
+            } else {
+                // Find matches store byte offsets; convert to char index
+                buffer.cursor = buffer.rope.byte_to_char(start_byte);
+            }
             if let Some(renderer) = &self.renderer {
                 let visible = renderer.visible_lines();
                 let char_width = self.config.font_size * 0.6;
@@ -1121,6 +1200,110 @@ impl App {
         }
     }
 
+    fn refresh_find_results(&mut self) {
+        let query = self.overlay.input.clone();
+        let buffer = self.editor.active();
+        self.pending_find_jump = !query.is_empty();
+        self.overlay.find.search_in_buffer(
+            buffer,
+            &query,
+            self.config.large_file_search_results_limit,
+            self.config.large_file_search_scan_limit_bytes(),
+        );
+    }
+
+    fn open_results_panel(&mut self) {
+        let query = self.overlay.input.clone();
+        if query.is_empty() {
+            return;
+        }
+        // Use current find matches to populate the results panel
+        let matches: Vec<crate::large_file::SearchMatch> = self
+            .overlay
+            .find
+            .matches
+            .iter()
+            .map(|m| crate::large_file::SearchMatch {
+                start: m.start,
+                end: m.end,
+            })
+            .collect();
+        self.overlay.results_panel.open_with_matches(&matches, &query);
+
+        // Load context for visible results
+        if let Some(path) = self.editor.active().file_path.as_ref() {
+            let panel_h = self
+                .renderer
+                .as_ref()
+                .map(|r| r.results_panel_height(&self.overlay))
+                .unwrap_or(200.0);
+            let viewport_rows = renderer::Renderer::results_panel_viewport_rows(panel_h);
+            let path = path.clone();
+            self.overlay
+                .results_panel
+                .load_context_for_visible(&path, viewport_rows);
+        }
+        self.needs_redraw = true;
+    }
+
+    fn jump_to_results_panel_selection(&mut self) {
+        if let Some(byte_offset) = self.overlay.results_panel.selected_byte_offset() {
+            let buffer = self.editor.active_mut();
+            if buffer.is_large_file() {
+                if let Err(e) = buffer.focus_large_file_offset(
+                    byte_offset as u64,
+                    self.config.large_file_preview_bytes(),
+                ) {
+                    log::error!("Failed to focus large-file match: {}", e);
+                    return;
+                }
+            } else {
+                buffer.cursor = buffer.rope.byte_to_char(byte_offset);
+            }
+            if let Some(renderer) = &self.renderer {
+                let visible = renderer.visible_lines_with_panel(&self.overlay);
+                let char_width = self.config.font_size * 0.6;
+                let wrap_width = if buffer.wrap_enabled {
+                    let win_width = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().width)
+                        .unwrap_or(1200) as f32
+                        / self
+                            .window
+                            .as_ref()
+                            .map(|w| w.scale_factor() as f32)
+                            .unwrap_or(1.0);
+                    Some(
+                        (win_width
+                            - renderer::GUTTER_WIDTH
+                            - renderer::LINE_PADDING_LEFT
+                            - renderer::SCROLLBAR_WIDTH)
+                            .max(100.0),
+                    )
+                } else {
+                    None
+                };
+                buffer.ensure_cursor_visible(visible, wrap_width, char_width);
+            }
+
+            // Also load context for newly visible results after scrolling
+            if let Some(path) = self.editor.active().file_path.as_ref() {
+                let panel_h = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.results_panel_height(&self.overlay))
+                    .unwrap_or(200.0);
+                let viewport_rows = renderer::Renderer::results_panel_viewport_rows(panel_h);
+                let path = path.clone();
+                self.overlay
+                    .results_panel
+                    .load_context_for_visible(&path, viewport_rows);
+            }
+        }
+        self.needs_redraw = true;
+    }
+
     fn save(&mut self) {
         let buffer = self.editor.active_mut();
         if buffer.file_path.is_some() {
@@ -1142,10 +1325,16 @@ impl App {
 
     fn open_file(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_file() {
-            if let Err(e) = self.editor.open_file(&path, Some(&self.syntax)) {
+            if let Err(e) = self
+                .editor
+                .open_file(&path, Some(&self.syntax), &self.config)
+            {
                 log::error!("Open failed: {}", e);
             } else {
                 self.editor.active_mut().wrap_enabled = self.config.line_wrap;
+                if self.editor.active().is_large_file() {
+                    self.editor.active_mut().wrap_enabled = false;
+                }
             }
         }
     }
@@ -1202,7 +1391,12 @@ impl App {
             MenuAction::Paste => {
                 if let Some(clip) = &mut self.clipboard {
                     if let Ok(text) = clip.get_text() {
-                        self.editor.active_mut().insert_text(&text);
+                        if self.overlay.is_active() {
+                            self.overlay.insert_str(&text);
+                            self.on_overlay_input_changed();
+                        } else {
+                            self.editor.active_mut().insert_text(&text);
+                        }
                     }
                 }
                 self.needs_redraw = true;
@@ -1354,7 +1548,9 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == winit::event::MouseButton::Left {
                     self.is_mouse_down = state == ElementState::Pressed;
-                    if self.is_mouse_down && !self.overlay.is_active() {
+                    if self.is_mouse_down && self.overlay.is_active() {
+                        self.handle_overlay_click();
+                    } else if self.is_mouse_down && !self.overlay.is_active() {
                         let now = std::time::Instant::now();
                         let elapsed = now.duration_since(self.last_click_time);
                         let (cx, cy) = self.mouse_pos;
@@ -1438,10 +1634,16 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::DroppedFile(path) => {
-                if let Err(e) = self.editor.open_file(&path, Some(&self.syntax)) {
+                if let Err(e) = self
+                    .editor
+                    .open_file(&path, Some(&self.syntax), &self.config)
+                {
                     log::error!("Open dropped file failed: {}", e);
                 } else {
                     self.editor.active_mut().wrap_enabled = self.config.line_wrap;
+                    if self.editor.active().is_large_file() {
+                        self.editor.active_mut().wrap_enabled = false;
+                    }
                 }
                 self.needs_redraw = true;
             }
@@ -1465,6 +1667,20 @@ impl ApplicationHandler for App {
         // Process menu events
         while let Some(action) = AppMenu::try_recv() {
             self.handle_menu_action(action);
+        }
+
+        let active_index_version = self.editor.active().large_file_index_version();
+        if active_index_version != self.last_large_file_index_version {
+            self.last_large_file_index_version = active_index_version;
+            self.needs_redraw = true;
+        }
+
+        if self.overlay.find.poll_async_results() {
+            self.needs_redraw = true;
+            if self.pending_find_jump && self.overlay.find.current().is_some() {
+                self.jump_to_current_match();
+                self.pending_find_jump = false;
+            }
         }
 
         let scroll_diff_y =
@@ -1492,7 +1708,7 @@ fn main() -> Result<()> {
     if args.len() > 1 {
         let path = std::path::Path::new(&args[1]);
         if path.exists() {
-            if let Err(e) = app.editor.open_file(path, Some(&app.syntax)) {
+            if let Err(e) = app.editor.open_file(path, Some(&app.syntax), &app.config) {
                 log::error!("Failed to open {}: {}", path.display(), e);
             }
         }

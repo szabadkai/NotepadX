@@ -17,6 +17,9 @@ pub const TAB_CHAR_WIDTH: f32 = TAB_FONT_SIZE * 0.6;
 pub const TAB_PADDING_H: f32 = 16.0; // horizontal padding per side inside each tab
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub const SCROLLBAR_WIDTH: f32 = 10.0;
+pub const RESULTS_PANEL_ROW_HEIGHT: f32 = 20.0;
+pub const RESULTS_PANEL_HEADER_HEIGHT: f32 = 28.0;
+pub const RESULTS_PANEL_MIN_HEIGHT: f32 = 120.0;
 pub const FONT_SIZE: f32 = 18.0;
 pub const LINE_HEIGHT: f32 = 26.0;
 pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6; // Monospace character width approximation
@@ -44,6 +47,7 @@ pub struct Renderer {
     pub status_buffer: GlyphonBuffer,
     pub cursor_buffer: GlyphonBuffer,
     pub overlay_buffer: GlyphonBuffer,
+    pub results_panel_buffer: GlyphonBuffer,
 
     // Syntax highlight cache
     cached_text_hash: u64,
@@ -95,6 +99,15 @@ impl Renderer {
             Shaping::Advanced,
         );
 
+        let mut results_panel_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(13.0, RESULTS_PANEL_ROW_HEIGHT));
+        results_panel_buffer.set_size(&mut font_system, Some(900.0), Some(800.0));
+        results_panel_buffer.set_text(
+            &mut font_system,
+            "",
+            Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+        );
+
         Self {
             font_system,
             swash_cache,
@@ -113,6 +126,7 @@ impl Renderer {
             status_buffer,
             cursor_buffer,
             overlay_buffer,
+            results_panel_buffer,
             cached_text_hash: 0,
             cached_spans: Vec::new(),
             scale_factor: 1.0,
@@ -128,12 +142,40 @@ impl Renderer {
             .update(&self.queue, Resolution { width, height });
     }
 
+    /// Calculate the results panel height in logical pixels (0 if not visible)
+    pub fn results_panel_height(&self, overlay: &crate::overlay::OverlayState) -> f32 {
+        if overlay.results_panel.visible {
+            let available = self.height as f32 / self.scale_factor.max(1.0)
+                - TAB_BAR_HEIGHT
+                - STATUS_BAR_HEIGHT;
+            // Panel takes ~35% of editor area, clamped to min
+            (available * 0.35).max(RESULTS_PANEL_MIN_HEIGHT)
+        } else {
+            0.0
+        }
+    }
+
+    /// How many result rows fit in the panel
+    pub fn results_panel_viewport_rows(panel_height: f32) -> usize {
+        let usable = panel_height - RESULTS_PANEL_HEADER_HEIGHT;
+        (usable / RESULTS_PANEL_ROW_HEIGHT).floor().max(1.0) as usize
+    }
+
     /// Calculate how many lines fit in the editor area
     pub fn visible_lines(&self) -> usize {
         let editor_height =
             self.height as f32 - (TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT) * self.scale_factor;
         let line_height = self.current_font_size * 1.44 * self.scale_factor;
         (editor_height / line_height).floor() as usize
+    }
+
+    /// Visible lines accounting for results panel
+    pub fn visible_lines_with_panel(&self, overlay: &crate::overlay::OverlayState) -> usize {
+        let panel_height = self.results_panel_height(overlay) * self.scale_factor;
+        let editor_height =
+            self.height as f32 - (TAB_BAR_HEIGHT + STATUS_BAR_HEIGHT) * self.scale_factor - panel_height;
+        let line_height = self.current_font_size * 1.44 * self.scale_factor;
+        (editor_height / line_height).floor().max(1.0) as usize
     }
 
     /// Update all text buffers based on current editor state
@@ -162,9 +204,9 @@ impl Renderer {
             .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
         let buffer = editor.active();
         let width = self.width as f32 / self.scale_factor.max(1.0);
-        let editor_height = self.height as f32 / self.scale_factor.max(1.0)
-            - TAB_BAR_HEIGHT
-            - STATUS_BAR_HEIGHT;
+        let results_panel_h = self.results_panel_height(overlay);
+        let editor_height =
+            self.height as f32 / self.scale_factor.max(1.0) - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT - results_panel_h;
 
         // --- Tab Bar ---
         self.tab_bar_buffer
@@ -240,7 +282,10 @@ impl Renderer {
         let mut gutter_text = String::new();
         for line in &visible_visual_lines {
             if line.starts_logical_line {
-                gutter_text.push_str(&format!("{:>4}\n", line.logical_line + 1));
+                gutter_text.push_str(&format!(
+                    "{:>4}\n",
+                    buffer.display_line_number(line.logical_line) + 1
+                ));
             } else {
                 gutter_text.push_str("    \n");
             }
@@ -265,7 +310,12 @@ impl Renderer {
         let mut visible_text = String::new();
         for (i, visual_line) in visible_visual_lines.iter().enumerate() {
             if visual_line.start_char < visual_line.end_char {
-                visible_text.push_str(&buffer.rope.slice(visual_line.start_char..visual_line.end_char).to_string());
+                visible_text.push_str(
+                    &buffer
+                        .rope
+                        .slice(visual_line.start_char..visual_line.end_char)
+                        .to_string(),
+                );
             }
             if i + 1 < visible_visual_lines.len() {
                 visible_text.push('\n');
@@ -358,7 +408,7 @@ impl Renderer {
         // --- Status Bar ---
         self.status_buffer
             .set_size(&mut self.font_system, Some(width), Some(STATUS_BAR_HEIGHT));
-        let line = buffer.cursor_line() + 1;
+        let line = buffer.display_cursor_line() + 1;
         let col = buffer.cursor_col() + 1;
         let encoding = buffer.encoding;
         let line_ending = buffer.line_ending.label();
@@ -366,10 +416,32 @@ impl Renderer {
             .language_index
             .map(|i| syntax.language_name(i))
             .unwrap_or("Plain Text");
-        let total_lines = buffer.line_count();
+        let total_lines = buffer
+            .display_line_count()
+            .map(|count| {
+                if buffer.display_line_count_is_exact() {
+                    count.to_string()
+                } else {
+                    format!("{}+", count)
+                }
+            })
+            .unwrap_or_else(|| "?".to_string());
+        let search_info = if !overlay.find.search_complete {
+            let scanned = overlay.find.bytes_scanned.load(std::sync::atomic::Ordering::Relaxed);
+            if overlay.find.search_file_size > 0 && scanned > 0 {
+                let pct = (scanned as f64 / overlay.find.search_file_size as f64 * 100.0).min(100.0);
+                format!("    │    Searching {:.0}% ({} matches)", pct, overlay.find.matches.len())
+            } else if !overlay.find.matches.is_empty() {
+                format!("    │    Searching… ({} matches)", overlay.find.matches.len())
+            } else {
+                "    │    Searching…".to_string()
+            }
+        } else {
+            String::new()
+        };
         let status_text = format!(
-            "  Ln {}, Col {}    │    {} lines    │    {}    │    {}    │    {}    │    NotepadX v0.1",
-            line, col, total_lines, lang_name, encoding, line_ending
+            "  Ln {}, Col {}    │    {} lines    │    {}    │    {}    │    {}{}    │    NotepadX v0.1",
+            line, col, total_lines, lang_name, encoding, line_ending, search_info
         );
         self.status_buffer.set_text(
             &mut self.font_system,
@@ -408,23 +480,34 @@ impl Renderer {
             let overlay_text = match &overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
                     let count = overlay.find.match_count_label();
-                    format!("Find: {}│  {}", overlay.input, count)
+                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                    format!("Find: {}│{}  {}", before, after, count)
                 }
                 crate::overlay::ActiveOverlay::FindReplace => {
                     let count = overlay.find.match_count_label();
-                    let find_cursor = if !overlay.focus_replace { "│" } else { "" };
-                    let repl_cursor = if overlay.focus_replace { "│" } else { "" };
-                    format!(
-                        "Find:    {}{}  {}\nReplace: {}{}",
-                        overlay.input, find_cursor, count, overlay.replace_input, repl_cursor
-                    )
+                    if !overlay.focus_replace {
+                        let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                        format!(
+                            "Find:    {}│{}  {}\nReplace: {}",
+                            before, after, count, overlay.replace_input
+                        )
+                    } else {
+                        let (before, after) =
+                            overlay.replace_input.split_at(overlay.replace_cursor_pos);
+                        format!(
+                            "Find:    {}  {}\nReplace: {}│{}",
+                            overlay.input, count, before, after
+                        )
+                    }
                 }
                 crate::overlay::ActiveOverlay::GotoLine => {
-                    format!("Go to Line: {}│", overlay.input)
+                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                    format!("Go to Line: {}│{}", before, after)
                 }
                 crate::overlay::ActiveOverlay::CommandPalette => {
                     let filtered = crate::overlay::palette::filter_commands(&overlay.input);
-                    let mut text = format!("> {}│\n", overlay.input);
+                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                    let mut text = format!("> {}│{}\n", before, after);
                     for cmd in filtered.iter().take(8) {
                         text.push_str(&format!("  {}  {}\n", cmd.name, cmd.shortcut));
                     }
@@ -516,6 +599,50 @@ impl Renderer {
             self.overlay_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         }
+
+        // --- Results Panel ---
+        if overlay.results_panel.visible {
+            let panel = &overlay.results_panel;
+            let viewport_rows = Self::results_panel_viewport_rows(results_panel_h);
+            let start = panel.scroll_offset;
+            let end = (start + viewport_rows).min(panel.results.len());
+
+            let mut text = format!("  {} — \"{}\"  [Esc to close]\n", panel.status_label(), panel.query);
+            for i in start..end {
+                let r = &panel.results[i];
+                let marker = if i == panel.selected { "▶ " } else { "  " };
+                let line_num = r.line_number
+                    .map(|n| format!("{:>6}:", n + 1))
+                    .unwrap_or_else(|| format!("{:>6}:", r.byte_offset));
+
+                // Show context before
+                for ctx in &r.context_before {
+                    let truncated: String = ctx.chars().take(200).collect();
+                    text.push_str(&format!("        │ {}\n", truncated));
+                }
+
+                // Match line
+                let truncated_line: String = r.line_text.chars().take(200).collect();
+                text.push_str(&format!("{}{} {}\n", marker, line_num, truncated_line));
+
+                // Show context after
+                for ctx in &r.context_after {
+                    let truncated: String = ctx.chars().take(200).collect();
+                    text.push_str(&format!("        │ {}\n", truncated));
+                }
+            }
+
+            self.results_panel_buffer.set_text(
+                &mut self.font_system,
+                &text,
+                Attrs::new()
+                    .family(Family::Name("JetBrains Mono"))
+                    .color(theme.fg.to_glyphon()),
+                Shaping::Advanced,
+            );
+            self.results_panel_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
     }
 
     /// Render everything to the screen
@@ -544,6 +671,7 @@ impl Renderer {
 
         let editor_top = tab_bar_height;
         let editor_left = gutter_width + line_padding_left;
+        let results_panel_height_px = self.results_panel_height(overlay) * s;
         let status_top = height - status_bar_height;
 
         let buffer = editor.active();
@@ -616,7 +744,7 @@ impl Renderer {
         }
 
         // 2b. Gutter Background
-        let editor_height_px = height - tab_bar_height - status_bar_height;
+        let editor_height_px = height - tab_bar_height - status_bar_height - results_panel_height_px;
         base_rects.push(Rect {
             x: 0.0,
             y: editor_top,
@@ -647,9 +775,7 @@ impl Renderer {
         // 4. Cursor I-beam (thin 2px line)
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
             let caret_height = (self.current_font_size * s).max(1.0);
-            let caret_y = editor_top
-                + cursor_line_in_view as f32 * line_height
-                - scroll_y_px
+            let caret_y = editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px
                 + ((line_height - caret_height) / 2.0).max(0.0);
             base_rects.push(Rect {
                 x: editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s,
@@ -705,17 +831,54 @@ impl Renderer {
 
         // 5b. Find Match Highlights
         if overlay.is_active() && !overlay.find.matches.is_empty() {
+            // For large files the rope only holds a window; translate file-level
+            // byte offsets to window-relative offsets and skip out-of-range matches.
+            let window_start = buffer
+                .large_file
+                .as_ref()
+                .map(|lf| lf.window_start_byte as usize);
+            let window_end = buffer
+                .large_file
+                .as_ref()
+                .map(|lf| lf.window_end_byte as usize);
+
             for (match_idx, m) in overlay.find.matches.iter().enumerate() {
+                // Compute rope-relative byte offsets
+                let (rope_start, rope_end) = if let (Some(ws), Some(we)) = (window_start, window_end) {
+                    // Skip matches entirely outside the loaded window
+                    if m.end <= ws || m.start >= we {
+                        continue;
+                    }
+                    (m.start.saturating_sub(ws).min(we - ws),
+                     m.end.saturating_sub(ws).min(we - ws))
+                } else {
+                    (m.start, m.end)
+                };
+
+                let rope_len = buffer.rope.len_bytes();
+                if rope_start >= rope_len || rope_end > rope_len {
+                    continue;
+                }
+
                 // find matches store byte offsets; convert to char indices
-                let match_start_char = buffer.rope.byte_to_char(m.start);
-                let match_end_char = buffer.rope.byte_to_char(m.end);
+                let match_start_char = buffer.rope.byte_to_char(rope_start);
+                let match_end_char = buffer.rope.byte_to_char(rope_end);
 
                 let is_current = match_idx == overlay.find.current_match;
-                let highlight_alpha = if is_current { 0.6 } else { 0.3 };
+                let highlight_color = if is_current {
+                    theme.find_match_active
+                } else {
+                    theme.find_match
+                };
 
                 for (i, visual_line) in visible_visual_lines.iter().enumerate() {
-                    let col_start = match_start_char.max(visual_line.start_char) - visual_line.start_char;
-                    let col_end = match_end_char.min(visual_line.end_char) - visual_line.start_char;
+                    let clamped_start = match_start_char.max(visual_line.start_char);
+                    let clamped_end = match_end_char.min(visual_line.end_char);
+                    if clamped_start >= clamped_end {
+                        continue;
+                    }
+                    let col_start = clamped_start - visual_line.start_char;
+                    let col_end = clamped_end - visual_line.start_char;
 
                     if col_start < col_end {
                         base_rects.push(Rect {
@@ -724,10 +887,10 @@ impl Renderer {
                             w: (col_end - col_start) as f32 * char_width,
                             h: line_height,
                             color: [
-                                theme.selection.r,
-                                theme.selection.g,
-                                theme.selection.b,
-                                highlight_alpha,
+                                highlight_color.r,
+                                highlight_color.g,
+                                highlight_color.b,
+                                highlight_color.a,
                             ],
                         });
                     }
@@ -748,6 +911,105 @@ impl Renderer {
                 theme.status_bar_bg.a,
             ],
         });
+
+        // 6b. Results Panel Background
+        if overlay.results_panel.visible && results_panel_height_px > 0.0 {
+            let panel_top = editor_top + editor_height_px;
+            // Panel background
+            base_rects.push(Rect {
+                x: 0.0,
+                y: panel_top,
+                w: width,
+                h: results_panel_height_px,
+                color: [
+                    theme.tab_bar_bg.r,
+                    theme.tab_bar_bg.g,
+                    theme.tab_bar_bg.b,
+                    1.0,
+                ],
+            });
+            // Header bar
+            let header_h = RESULTS_PANEL_HEADER_HEIGHT * s;
+            base_rects.push(Rect {
+                x: 0.0,
+                y: panel_top,
+                w: width,
+                h: header_h,
+                color: [
+                    theme.status_bar_bg.r,
+                    theme.status_bar_bg.g,
+                    theme.status_bar_bg.b,
+                    1.0,
+                ],
+            });
+            // Top border
+            base_rects.push(Rect {
+                x: 0.0,
+                y: panel_top,
+                w: width,
+                h: 1.0 * s,
+                color: [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5],
+            });
+
+            // Selected result highlight
+            let panel = &overlay.results_panel;
+            if panel.selected >= panel.scroll_offset {
+                let row_in_view = panel.selected - panel.scroll_offset;
+                // Account for context lines above this result
+                let mut visual_row = 0usize;
+                for i in panel.scroll_offset..panel.selected.min(panel.results.len()) {
+                    let r = &panel.results[i];
+                    visual_row += r.context_before.len() + 1 + r.context_after.len();
+                }
+                let sel_y = panel_top + header_h + visual_row as f32 * RESULTS_PANEL_ROW_HEIGHT * s;
+                let sel_h = RESULTS_PANEL_ROW_HEIGHT * s;
+                if sel_y + sel_h < panel_top + results_panel_height_px {
+                    base_rects.push(Rect {
+                        x: 0.0,
+                        y: sel_y,
+                        w: width,
+                        h: sel_h,
+                        color: [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
+                    });
+                }
+                let _ = row_in_view; // suppress warning
+            }
+        }
+
+        // 6c. Match tick marks on scrollbar gutter (right edge)
+        if !overlay.find.matches.is_empty() {
+            let scrollbar_x = width - SCROLLBAR_WIDTH * s;
+            if let Some(lf) = buffer.large_file.as_ref() {
+                let file_size = lf.file_size_bytes as f32;
+                if file_size > 0.0 {
+                    for m in overlay.find.matches.iter().take(500) {
+                        let ratio = m.start as f32 / file_size;
+                        let tick_y = editor_top + ratio * editor_height_px;
+                        base_rects.push(Rect {
+                            x: scrollbar_x,
+                            y: tick_y,
+                            w: SCROLLBAR_WIDTH * s,
+                            h: 2.0 * s,
+                            color: [theme.find_match_active.r, theme.find_match_active.g, theme.find_match_active.b, theme.find_match_active.a.max(0.6)],
+                        });
+                    }
+                }
+            } else {
+                let total_chars = buffer.rope.len_chars().max(1) as f32;
+                for m in overlay.find.matches.iter().take(500) {
+                    let char_pos = buffer.rope.byte_to_char(m.start) as f32;
+                    let ratio = char_pos / total_chars;
+                    let tick_y = editor_top + ratio * editor_height_px;
+                    base_rects.push(Rect {
+                        x: scrollbar_x,
+                        y: tick_y,
+                        w: SCROLLBAR_WIDTH * s,
+                        h: 2.0 * s,
+                        color: [theme.find_match_active.r, theme.find_match_active.g, theme.find_match_active.b, theme.find_match_active.a.max(0.6)],
+                    });
+                }
+            }
+        }
 
         // 5. Overlay Panel Backgrounds
         if overlay.is_active() {
@@ -815,7 +1077,7 @@ impl Renderer {
                 color: border_color,
             });
         }
-        let editor_height = height - tab_bar_height - status_bar_height;
+        let editor_height = height - tab_bar_height - status_bar_height - results_panel_height_px;
 
         // Update viewport
         self.viewport.update(
@@ -897,6 +1159,25 @@ impl Renderer {
         });
 
         // Cursor I-beam is rendered as a rect only; no text overlay needed
+
+        // Results panel text
+        if overlay.results_panel.visible && results_panel_height_px > 0.0 {
+            let panel_top = tab_bar_height + editor_height;
+            base_text_areas.push(TextArea {
+                buffer: &self.results_panel_buffer,
+                left: 8.0 * s,
+                top: panel_top + 4.0 * s,
+                scale: s,
+                bounds: TextBounds {
+                    left: 0,
+                    top: panel_top as i32,
+                    right: width as i32,
+                    bottom: (panel_top + results_panel_height_px) as i32,
+                },
+                default_color: theme.fg.to_glyphon(),
+                custom_glyphs: &[],
+            });
+        }
 
         // Prepare base text areas
         self.text_renderer

@@ -1,6 +1,6 @@
 [package]
 name = "notepadx"
-version = "0.1.0"
+version = "1.0.5"
 edition = "2021"
 description = "A fast, beautiful, cross-platform text editor"
 license = "MIT"
@@ -27,6 +27,12 @@ env_logger = "0.11"
 
 # Error handling
 anyhow = "1.0"
+
+# Regex search
+regex = "1"
+
+# Memory-mapped I/O for large-file search
+memmap2 = "0.9"
 
 # Clipboard
 arboard = "3"
@@ -76,7 +82,8 @@ short_description = "A fast, beautiful, cross-platform text editor"
 copyright = "2025 NotepadX"
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = true
 codegen-units = 1
+panic = "abort"
 strip = true

@@ -6,7 +6,7 @@
 //! - Settings cursor bounds checking
 
 #[cfg(test)]
-mod tests {
+mod cases {
     use super::super::*;
 
     // =========================================================================
@@ -30,14 +30,12 @@ mod tests {
 
     #[test]
     fn test_config_theme_index_bounds() {
-        let mut config = AppConfig::default();
-
-        // Should handle max theme index gracefully
-        config.theme_index = usize::MAX;
+        let theme_index = usize::MAX;
 
         // When loading themes, we use min to clamp:
         // theme_index.min(themes.len().saturating_sub(1))
         // So usize::MAX would be clamped to themes.len() - 1
+        assert_eq!(theme_index.min(9), 9);
     }
 
     // =========================================================================
@@ -56,6 +54,10 @@ mod tests {
             use_spaces: false,
             highlight_current_line: false,
             show_whitespace: true,
+            large_file_threshold_mb: 256,
+            large_file_preview_kb: 1024,
+            large_file_search_results_limit: 2000,
+            large_file_search_scan_limit_mb: 128,
         };
 
         let json = serde_json::to_string_pretty(&original).expect("Failed to serialize");
@@ -135,6 +137,16 @@ mod tests {
         assert!(config.tab_size <= 16); // Reasonable upper bound
     }
 
+    #[test]
+    fn test_large_file_search_scan_limit_zero_disables_cap() {
+        let config = AppConfig {
+            large_file_search_scan_limit_mb: 0,
+            ..AppConfig::default()
+        };
+
+        assert_eq!(config.large_file_search_scan_limit_bytes(), None);
+    }
+
     // =========================================================================
     // Settings Cursor Bounds Tests (Crash Prevention)
     // =========================================================================
@@ -160,9 +172,7 @@ mod tests {
 
         // Moving up should stop at 0
         for _ in 0..100 {
-            if cursor > 0 {
-                cursor -= 1;
-            }
+            cursor = cursor.saturating_sub(1);
         }
         assert_eq!(cursor, 0);
     }
@@ -233,10 +243,10 @@ mod tests {
     /// Issue: App would crash if config had theme_index >= themes.len()
     #[test]
     fn test_settings_crash_theme_index_bounds() {
-        let mut config = AppConfig::default();
-
-        // Simulate a corrupted config with very high theme index
-        config.theme_index = 999;
+        let config = AppConfig {
+            theme_index: 999,
+            ..AppConfig::default()
+        };
 
         // When loading, this should be clamped
         let all_themes_count: usize = 10; // Simulate 10 themes
@@ -290,6 +300,10 @@ mod tests {
             use_spaces: true,
             highlight_current_line: true,
             show_whitespace: false,
+            large_file_threshold_mb: u64::MAX,
+            large_file_preview_kb: usize::MAX,
+            large_file_search_results_limit: usize::MAX,
+            large_file_search_scan_limit_mb: u64::MAX,
         };
 
         // Serialization should not fail

@@ -1,6 +1,7 @@
 pub mod find;
 pub mod goto;
 pub mod palette;
+pub mod results_panel;
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +32,9 @@ pub struct OverlayState {
 
     // Find state
     pub find: find::FindState,
+
+    // Results panel
+    pub results_panel: results_panel::ResultsPanel,
 }
 
 impl Default for OverlayState {
@@ -49,6 +53,7 @@ impl OverlayState {
             replace_cursor_pos: 0,
             focus_replace: false,
             find: find::FindState::new(),
+            results_panel: results_panel::ResultsPanel::new(),
         }
     }
 
@@ -68,7 +73,7 @@ impl OverlayState {
         self.replace_input.clear();
         self.replace_cursor_pos = 0;
         self.focus_replace = false;
-        self.find.matches.clear();
+        self.find.reset();
     }
 
     pub fn is_active(&self) -> bool {

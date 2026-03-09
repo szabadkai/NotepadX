@@ -1,3 +1,5 @@
+use crate::large_file::{should_use_large_file_mode, LargeFileState};
+use crate::settings::AppConfig;
 use anyhow::Result;
 use encoding_rs::Encoding;
 use ropey::{Rope, RopeSlice};
@@ -46,6 +48,8 @@ pub struct Buffer {
     pub language_index: Option<usize>,
     /// Whether this buffer contains binary content
     pub is_binary: bool,
+    /// Whether this buffer is backed by a file-windowed large-file preview.
+    pub large_file: Option<LargeFileState>,
     /// Whether soft line wrapping is enabled
     pub wrap_enabled: bool,
 }
@@ -85,6 +89,9 @@ struct EditOperation {
 }
 
 impl Buffer {
+    const LARGE_FILE_MIN_WINDOW_BYTES: usize = 4096;
+    const LARGE_FILE_WINDOW_OVERLAP_DIVISOR: usize = 4;
+
     pub fn new() -> Self {
         Self {
             rope: Rope::new(),
@@ -103,6 +110,7 @@ impl Buffer {
             line_ending: LineEnding::Lf,
             language_index: None,
             is_binary: false,
+            large_file: None,
             wrap_enabled: true, // default on; overridden by AppConfig on load
         }
     }
@@ -156,7 +164,18 @@ impl Buffer {
     }
 
     /// Open a file and detect its encoding
+    #[allow(dead_code)]
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
+        Self::from_file_with_config(path, &AppConfig::default())
+    }
+
+    /// Open a file with large-file handling options.
+    pub fn from_file_with_config(path: &std::path::Path, config: &AppConfig) -> Result<Self> {
+        let file_size = std::fs::metadata(path)?.len();
+        if should_use_large_file_mode(file_size, config.large_file_threshold_bytes()) {
+            return Self::from_large_file(path, config.large_file_preview_bytes());
+        }
+
         let bytes = std::fs::read(path)?;
 
         // Check for binary content
@@ -184,6 +203,7 @@ impl Buffer {
                 line_ending: LineEnding::Lf,
                 language_index: None,
                 is_binary: true,
+                large_file: None,
                 wrap_enabled: true,
             });
         }
@@ -218,12 +238,198 @@ impl Buffer {
             line_ending,
             language_index: None,
             is_binary: false,
+            large_file: None,
             wrap_enabled: true, // default on; overridden by AppConfig after open
         })
     }
 
+    fn from_large_file(path: &std::path::Path, preview_bytes: usize) -> Result<Self> {
+        let (large_file, window) = LargeFileState::open(path, preview_bytes)?;
+        let line_ending = if window.text.contains("\r\n") {
+            LineEnding::CrLf
+        } else {
+            LineEnding::Lf
+        };
+
+        Ok(Self {
+            rope: Rope::from_str(&window.text),
+            file_path: Some(path.to_path_buf()),
+            dirty: false,
+            cursor: window.cursor_char_offset,
+            selection_anchor: None,
+            desired_col: None,
+            scroll_y: 0.0,
+            scroll_y_target: 0.0,
+            scroll_x: 0.0,
+            scroll_x_target: 0.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            encoding: "UTF-8",
+            line_ending,
+            language_index: None,
+            is_binary: false,
+            large_file: Some(large_file),
+            wrap_enabled: false,
+        })
+    }
+
+    pub fn is_large_file(&self) -> bool {
+        self.large_file.is_some()
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.is_binary || self.is_large_file()
+    }
+
+    pub fn large_file_index_version(&self) -> Option<u64> {
+        self.large_file.as_ref().map(|state| state.index_version())
+    }
+
+    #[allow(dead_code)]
+    pub fn current_large_file_byte_offset(&self) -> Option<u64> {
+        let state = self.large_file.as_ref()?;
+        Some(state.window_start_byte + self.rope.char_to_byte(self.cursor) as u64)
+    }
+
+    pub fn focus_large_file_offset(&mut self, byte_offset: u64, window_bytes: usize) -> Result<()> {
+        let Some(state) = self.large_file.as_mut() else {
+            return Ok(());
+        };
+
+        let window = state.load_window_at(byte_offset, window_bytes)?;
+        self.rope = Rope::from_str(&window.text);
+        self.cursor = window.cursor_char_offset.min(self.rope.len_chars());
+        self.selection_anchor = None;
+        self.desired_col = None;
+        self.scroll_y = 0.0;
+        self.scroll_y_target = 0.0;
+        self.scroll_x = 0.0;
+        self.scroll_x_target = 0.0;
+        Ok(())
+    }
+
+    pub fn goto_line_zero_based(&mut self, target_line: usize, window_bytes: usize) -> Result<()> {
+        if let Some(state) = self.large_file.as_mut() {
+            let byte_offset = state.byte_offset_for_line(target_line)?;
+            return self.focus_large_file_offset(byte_offset, window_bytes);
+        }
+
+        let total = self.line_count();
+        let clamped = target_line.min(total.saturating_sub(1));
+        self.cursor = self.rope.line_to_char(clamped);
+        Ok(())
+    }
+
+    fn large_file_window_bytes(&self) -> Option<usize> {
+        let state = self.large_file.as_ref()?;
+        Some(
+            (state
+                .window_end_byte
+                .saturating_sub(state.window_start_byte) as usize)
+                .max(Self::LARGE_FILE_MIN_WINDOW_BYTES),
+        )
+    }
+
+    fn large_file_overlap_bytes(window_bytes: usize) -> usize {
+        if window_bytes <= Self::LARGE_FILE_MIN_WINDOW_BYTES {
+            return window_bytes / 2;
+        }
+
+        (window_bytes / Self::LARGE_FILE_WINDOW_OVERLAP_DIVISOR)
+            .max(Self::LARGE_FILE_MIN_WINDOW_BYTES)
+            .min(window_bytes.saturating_sub(1))
+    }
+
+    fn replace_large_file_window(&mut self, text: String, cursor: usize, scroll_line: usize) {
+        self.rope = Rope::from_str(&text);
+        self.cursor = cursor.min(self.rope.len_chars());
+        self.selection_anchor = None;
+        self.desired_col = None;
+        self.scroll_y = scroll_line as f64;
+        self.scroll_y_target = self.scroll_y;
+        self.scroll_x = 0.0;
+        self.scroll_x_target = 0.0;
+    }
+
+    fn shift_large_file_window_forward(&mut self, visible_lines: usize) -> Result<bool> {
+        let Some(window_bytes) = self.large_file_window_bytes() else {
+            return Ok(false);
+        };
+        let overlap_bytes = Self::large_file_overlap_bytes(window_bytes);
+
+        let window = {
+            let Some(state) = self.large_file.as_mut() else {
+                return Ok(false);
+            };
+            if state.window_end_byte >= state.file_size_bytes {
+                return Ok(false);
+            }
+
+            let next_start = state.window_end_byte.saturating_sub(overlap_bytes as u64);
+            state.load_window_from_start(next_start, window_bytes, next_start)?
+        };
+
+        let overlap_char = String::from_utf8_lossy(
+            &window.text.as_bytes()[..overlap_bytes.min(window.text.len())],
+        )
+        .chars()
+        .count();
+        self.replace_large_file_window(
+            window.text,
+            overlap_char,
+            overlap_char.saturating_sub(visible_lines / 2),
+        );
+        Ok(true)
+    }
+
+    fn shift_large_file_window_backward(&mut self, visible_lines: usize) -> Result<bool> {
+        let Some(window_bytes) = self.large_file_window_bytes() else {
+            return Ok(false);
+        };
+        let overlap_bytes = Self::large_file_overlap_bytes(window_bytes);
+
+        let (window, overlap_start_byte) = {
+            let Some(state) = self.large_file.as_mut() else {
+                return Ok(false);
+            };
+            if state.window_start_byte == 0 {
+                return Ok(false);
+            }
+
+            let shift_bytes = window_bytes.saturating_sub(overlap_bytes) as u64;
+            let next_start = state.window_start_byte.saturating_sub(shift_bytes);
+            let overlap_start_byte = state.window_start_byte.saturating_sub(next_start) as usize;
+            let window =
+                state.load_window_from_start(next_start, window_bytes, state.window_start_byte)?;
+            (window, overlap_start_byte)
+        };
+
+        let overlap_char = String::from_utf8_lossy(
+            &window.text.as_bytes()[..overlap_start_byte.min(window.text.len())],
+        )
+        .chars()
+        .count();
+        self.replace_large_file_window(
+            window.text,
+            overlap_char,
+            overlap_char.saturating_sub(visible_lines / 2),
+        );
+        Ok(true)
+    }
+
+    #[allow(dead_code)]
+    pub fn toggle_bookmark(&mut self, label: Option<String>) {
+        let byte_offset = self.current_large_file_byte_offset();
+        if let (Some(state), Some(byte_offset)) = (self.large_file.as_mut(), byte_offset) {
+            state.toggle_bookmark(byte_offset, label);
+        }
+    }
+
     /// Save the buffer to its file path
     pub fn save(&mut self) -> Result<()> {
+        if self.is_large_file() {
+            anyhow::bail!("Large-file save is not implemented yet")
+        }
         if let Some(ref path) = self.file_path {
             let text = self.rope.to_string();
             std::fs::write(path, text.as_bytes())?;
@@ -236,6 +442,9 @@ impl Buffer {
 
     /// Save to a specific path
     pub fn save_as(&mut self, path: PathBuf) -> Result<()> {
+        if self.is_large_file() {
+            anyhow::bail!("Large-file save is not implemented yet")
+        }
         let text = self.rope.to_string();
         std::fs::write(&path, text.as_bytes())?;
         self.file_path = Some(path);
@@ -245,7 +454,7 @@ impl Buffer {
 
     /// Insert text at the cursor position
     pub fn insert_text(&mut self, text: &str) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         let offset = self.cursor;
@@ -281,7 +490,7 @@ impl Buffer {
 
     /// Delete the character before the cursor (backspace)
     pub fn backspace(&mut self) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         // Delete selection if any
@@ -322,7 +531,7 @@ impl Buffer {
 
     /// Delete the character after the cursor (delete key)
     pub fn delete_forward(&mut self) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         // Delete selection if any
@@ -450,6 +659,9 @@ impl Buffer {
             let prev_line_len = self.rope.line(line - 1).len_chars().saturating_sub(1);
             let actual_col = target_col.min(prev_line_len);
             self.cursor = prev_line_start + actual_col;
+        } else if self.is_large_file() && self.shift_large_file_window_backward(1).unwrap_or(false)
+        {
+            self.cursor = self.rope.line_to_char(self.rope.char_to_line(self.cursor));
         }
     }
 
@@ -465,6 +677,8 @@ impl Buffer {
             let next_line_len = self.rope.line(line + 1).len_chars().saturating_sub(1);
             let actual_col = target_col.min(next_line_len);
             self.cursor = next_line_start + actual_col;
+        } else if self.is_large_file() && self.shift_large_file_window_forward(1).unwrap_or(false) {
+            self.cursor = self.rope.line_to_char(self.rope.char_to_line(self.cursor));
         }
     }
 
@@ -516,7 +730,7 @@ impl Buffer {
     /// Delete the current selection and return the removed text.
     /// Returns None if there is no selection.
     pub fn delete_selection(&mut self) -> Option<String> {
-        if self.is_binary {
+        if self.is_read_only() {
             return None;
         }
         let anchor = self.selection_anchor.take()?;
@@ -553,7 +767,7 @@ impl Buffer {
 
     /// Cut: delete selection and return it (or cut entire current line if no selection)
     pub fn cut(&mut self) -> Option<String> {
-        if self.is_binary {
+        if self.is_read_only() {
             return None;
         }
         if self.selection_anchor.is_some() {
@@ -630,7 +844,7 @@ impl Buffer {
 
     /// Delete backward to the previous word boundary (Opt+Backspace)
     pub fn delete_word_left(&mut self) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         if self.selection_anchor.is_some() {
@@ -663,7 +877,7 @@ impl Buffer {
 
     /// Delete forward to the next word boundary (Opt+Delete)
     pub fn delete_word_right(&mut self) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         if self.selection_anchor.is_some() {
@@ -712,7 +926,7 @@ impl Buffer {
 
     /// Duplicate the current line below the cursor
     pub fn duplicate_line(&mut self) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         let line = self.rope.char_to_line(self.cursor);
@@ -754,7 +968,7 @@ impl Buffer {
 
     /// Toggle line comment for the current line or each line in the selection
     pub fn toggle_comment(&mut self, comment_prefix: &str) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         let cursor_line = self.rope.char_to_line(self.cursor);
@@ -939,7 +1153,7 @@ impl Buffer {
 
     /// Insert a newline with smart indentation
     pub fn insert_newline(&mut self, line_ending: &str) {
-        if self.is_binary {
+        if self.is_read_only() {
             return;
         }
         // Delete selection first
@@ -1025,6 +1239,14 @@ impl Buffer {
         self.rope.char_to_line(self.cursor)
     }
 
+    pub fn display_cursor_line(&self) -> usize {
+        if let Some(state) = self.large_file.as_ref() {
+            state.window_start_line + self.cursor_line()
+        } else {
+            self.cursor_line()
+        }
+    }
+
     /// Get the column the cursor is on (0-indexed)
     pub fn cursor_col(&self) -> usize {
         let line = self.rope.char_to_line(self.cursor);
@@ -1035,6 +1257,29 @@ impl Buffer {
     /// Get the total number of lines
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()
+    }
+
+    pub fn display_line_count(&self) -> Option<usize> {
+        if let Some(state) = self.large_file.as_ref() {
+            Some(state.best_known_line_count(self.line_count()))
+        } else {
+            Some(self.line_count())
+        }
+    }
+
+    pub fn display_line_count_is_exact(&self) -> bool {
+        self.large_file
+            .as_ref()
+            .map(|state| state.has_complete_line_count())
+            .unwrap_or(true)
+    }
+
+    pub fn display_line_number(&self, logical_line: usize) -> usize {
+        if let Some(state) = self.large_file.as_ref() {
+            state.window_start_line + logical_line
+        } else {
+            logical_line
+        }
     }
 
     /// Get the display name for the tab
@@ -1107,9 +1352,7 @@ impl Buffer {
     }
 
     fn visual_lines_for_len(&self, line_len: usize, chars_per_visual_line: usize) -> usize {
-        if !self.wrap_enabled || chars_per_visual_line == usize::MAX {
-            1
-        } else if line_len == 0 {
+        if !self.wrap_enabled || chars_per_visual_line == usize::MAX || line_len == 0 {
             1
         } else {
             line_len.div_ceil(chars_per_visual_line)
@@ -1213,7 +1456,7 @@ impl Buffer {
         }
 
         let at_exact_wrap_boundary =
-            raw_col == line_len && raw_col > 0 && raw_col % chars_per_visual_line == 0;
+            raw_col == line_len && raw_col > 0 && raw_col.is_multiple_of(chars_per_visual_line);
         let segment = if at_exact_wrap_boundary {
             raw_col.saturating_sub(1) / chars_per_visual_line
         } else {
@@ -1249,6 +1492,14 @@ impl Buffer {
     ) {
         let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);
         self.scroll_y_target = (self.scroll_y_target + delta_lines).clamp(0.0, max_scroll);
+
+        if self.is_large_file() {
+            if delta_lines > 0.0 && self.scroll_y_target >= max_scroll {
+                let _ = self.shift_large_file_window_forward(visible_lines);
+            } else if delta_lines < 0.0 && self.scroll_y_target <= 0.0 {
+                let _ = self.shift_large_file_window_backward(visible_lines);
+            }
+        }
     }
 
     /// Scroll by a pixel amount directly (no animation — for trackpad)
@@ -1262,6 +1513,14 @@ impl Buffer {
         let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);
         self.scroll_y = (self.scroll_y + delta_lines).clamp(0.0, max_scroll);
         self.scroll_y_target = self.scroll_y;
+
+        if self.is_large_file() {
+            if delta_lines > 0.0 && self.scroll_y >= max_scroll {
+                let _ = self.shift_large_file_window_forward(visible_lines);
+            } else if delta_lines < 0.0 && self.scroll_y <= 0.0 {
+                let _ = self.shift_large_file_window_backward(visible_lines);
+            }
+        }
     }
 
     /// Scroll horizontally
@@ -1288,7 +1547,9 @@ impl Buffer {
         wrap_width: Option<f32>,
         char_width: f32,
     ) {
-        let cursor_line = self.visual_position_of_char(self.cursor, wrap_width, char_width).0 as f64;
+        let cursor_line = self
+            .visual_position_of_char(self.cursor, wrap_width, char_width)
+            .0 as f64;
         let scroll = self.scroll_y_target;
         let margin = 3.0; // Keep 3 lines of context
         let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);

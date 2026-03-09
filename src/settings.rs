@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::large_file::{
+    DEFAULT_PREVIEW_KB, DEFAULT_SEARCH_RESULTS_LIMIT, DEFAULT_SEARCH_SCAN_LIMIT_MB,
+    DEFAULT_THRESHOLD_MB,
+};
+
 #[cfg(test)]
 mod tests;
 
@@ -34,6 +39,19 @@ pub struct AppConfig {
 
     /// Show whitespace characters
     pub show_whitespace: bool,
+
+    /// File size threshold for enabling large-file mode.
+    pub large_file_threshold_mb: u64,
+
+    /// Initial preview window size for large files.
+    pub large_file_preview_kb: usize,
+
+    /// Maximum number of large-file search results kept in memory.
+    pub large_file_search_results_limit: usize,
+
+    /// Maximum amount of a large file to scan synchronously during interactive search.
+    /// A value of 0 disables the scan cap.
+    pub large_file_search_scan_limit_mb: u64,
 }
 
 impl Default for AppConfig {
@@ -48,11 +66,34 @@ impl Default for AppConfig {
             use_spaces: true,
             highlight_current_line: true,
             show_whitespace: false,
+            large_file_threshold_mb: DEFAULT_THRESHOLD_MB,
+            large_file_preview_kb: DEFAULT_PREVIEW_KB,
+            large_file_search_results_limit: DEFAULT_SEARCH_RESULTS_LIMIT,
+            large_file_search_scan_limit_mb: DEFAULT_SEARCH_SCAN_LIMIT_MB,
         }
     }
 }
 
 impl AppConfig {
+    pub fn large_file_threshold_bytes(&self) -> u64 {
+        self.large_file_threshold_mb.saturating_mul(1024 * 1024)
+    }
+
+    pub fn large_file_preview_bytes(&self) -> usize {
+        self.large_file_preview_kb.saturating_mul(1024)
+    }
+
+    pub fn large_file_search_scan_limit_bytes(&self) -> Option<u64> {
+        if self.large_file_search_scan_limit_mb == 0 {
+            None
+        } else {
+            Some(
+                self.large_file_search_scan_limit_mb
+                    .saturating_mul(1024 * 1024),
+            )
+        }
+    }
+
     /// Return the path to the config file:
     ///   macOS/Linux: ~/.config/notepadx/config.json
     ///   Windows:     %APPDATA%\notepadx\config.json

@@ -3,6 +3,7 @@
 //! This library exposes the core modules for testing purposes.
 
 pub mod editor;
+pub mod large_file;
 pub mod menu;
 pub mod overlay;
 pub mod renderer;

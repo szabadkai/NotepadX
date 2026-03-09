@@ -2044,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "notepadx"
-version = "0.1.0"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2054,8 +2054,10 @@ dependencies = [
  "glyphon",
  "image",
  "log",
+ "memmap2",
  "muda",
  "pollster",
+ "regex",
  "rfd",
  "ropey",
  "serde",

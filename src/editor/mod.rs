@@ -3,6 +3,7 @@ pub mod buffer;
 #[cfg(test)]
 mod buffer_tests;
 
+use crate::settings::AppConfig;
 pub use buffer::Buffer;
 
 /// The editor state managing all open buffers
@@ -36,6 +37,7 @@ impl Editor {
         &mut self,
         path: &std::path::Path,
         syntax: Option<&crate::syntax::SyntaxHighlighter>,
+        config: &AppConfig,
     ) -> anyhow::Result<()> {
         // Check if already open
         for (i, buf) in self.buffers.iter().enumerate() {
@@ -45,12 +47,14 @@ impl Editor {
             }
         }
 
-        let mut buffer = Buffer::from_file(path)?;
+        let mut buffer = Buffer::from_file_with_config(path, config)?;
 
         // Detect language from filename
         if let Some(syntax) = syntax {
             let filename = buffer.display_name();
-            buffer.language_index = syntax.detect_language(&filename);
+            if !buffer.is_large_file() {
+                buffer.language_index = syntax.detect_language(&filename);
+            }
         }
 
         // Replace empty untitled tab instead of adding a new one
