@@ -11,12 +11,13 @@ struct VertexOutput {
 
 struct VertexInput {
     @location(0) pos: vec2<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) rect_center: vec2<f32>,
-    @location(3) rect_half_size: vec2<f32>,
-    @location(4) corner_radius: f32,
-    @location(5) shadow_size: f32,
-    @location(6) shadow_color: vec4<f32>,
+    @location(1) pos_px: vec2<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) rect_center: vec2<f32>,
+    @location(4) rect_half_size: vec2<f32>,
+    @location(5) corner_radius: f32,
+    @location(6) shadow_size: f32,
+    @location(7) shadow_color: vec4<f32>,
 };
 
 @vertex
@@ -29,8 +30,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.corner_radius = input.corner_radius;
     out.shadow_size = input.shadow_size;
     out.shadow_color = input.shadow_color;
-    // Convert clip-space position to pixel-space for SDF calculation
-    out.frag_pos = input.pos;
+    // Pass pixel position to fragment shader for SDF calculation
+    out.frag_pos = input.pos_px;
     return out;
 }
 
@@ -63,11 +64,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let sigma = input.shadow_size * 0.5;
         let shadow_alpha = exp(-max(d, 0.0) * max(d, 0.0) / (2.0 * sigma * sigma));
         let shadow = vec4<f32>(input.shadow_color.rgb, input.shadow_color.a * shadow_alpha * (1.0 - fill_alpha));
-        // Composite: shadow behind fill
-        final_color = vec4<f32>(
-            final_color.rgb * final_color.a + shadow.rgb * shadow.a * (1.0 - final_color.a),
-            final_color.a + shadow.a * (1.0 - final_color.a)
-        );
+        
+        let out_a = final_color.a + shadow.a * (1.0 - final_color.a);
+        var out_rgb = final_color.rgb;
+        if out_a > 0.0 {
+            out_rgb = (final_color.rgb * final_color.a + shadow.rgb * shadow.a * (1.0 - final_color.a)) / out_a;
+        }
+        
+        final_color = vec4<f32>(out_rgb, out_a);
     }
 
     return final_color;

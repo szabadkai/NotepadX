@@ -1366,6 +1366,15 @@ impl Renderer {
                 _ => 40.0 * s,
             };
 
+            // Scrim — dim the editor content behind the overlay
+            overlay_rects.push(Rect::flat(
+                0.0,
+                editor_top,
+                width,
+                height - editor_top,
+                [0.0, 0.0, 0.0, 0.5],
+            ));
+
             // Background — rounded rect with shadow for desktop feel
             let overlay_bg = [
                 theme.tab_bar_bg.r,
@@ -1984,6 +1993,7 @@ impl Rect {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShapeVertex {
     pub pos: [f32; 2],
+    pub pos_px: [f32; 2],
     pub color: [f32; 4],
     pub rect_center: [f32; 2],
     pub rect_half_size: [f32; 2],
@@ -2021,12 +2031,13 @@ impl ShapeRenderer {
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x2,  // pos
-                        1 => Float32x4,  // color
-                        2 => Float32x2,  // rect_center
-                        3 => Float32x2,  // rect_half_size
-                        4 => Float32,    // corner_radius
-                        5 => Float32,    // shadow_size
-                        6 => Float32x4,  // shadow_color
+                        1 => Float32x2,  // pos_px
+                        2 => Float32x4,  // color
+                        3 => Float32x2,  // rect_center
+                        4 => Float32x2,  // rect_half_size
+                        5 => Float32,    // corner_radius
+                        6 => Float32,    // shadow_size
+                        7 => Float32x4,  // shadow_color
                     ],
                 }],
             },
@@ -2081,15 +2092,13 @@ impl ShapeRenderer {
             let x2 = ((rx + rw) / width as f32) * 2.0 - 1.0;
             let y2 = 1.0 - ((ry + rh) / height as f32) * 2.0;
 
-            // Rect center and half-size in clip space (for SDF)
-            let cx = ((rect.x + rect.w * 0.5) / width as f32) * 2.0 - 1.0;
-            let cy = 1.0 - ((rect.y + rect.h * 0.5) / height as f32) * 2.0;
-            let hx = (rect.w * 0.5 / width as f32) * 2.0;
-            let hy = (rect.h * 0.5 / height as f32) * 2.0;
-            // corner_radius in clip space (average of x and y scale)
-            let scale_avg = ((2.0 / width as f32) + (2.0 / height as f32)) * 0.5;
-            let cr = rect.corner_radius * scale_avg;
-            let ss = rect.shadow_size * scale_avg;
+            // Rect center and half-size in pixel space (for SDF)
+            let cx = rect.x + rect.w * 0.5;
+            let cy = rect.y + rect.h * 0.5;
+            let hx = rect.w * 0.5;
+            let hy = rect.h * 0.5;
+            let cr = rect.corner_radius;
+            let ss = rect.shadow_size;
 
             let c = rect.color;
             let center = [cx, cy];
@@ -2099,6 +2108,7 @@ impl ShapeRenderer {
             // Two triangles for the (expanded) rectangle
             vertices.push(ShapeVertex {
                 pos: [x1, y1],
+                pos_px: [rx, ry],
                 color: c,
                 rect_center: center,
                 rect_half_size: half_size,
@@ -2108,6 +2118,7 @@ impl ShapeRenderer {
             });
             vertices.push(ShapeVertex {
                 pos: [x1, y2],
+                pos_px: [rx, ry + rh],
                 color: c,
                 rect_center: center,
                 rect_half_size: half_size,
@@ -2117,6 +2128,7 @@ impl ShapeRenderer {
             });
             vertices.push(ShapeVertex {
                 pos: [x2, y1],
+                pos_px: [rx + rw, ry],
                 color: c,
                 rect_center: center,
                 rect_half_size: half_size,
@@ -2127,6 +2139,7 @@ impl ShapeRenderer {
 
             vertices.push(ShapeVertex {
                 pos: [x2, y1],
+                pos_px: [rx + rw, ry],
                 color: c,
                 rect_center: center,
                 rect_half_size: half_size,
@@ -2136,6 +2149,7 @@ impl ShapeRenderer {
             });
             vertices.push(ShapeVertex {
                 pos: [x1, y2],
+                pos_px: [rx, ry + rh],
                 color: c,
                 rect_center: center,
                 rect_half_size: half_size,
@@ -2145,6 +2159,7 @@ impl ShapeRenderer {
             });
             vertices.push(ShapeVertex {
                 pos: [x2, y2],
+                pos_px: [rx + rw, ry + rh],
                 color: c,
                 rect_center: center,
                 rect_half_size: half_size,
