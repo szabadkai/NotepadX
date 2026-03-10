@@ -19,8 +19,10 @@ pub enum CommandId {
     Redo,
     SelectAll,
     Find,
+    FindReplace,
     GotoLine,
     NextTheme,
+    PrevTheme,
     NextTab,
     PrevTab,
     Copy,
@@ -28,6 +30,7 @@ pub enum CommandId {
     Paste,
     DuplicateLine,
     ToggleComment,
+    ToggleLineWrap,
     Settings,
 }
 
@@ -90,6 +93,11 @@ pub fn all_commands() -> Vec<Command> {
             id: CommandId::Find,
         },
         Command {
+            name: "Find and Replace",
+            shortcut: "Cmd+H",
+            id: CommandId::FindReplace,
+        },
+        Command {
             name: "Go to Line",
             shortcut: "Cmd+G",
             id: CommandId::GotoLine,
@@ -125,6 +133,11 @@ pub fn all_commands() -> Vec<Command> {
             id: CommandId::NextTheme,
         },
         Command {
+            name: "Previous Theme",
+            shortcut: "Cmd+Shift+K",
+            id: CommandId::PrevTheme,
+        },
+        Command {
             name: "Next Tab",
             shortcut: "Ctrl+Tab",
             id: CommandId::NextTab,
@@ -138,6 +151,11 @@ pub fn all_commands() -> Vec<Command> {
             name: "Settings",
             shortcut: "Cmd+,",
             id: CommandId::Settings,
+        },
+        Command {
+            name: "Toggle Line Wrap",
+            shortcut: "Alt+Z",
+            id: CommandId::ToggleLineWrap,
         },
     ]
 }

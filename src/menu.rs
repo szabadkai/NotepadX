@@ -21,6 +21,8 @@ pub enum MenuAction {
     Copy,
     Paste,
     SelectAll,
+    DuplicateLine,
+    ToggleComment,
     Find,
     FindReplace,
     // View
@@ -113,6 +115,23 @@ impl AppMenu {
         // Edit menu
         let edit_menu = Submenu::new("Edit", true);
 
+        let duplicate_line_item = MenuItem::with_id(
+            MenuId::new("duplicate_line"),
+            "Duplicate Line",
+            true,
+            Some(Accelerator::new(
+                Some(Modifiers::SUPER | Modifiers::SHIFT),
+                Code::KeyD,
+            )),
+        );
+
+        let toggle_comment_item = MenuItem::with_id(
+            MenuId::new("toggle_comment"),
+            "Toggle Comment",
+            true,
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::Slash)),
+        );
+
         let undo_item = MenuItem::with_id(
             MenuId::new("undo"),
             "Undo",
@@ -180,6 +199,9 @@ impl AppMenu {
         let _ = edit_menu.append(&paste_item);
         let _ = edit_menu.append(&select_all_item);
         let _ = edit_menu.append(&PredefinedMenuItem::separator());
+        let _ = edit_menu.append(&duplicate_line_item);
+        let _ = edit_menu.append(&toggle_comment_item);
+        let _ = edit_menu.append(&PredefinedMenuItem::separator());
         let _ = edit_menu.append(&find_item);
         let _ = edit_menu.append(&find_replace_item);
 
@@ -203,13 +225,18 @@ impl AppMenu {
             )),
         );
 
-        let wrap_item = MenuItem::with_id(MenuId::new("wrap"), "Toggle Line Wrap", true, None);
+        let wrap_item = MenuItem::with_id(
+            MenuId::new("wrap"),
+            "Toggle Line Wrap",
+            true,
+            Some(Accelerator::new(Some(Modifiers::ALT), Code::KeyZ)),
+        );
 
         let next_theme_item = MenuItem::with_id(
             MenuId::new("next_theme"),
             "Next Theme",
             true,
-            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyT)),
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyK)),
         );
 
         let prev_theme_item = MenuItem::with_id(
@@ -218,7 +245,7 @@ impl AppMenu {
             true,
             Some(Accelerator::new(
                 Some(Modifiers::SUPER | Modifiers::SHIFT),
-                Code::KeyT,
+                Code::KeyK,
             )),
         );
 
@@ -256,6 +283,8 @@ impl AppMenu {
                 Some(about_metadata),
             ));
             let _ = app_menu.append(&PredefinedMenuItem::separator());
+            let _ = app_menu.append(&settings_item);
+            let _ = app_menu.append(&PredefinedMenuItem::separator());
             let _ = app_menu.append(&PredefinedMenuItem::services(None));
             let _ = app_menu.append(&PredefinedMenuItem::separator());
             let _ = app_menu.append(&PredefinedMenuItem::hide(None));
@@ -266,7 +295,16 @@ impl AppMenu {
         }
 
         let _ = help_menu.append(&about_item);
-        let _ = help_menu.append(&settings_item);
+
+        // On macOS, add Settings to the app menu (convention)
+        #[cfg(target_os = "macos")]
+        {
+            // Settings is added to app menu below
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = help_menu.append(&settings_item);
+        }
 
         let _ = menu.append(&file_menu);
         let _ = menu.append(&edit_menu);
@@ -302,6 +340,8 @@ impl AppMenu {
                 "copy" => MenuAction::Copy,
                 "paste" => MenuAction::Paste,
                 "select_all" => MenuAction::SelectAll,
+                "duplicate_line" => MenuAction::DuplicateLine,
+                "toggle_comment" => MenuAction::ToggleComment,
                 "find" => MenuAction::Find,
                 "find_replace" => MenuAction::FindReplace,
                 "goto" => MenuAction::GotoLine,

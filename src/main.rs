@@ -415,6 +415,8 @@ impl App {
             &self.editor,
             &self.theme,
             &self.overlay,
+            &self.config,
+            self.settings_cursor,
             &mut encoder,
             &view,
         );
@@ -996,10 +998,28 @@ impl App {
             }
 
             // Theme cycling
+            Key::Character(c) if cmd_or_ctrl && shift && c.as_str() == "K" => {
+                let themes = Theme::all_themes();
+                self.theme_index = if self.theme_index == 0 {
+                    themes.len() - 1
+                } else {
+                    self.theme_index - 1
+                };
+                self.theme = themes[self.theme_index].clone();
+            }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "k" => {
                 let themes = Theme::all_themes();
                 self.theme_index = (self.theme_index + 1) % themes.len();
                 self.theme = themes[self.theme_index].clone();
+            }
+
+            // Toggle Line Wrap (Alt+Z)
+            Key::Character(c) if self.modifiers.alt_key() && !cmd_or_ctrl && (c.as_str() == "Ω" || c.as_str() == "z") => {
+                self.config.line_wrap = !self.config.line_wrap;
+                for buf in &mut self.editor.buffers {
+                    buf.wrap_enabled = self.config.line_wrap;
+                }
+                self.config.save();
             }
 
             // Navigation — line start/end (Cmd+Left/Right)
@@ -1404,10 +1424,20 @@ impl App {
             CommandId::Redo => self.editor.active_mut().redo(),
             CommandId::SelectAll => self.editor.active_mut().select_all(),
             CommandId::Find => self.overlay.open(ActiveOverlay::Find),
+            CommandId::FindReplace => self.overlay.open(ActiveOverlay::FindReplace),
             CommandId::GotoLine => self.overlay.open(ActiveOverlay::GotoLine),
             CommandId::NextTheme => {
                 let themes = Theme::all_themes();
                 self.theme_index = (self.theme_index + 1) % themes.len();
+                self.theme = themes[self.theme_index].clone();
+            }
+            CommandId::PrevTheme => {
+                let themes = Theme::all_themes();
+                self.theme_index = if self.theme_index == 0 {
+                    themes.len() - 1
+                } else {
+                    self.theme_index - 1
+                };
                 self.theme = themes[self.theme_index].clone();
             }
             CommandId::NextTab => self.editor.next_tab(),
@@ -1437,6 +1467,13 @@ impl App {
             CommandId::ToggleComment => {
                 let prefix = self.comment_prefix().to_string();
                 self.editor.active_mut().toggle_comment(&prefix);
+            }
+            CommandId::ToggleLineWrap => {
+                self.config.line_wrap = !self.config.line_wrap;
+                for buf in &mut self.editor.buffers {
+                    buf.wrap_enabled = self.config.line_wrap;
+                }
+                self.config.save();
             }
             CommandId::Settings => {
                 self.overlay.open(ActiveOverlay::Settings);
@@ -1869,6 +1906,19 @@ impl App {
                     let buffer = self.editor.active_mut();
                     buffer.selection_anchor = Some(0);
                     buffer.cursor = buffer.rope.len_chars();
+                }
+                self.needs_redraw = true;
+            }
+            MenuAction::DuplicateLine => {
+                if !self.overlay.is_active() {
+                    self.editor.active_mut().duplicate_line();
+                }
+                self.needs_redraw = true;
+            }
+            MenuAction::ToggleComment => {
+                if !self.overlay.is_active() {
+                    let prefix = self.comment_prefix().to_string();
+                    self.editor.active_mut().toggle_comment(&prefix);
                 }
                 self.needs_redraw = true;
             }
