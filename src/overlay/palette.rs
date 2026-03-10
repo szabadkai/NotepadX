@@ -32,6 +32,8 @@ pub enum CommandId {
     ToggleComment,
     ToggleLineWrap,
     Settings,
+    ChangeLanguage,
+    ChangeLineEnding,
 }
 
 /// Get all available commands
@@ -156,6 +158,16 @@ pub fn all_commands() -> Vec<Command> {
             name: "Toggle Line Wrap",
             shortcut: "Alt+Z",
             id: CommandId::ToggleLineWrap,
+        },
+        Command {
+            name: "Change Language Mode",
+            shortcut: "",
+            id: CommandId::ChangeLanguage,
+        },
+        Command {
+            name: "Change Line Ending",
+            shortcut: "",
+            id: CommandId::ChangeLineEnding,
         },
     ]
 }

@@ -17,6 +17,8 @@ pub enum ActiveOverlay {
     CommandPalette,
     Help,
     Settings,
+    LanguagePicker,
+    LineEndingPicker,
 }
 
 /// State for all overlays
@@ -37,6 +39,9 @@ pub struct OverlayState {
 
     // Results panel
     pub results_panel: results_panel::ResultsPanel,
+
+    // Picker selection index (for LanguagePicker, LineEndingPicker)
+    pub picker_selected: usize,
 }
 
 impl Default for OverlayState {
@@ -58,6 +63,7 @@ impl OverlayState {
             replace_sel_anchor: None,
             find: find::FindState::new(),
             results_panel: results_panel::ResultsPanel::new(),
+            picker_selected: 0,
         }
     }
 
@@ -70,6 +76,7 @@ impl OverlayState {
         self.replace_cursor_pos = 0;
         self.focus_replace = false;
         self.replace_sel_anchor = None;
+        self.picker_selected = 0;
     }
 
     pub fn close(&mut self) {
@@ -82,6 +89,7 @@ impl OverlayState {
         self.focus_replace = false;
         self.replace_sel_anchor = None;
         self.find.reset();
+        self.picker_selected = 0;
     }
 
     pub fn is_active(&self) -> bool {

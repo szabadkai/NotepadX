@@ -28,6 +28,20 @@ pub const OVERLAY_FONT_SIZE: f32 = 14.0;
 pub const OVERLAY_LINE_HEIGHT: f32 = 20.0;
 pub const OVERLAY_CHAR_WIDTH: f32 = OVERLAY_FONT_SIZE * 0.6;
 
+/// Status bar character width (12pt font)
+pub const STATUS_CHAR_WIDTH: f32 = 12.0 * 0.6;
+
+/// Identifiers for clickable status bar segments
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusBarSegment {
+    CursorPosition,
+    LineCount,
+    Language,
+    Encoding,
+    LineEnding,
+    Version,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverlayTextPassLayer {
     TabBar,
@@ -72,6 +86,13 @@ pub struct Renderer {
 
     // Current font metrics for rendering calculations
     current_font_size: f32,
+
+    // Status bar segment hit-test boundaries: (x_start, x_end, segment)
+    // Coordinates are in logical (unscaled) pixels, relative to the status bar left edge.
+    pub status_segments: Vec<(f32, f32, StatusBarSegment)>,
+
+    // Currently hovered status bar segment (set from main.rs)
+    pub hovered_status_segment: Option<StatusBarSegment>,
 }
 
 impl Renderer {
@@ -154,6 +175,8 @@ impl Renderer {
             cached_spans: Vec::new(),
             scale_factor: 1.0,
             current_font_size: FONT_SIZE,
+            status_segments: Vec::new(),
+            hovered_status_segment: None,
         }
     }
 
@@ -202,6 +225,19 @@ impl Renderer {
         (editor_height / line_height).floor().max(1.0) as usize
     }
 
+    /// Hit-test a logical x coordinate against status bar segments.
+    /// Returns the segment if `x` falls within one, or None.
+    pub fn hit_test_status_bar(&self, x: f32) -> Option<StatusBarSegment> {
+        for &(x0, x1, seg) in &self.status_segments {
+            // Add some padding for narrow segments (min 22px logical hit area)
+            let pad = ((22.0 - (x1 - x0)) / 2.0).max(0.0);
+            if x >= x0 - pad && x <= x1 + pad {
+                return Some(seg);
+            }
+        }
+        None
+    }
+
     /// Update all text buffers based on current editor state
     pub fn update_buffers(
         &mut self,
@@ -242,11 +278,15 @@ impl Renderer {
         // Compute per-tab positions based on actual label width
         let tab_char_w = TAB_CHAR_WIDTH;
         let tab_pad = TAB_PADDING_H;
+        let tab_gap = 3.0; // logical px gap between tabs
+        let tab_gap_chars = (tab_gap / tab_char_w).ceil() as usize; // space chars to fill gap
+        let tab_gap_text_w = tab_gap_chars as f32 * tab_char_w; // actual text width of gap
         self.tab_positions.clear();
         let mut tab_x = 0.0f32;
         let mut tab_spans: Vec<(String, Attrs)> = Vec::new();
         let base_tab_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
         let show_close = editor.buffers.len() > 1;
+        let tab_count = editor.buffers.len();
         for (i, buf) in editor.buffers.iter().enumerate() {
             let name = buf.display_name();
             let dirty_marker = if buf.dirty { "● " } else { "" };
@@ -281,6 +321,15 @@ impl Renderer {
 
             self.tab_positions.push((tab_x, tw));
             tab_x += tw;
+
+            // Add invisible gap spacer between tabs (not after the last tab)
+            if i + 1 < tab_count {
+                let gap_text: String = " ".repeat(tab_gap_chars);
+                // Use transparent color so the gap shows the tab bar background
+                let gap_attrs = base_tab_attrs.color(glyphon::Color::rgba(0, 0, 0, 0));
+                tab_spans.push((gap_text, gap_attrs));
+                tab_x += tab_gap_text_w;
+            }
         }
 
         let rich_spans: Vec<(&str, Attrs)> =
@@ -487,10 +536,43 @@ impl Renderer {
         } else {
             String::new()
         };
+
+        // Build status text and compute segment boundaries for hit testing.
+        // Each segment is separated by "   ·   " (7 chars).
+        let sep = "   ·   ";
+        let padding = "  "; // 2-char left padding
+        let seg_cursor = format!("Ln {}, Col {}", line, col);
+        let seg_lines = format!("{} lines", total_lines);
+        let seg_lang = lang_name.to_string();
+        let seg_encoding = encoding.to_string();
+        let seg_line_ending = format!("{}{}", line_ending, search_info);
+        let seg_version = "NotepadX v0.1".to_string();
+
         let status_text = format!(
-            "  Ln {}, Col {}   ·   {} lines   ·   {}   ·   {}   ·   {}{}   ·   NotepadX v0.1",
-            line, col, total_lines, lang_name, encoding, line_ending, search_info
+            "{}{}{}{}{}{}{}{}{}{}{}{}",
+            padding, seg_cursor, sep, seg_lines, sep, seg_lang, sep, seg_encoding, sep, seg_line_ending, sep, seg_version
         );
+
+        // Compute segment x boundaries (logical px, with 10px left offset matching TextArea left)
+        let cw = STATUS_CHAR_WIDTH;
+        let left_offset = 10.0; // matches the `left: 10.0 * s` in TextArea for status bar
+        let sep_chars = sep.chars().count() as f32;
+        let mut x = left_offset + padding.chars().count() as f32 * cw;
+        self.status_segments.clear();
+        let segments_data: &[(&str, StatusBarSegment)] = &[
+            (&seg_cursor, StatusBarSegment::CursorPosition),
+            (&seg_lines, StatusBarSegment::LineCount),
+            (&seg_lang, StatusBarSegment::Language),
+            (&seg_encoding, StatusBarSegment::Encoding),
+            (&seg_line_ending, StatusBarSegment::LineEnding),
+            (&seg_version, StatusBarSegment::Version),
+        ];
+        for (text, seg) in segments_data {
+            let w = text.chars().count() as f32 * cw;
+            self.status_segments.push((x, x + w, *seg));
+            x += w + sep_chars * cw;
+        }
+
         self.status_buffer.set_text(
             &mut self.font_system,
             &status_text,
@@ -525,6 +607,8 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::CommandPalette => 300.0,
                 crate::overlay::ActiveOverlay::Help => 600.0,
                 crate::overlay::ActiveOverlay::Settings => 360.0,
+                crate::overlay::ActiveOverlay::LanguagePicker => 260.0,
+                crate::overlay::ActiveOverlay::LineEndingPicker => 100.0,
                 _ => 32.0,
             };
 
@@ -677,6 +761,50 @@ impl Renderer {
                     ));
                     text
                 }
+                crate::overlay::ActiveOverlay::LanguagePicker => {
+                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                    let mut text = format!("> {}│{}\n", before, after);
+                    let query_lower = overlay.input.to_lowercase();
+                    // Item 0: Plain Text (auto-detect off)
+                    let mut items: Vec<(usize, &str)> = Vec::new();
+                    items.push((0, "Plain Text"));
+                    for i in 0..syntax.language_count() {
+                        items.push((i + 1, syntax.language_name(i)));
+                    }
+                    let filtered: Vec<(usize, &str)> = if query_lower.is_empty() {
+                        items
+                    } else {
+                        items
+                            .into_iter()
+                            .filter(|(_, name)| name.to_lowercase().contains(&query_lower))
+                            .collect()
+                    };
+                    let current_lang = buffer.language_index;
+                    for (idx, (item_idx, name)) in filtered.iter().take(10).enumerate() {
+                        let is_current = match current_lang {
+                            Some(li) => *item_idx == li + 1,
+                            None => *item_idx == 0,
+                        };
+                        let marker = if is_current { "● " } else { "  " };
+                        let sel = if idx == overlay.picker_selected { "▸ " } else { "  " };
+                        text.push_str(&format!("{}{}{}\n", sel, marker, name));
+                    }
+                    text
+                }
+                crate::overlay::ActiveOverlay::LineEndingPicker => {
+                    let items = ["LF (\\n)", "CRLF (\\r\\n)"];
+                    let current = match buffer.line_ending {
+                        crate::editor::buffer::LineEnding::Lf => 0,
+                        crate::editor::buffer::LineEnding::CrLf => 1,
+                    };
+                    let mut text = String::from("Select End of Line Sequence\n\n");
+                    for (i, label) in items.iter().enumerate() {
+                        let marker = if i == current { "● " } else { "  " };
+                        let sel = if i == overlay.picker_selected { "▸ " } else { "  " };
+                        text.push_str(&format!("{}{}{}\n", sel, marker, label));
+                    }
+                    text
+                }
                 crate::overlay::ActiveOverlay::None => String::new(),
             };
 
@@ -799,10 +927,9 @@ impl Renderer {
             ]));
 
         // 2. Per-tab backgrounds from precomputed tab_positions
-        let tab_gap = 3.0 * s; // gap between tabs instead of separator lines
         for (i, &(tx, tw)) in self.tab_positions.iter().enumerate() {
-            let tx_s = tx * s + if i > 0 { tab_gap * i as f32 } else { 0.0 };
-            let tw_s = tw * s - if i > 0 { tab_gap } else { 0.0 };
+            let tx_s = tx * s;
+            let tw_s = tw * s;
 
             // Draw individual tab background
             let is_active = i == editor.active_buffer;
@@ -849,13 +976,15 @@ impl Renderer {
         }
 
         // 4. Bracket Matching Highlight
-        if let Some(match_char) = buffer.find_matching_bracket() {
-            let (match_visual_line, match_visual_col) =
-                buffer.visual_position_of_char(match_char, wrap_width, char_width);
-            let match_line_in_view = match_visual_line as i64 - scroll_line as i64;
+        if !buffer.is_read_only() {
+            if let Some(match_char) = buffer.find_matching_bracket() {
+                let (match_visual_line, match_visual_col) =
+                    buffer.visual_position_of_char(match_char, wrap_width, char_width);
+                let match_line_in_view = match_visual_line as i64 - scroll_line as i64;
 
-            if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
-                base_rects.push(Rect::flat(editor_left + match_visual_col as f32 * char_width - buffer.scroll_x * s, editor_top + match_line_in_view as f32 * line_height - scroll_y_px, char_width, line_height, [theme.selection.r, theme.selection.g, theme.selection.b, 0.4]));
+                if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
+                    base_rects.push(Rect::flat(editor_left + match_visual_col as f32 * char_width - buffer.scroll_x * s, editor_top + match_line_in_view as f32 * line_height - scroll_y_px, char_width, line_height, [theme.selection.r, theme.selection.g, theme.selection.b, 0.4]));
+                }
             }
         }
 
@@ -952,6 +1081,22 @@ impl Renderer {
                 theme.status_bar_bg.b,
                 theme.status_bar_bg.a,
             ]));
+
+        // 6a. Hovered status bar segment highlight
+        if let Some(hovered) = self.hovered_status_segment {
+            for &(seg_x0, seg_x1, seg) in &self.status_segments {
+                if seg == hovered {
+                    let seg_left = seg_x0 * s - 4.0 * s;
+                    let seg_w = (seg_x1 - seg_x0) * s + 8.0 * s;
+                    base_rects.push(Rect::rounded(
+                        seg_left, status_top, seg_w, status_bar_height,
+                        [theme.selection.r, theme.selection.g, theme.selection.b, 0.25],
+                        4.0 * s,
+                    ));
+                    break;
+                }
+            }
+        }
 
         // 6b. Results Panel Background
         if overlay.results_panel.visible && results_panel_height_px > 0.0 {
@@ -1075,6 +1220,8 @@ impl Renderer {
                 }
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
+                crate::overlay::ActiveOverlay::LanguagePicker => 260.0 * s,
+                crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
                 _ => 40.0 * s,
             };
 
@@ -1346,7 +1493,7 @@ impl Renderer {
                 base_text_areas,
                 &mut self.swash_cache,
             )
-            .expect("Failed to prepare base text rendering");
+            .unwrap_or_else(|e| log::error!("Failed to prepare base text rendering: {e}"));
 
         // --- Pass 1: Base Layer (Clear + Shapes + Text) ---
         {
@@ -1375,7 +1522,7 @@ impl Renderer {
             );
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("Failed to render base text");
+                .unwrap_or_else(|e| log::error!("Failed to render base text: {e}"));
         }
 
         // --- Pass 2: Overlay Layer (Load + Shapes + Text) ---
@@ -1404,6 +1551,8 @@ impl Renderer {
                 }
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
+                crate::overlay::ActiveOverlay::LanguagePicker => 260.0 * s,
+                crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
                 _ => 40.0 * s,
             };
             let mut overlay_text_areas = Vec::with_capacity(overlay_text_pass_layers().len());
@@ -1456,7 +1605,7 @@ impl Renderer {
                     overlay_text_areas,
                     &mut self.swash_cache,
                 )
-                .expect("Failed to prepare overlay text rendering");
+                .unwrap_or_else(|e| log::error!("Failed to prepare overlay text rendering: {e}"));
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("NotepadX Overlay Pass"),
@@ -1483,7 +1632,7 @@ impl Renderer {
             );
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("Failed to render overlay text");
+                .unwrap_or_else(|e| log::error!("Failed to render overlay text: {e}"));
         }
 
         // Trim atlas to free unused glyph space

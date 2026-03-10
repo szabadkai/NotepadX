@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use muda::accelerator::{Accelerator, Code, Modifiers};
 #[cfg(target_os = "macos")]
 use muda::AboutMetadata;
-use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{Menu, MenuEvent, MenuId, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 
 /// Menu action identifiers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     // File
     New,
@@ -34,21 +36,19 @@ pub enum MenuAction {
     // Help
     About,
     Settings,
+    // Recent files
+    OpenRecent(PathBuf),
 }
 
 /// Native menu bar for the application
 pub struct AppMenu {
     menu: Menu,
-}
-
-impl Default for AppMenu {
-    fn default() -> Self {
-        Self::new()
-    }
+    recent_submenu: Submenu,
+    recent_paths: Vec<PathBuf>,
 }
 
 impl AppMenu {
-    pub fn new() -> Self {
+    pub fn new(recent_files: &[PathBuf]) -> Self {
         let menu = Menu::new();
 
         // File menu
@@ -102,8 +102,31 @@ impl AppMenu {
             Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyW)),
         );
 
+        // Build Open Recent submenu
+        let recent_submenu = Submenu::new("Open Recent", true);
+        let mut recent_paths = Vec::new();
+        for (i, path) in recent_files.iter().enumerate() {
+            let label = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            let item = MenuItem::with_id(
+                MenuId::new(&format!("recent_{}", i)),
+                &label,
+                true,
+                None,
+            );
+            let _ = recent_submenu.append(&item);
+            recent_paths.push(path.clone());
+        }
+        if recent_files.is_empty() {
+            let empty = MenuItem::with_id(MenuId::new("recent_empty"), "(No Recent Files)", false, None);
+            let _ = recent_submenu.append(&empty);
+        }
+
         let _ = file_menu.append(&new_item);
         let _ = file_menu.append(&open_item);
+        let _ = file_menu.append(&recent_submenu);
         let _ = file_menu.append(&open_workspace_item);
         let _ = file_menu.append(&PredefinedMenuItem::separator());
         let _ = file_menu.append(&save_item);
@@ -311,7 +334,11 @@ impl AppMenu {
         let _ = menu.append(&view_menu);
         let _ = menu.append(&help_menu);
 
-        Self { menu }
+        Self {
+            menu,
+            recent_submenu,
+            recent_paths,
+        }
     }
 
     /// Initialize the menu for the application
@@ -323,10 +350,52 @@ impl AppMenu {
         let _ = &self.menu;
     }
 
+    /// Rebuild the Open Recent submenu with updated paths
+    pub fn update_recent_files(&mut self, recent_files: &[PathBuf]) {
+        // Remove all existing items
+        for item in self.recent_submenu.items() {
+            match item {
+                MenuItemKind::MenuItem(ref mi) => { let _ = self.recent_submenu.remove(mi); }
+                MenuItemKind::Predefined(ref pi) => { let _ = self.recent_submenu.remove(pi); }
+                _ => {}
+            }
+        }
+
+        self.recent_paths.clear();
+        for (i, path) in recent_files.iter().enumerate() {
+            let label = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            let item = MenuItem::with_id(
+                MenuId::new(&format!("recent_{}", i)),
+                &label,
+                true,
+                None,
+            );
+            let _ = self.recent_submenu.append(&item);
+            self.recent_paths.push(path.clone());
+        }
+        if recent_files.is_empty() {
+            let empty = MenuItem::with_id(MenuId::new("recent_empty"), "(No Recent Files)", false, None);
+            let _ = self.recent_submenu.append(&empty);
+        }
+    }
+
     /// Try to receive a menu event from the global menu event channel
-    pub fn try_recv() -> Option<MenuAction> {
+    pub fn try_recv(&self) -> Option<MenuAction> {
         if let Ok(event) = MenuEvent::receiver().try_recv() {
-            let action = match event.id.0.as_str() {
+            let id = event.id.0.as_str();
+            // Check for recent file items
+            if let Some(idx_str) = id.strip_prefix("recent_") {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    if let Some(path) = self.recent_paths.get(idx) {
+                        return Some(MenuAction::OpenRecent(path.clone()));
+                    }
+                }
+                return None;
+            }
+            let action = match id {
                 "new" => MenuAction::New,
                 "open" => MenuAction::Open,
                 "open_workspace" => MenuAction::OpenWorkspace,

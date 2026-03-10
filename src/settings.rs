@@ -52,6 +52,9 @@ pub struct AppConfig {
     /// Maximum amount of a large file to scan synchronously during interactive search.
     /// A value of 0 disables the scan cap.
     pub large_file_search_scan_limit_mb: u64,
+
+    /// Recently opened file paths (most recent first, max 10)
+    pub recent_files: Vec<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -70,7 +73,17 @@ impl Default for AppConfig {
             large_file_preview_kb: DEFAULT_PREVIEW_KB,
             large_file_search_results_limit: DEFAULT_SEARCH_RESULTS_LIMIT,
             large_file_search_scan_limit_mb: DEFAULT_SEARCH_SCAN_LIMIT_MB,
+            recent_files: Vec::new(),
         }
+    }
+}
+
+impl AppConfig {
+    /// Add a file path to the recent files list (most recent first, max 10).
+    pub fn add_recent_file(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(10);
     }
 }
 

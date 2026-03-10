@@ -228,6 +228,11 @@ impl SyntaxHighlighter {
         }
     }
 
+    /// Return the number of configured languages
+    pub fn language_count(&self) -> usize {
+        self.configs.len()
+    }
+
     /// Highlight a chunk of text, returning spans with highlight indices
     pub fn highlight(&self, lang_index: usize, source: &str) -> Vec<HighlightSpan> {
         let mut spans = Vec::new();

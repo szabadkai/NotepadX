@@ -174,13 +174,53 @@ impl Buffer {
     /// Open a file with large-file handling options.
     pub fn from_file_with_config(path: &std::path::Path, config: &AppConfig) -> Result<Self> {
         let file_size = std::fs::metadata(path)?.len();
+
+        // Check for binary content before large-file mode to avoid feeding
+        // raw binary bytes to the text renderer (which can crash the GPU pipeline).
+        {
+            let mut sample = [0u8; 8192];
+            let n = {
+                use std::io::Read;
+                let mut f = std::fs::File::open(path)?;
+                f.read(&mut sample)?
+            };
+            if Self::is_likely_binary(&sample[..n]) {
+                let display_text = format!(
+                    "[Binary file: {} bytes]\n\n{}",
+                    file_size,
+                    Self::hex_dump(&sample[..n.min(4096)])
+                );
+                let rope = Rope::from_str(&display_text);
+                return Ok(Self {
+                    rope,
+                    file_path: Some(path.to_path_buf()),
+                    dirty: false,
+                    cursor: 0,
+                    selection_anchor: None,
+                    desired_col: None,
+                    scroll_y: 0.0,
+                    scroll_y_target: 0.0,
+                    scroll_x: 0.0,
+                    scroll_x_target: 0.0,
+                    undo_stack: Vec::new(),
+                    redo_stack: Vec::new(),
+                    encoding: "Binary",
+                    line_ending: LineEnding::Lf,
+                    language_index: None,
+                    is_binary: true,
+                    large_file: None,
+                    wrap_enabled: true,
+                });
+            }
+        }
+
         if should_use_large_file_mode(file_size, config.large_file_threshold_bytes()) {
             return Self::from_large_file(path, config.large_file_preview_bytes());
         }
 
         let bytes = std::fs::read(path)?;
 
-        // Check for binary content
+        // Check for binary content (full read, in case the sample was too small)
         if Self::is_likely_binary(&bytes) {
             let display_text = format!(
                 "[Binary file: {} bytes]\n\n{}",
@@ -1295,6 +1335,48 @@ impl Buffer {
         }
 
         false
+    }
+
+    // --- Indent / Dedent ---
+
+    /// Remove up to `tab_size` leading spaces from the current line
+    pub fn dedent_line(&mut self, tab_size: usize) {
+        if self.is_read_only() {
+            return;
+        }
+        let line = self.rope.char_to_line(self.cursor);
+        let line_start = self.rope.line_to_char(line);
+        let line_text: String = self.rope.line(line).into();
+
+        // Count leading spaces (up to tab_size)
+        let spaces: usize = line_text
+            .chars()
+            .take(tab_size)
+            .take_while(|c| *c == ' ')
+            .count();
+
+        if spaces == 0 {
+            return;
+        }
+
+        let removed: String = self.rope.slice(line_start..line_start + spaces).into();
+        self.rope.remove(line_start..line_start + spaces);
+
+        // Adjust cursor: move left by `spaces`, but not past line start
+        if self.cursor >= line_start + spaces {
+            self.cursor -= spaces;
+        } else if self.cursor > line_start {
+            self.cursor = line_start;
+        }
+
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.undo_stack.push(EditOperation {
+            offset: line_start,
+            removed,
+            inserted: String::new(),
+            cursor_before: self.cursor + spaces,
+        });
     }
 
     // --- Smart Auto-Indent ---

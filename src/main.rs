@@ -97,6 +97,8 @@ impl App {
         let mut editor = Editor::new();
         editor.active_mut().wrap_enabled = config.line_wrap;
 
+        let menu = AppMenu::new(&config.recent_files);
+
         Self {
             editor,
             theme,
@@ -106,7 +108,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             config,
             settings_cursor: 0,
-            menu: AppMenu::new(),
+            menu,
             window: None,
             device: None,
             queue: None,
@@ -461,6 +463,13 @@ impl App {
 
         use renderer::{GUTTER_WIDTH, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
 
+        let win_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.height as f32 / r.scale_factor)
+            .unwrap_or(600.0);
+        let status_top = (win_h - renderer::STATUS_BAR_HEIGHT) as f64;
+
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
             if let Some(renderer) = &self.renderer {
@@ -495,6 +504,10 @@ impl App {
                     }
                 }
             }
+        }
+        // Status Bar
+        else if y >= status_top {
+            self.handle_status_bar_click(x as f32);
         }
         // Editor Area
         else if y >= TAB_BAR_HEIGHT as f64 {
@@ -542,6 +555,39 @@ impl App {
             if is_double {
                 buffer.select_word_at_cursor();
             }
+        }
+        self.needs_redraw = true;
+    }
+
+    fn handle_status_bar_click(&mut self, x: f32) {
+        use renderer::StatusBarSegment;
+
+        let seg = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.hit_test_status_bar(x));
+
+        match seg {
+            Some(StatusBarSegment::CursorPosition) => {
+                self.overlay.open(ActiveOverlay::GotoLine);
+            }
+            Some(StatusBarSegment::Language) => {
+                self.overlay.open(ActiveOverlay::LanguagePicker);
+                // Pre-select the current language
+                if let Some(idx) = self.editor.active().language_index {
+                    // +1 because item 0 is "Plain Text" / auto-detect
+                    self.overlay.picker_selected = idx + 1;
+                }
+            }
+            Some(StatusBarSegment::LineEnding) => {
+                self.overlay.open(ActiveOverlay::LineEndingPicker);
+                // Pre-select current line ending
+                self.overlay.picker_selected = match self.editor.active().line_ending {
+                    editor::buffer::LineEnding::Lf => 0,
+                    editor::buffer::LineEnding::CrLf => 1,
+                };
+            }
+            _ => {}
         }
         self.needs_redraw = true;
     }
@@ -703,6 +749,8 @@ impl App {
             ActiveOverlay::CommandPalette => 300.0,
             ActiveOverlay::Help => 600.0,
             ActiveOverlay::Settings => 360.0,
+            ActiveOverlay::LanguagePicker => 260.0,
+            ActiveOverlay::LineEndingPicker => 100.0,
             _ => 40.0,
         };
 
@@ -1083,6 +1131,10 @@ impl App {
                 let le = self.editor.active().line_ending.as_str().to_string();
                 self.editor.active_mut().insert_newline(&le);
             }
+            Key::Named(NamedKey::Tab) if shift => {
+                let ts = self.config.tab_size;
+                self.editor.active_mut().dedent_line(ts);
+            }
             Key::Named(NamedKey::Tab) => {
                 self.editor.active_mut().insert_text("    ");
             }
@@ -1139,6 +1191,18 @@ impl App {
         // Settings overlay has its own key handling
         if self.overlay.active == ActiveOverlay::Settings {
             self.handle_settings_key(&event.logical_key);
+            self.needs_redraw = true;
+            return;
+        }
+
+        // Picker overlays have their own key handling
+        if self.overlay.active == ActiveOverlay::LanguagePicker {
+            self.handle_language_picker_key(&event.logical_key, cmd_or_ctrl);
+            self.needs_redraw = true;
+            return;
+        }
+        if self.overlay.active == ActiveOverlay::LineEndingPicker {
+            self.handle_line_ending_picker_key(&event.logical_key);
             self.needs_redraw = true;
             return;
         }
@@ -1403,6 +1467,9 @@ impl App {
             ActiveOverlay::Settings => {
                 // Settings handled separately in handle_settings_key
             }
+            ActiveOverlay::LanguagePicker | ActiveOverlay::LineEndingPicker => {
+                // Handled separately in their own key handlers
+            }
         }
         self.needs_redraw = true;
     }
@@ -1478,6 +1545,19 @@ impl App {
             CommandId::Settings => {
                 self.overlay.open(ActiveOverlay::Settings);
                 self.settings_cursor = 0;
+            }
+            CommandId::ChangeLanguage => {
+                self.overlay.open(ActiveOverlay::LanguagePicker);
+                if let Some(idx) = self.editor.active().language_index {
+                    self.overlay.picker_selected = idx + 1;
+                }
+            }
+            CommandId::ChangeLineEnding => {
+                self.overlay.open(ActiveOverlay::LineEndingPicker);
+                self.overlay.picker_selected = match self.editor.active().line_ending {
+                    editor::buffer::LineEnding::Lf => 0,
+                    editor::buffer::LineEnding::CrLf => 1,
+                };
             }
         }
         self.needs_redraw = true;
@@ -1576,6 +1656,126 @@ impl App {
                 self.overlay.close();
             }
             _ => {}
+        }
+    }
+
+    fn handle_language_picker_key(&mut self, key: &Key, _cmd_or_ctrl: bool) {
+        match key {
+            Key::Named(NamedKey::ArrowDown) => {
+                let count = self.filtered_language_count();
+                if self.overlay.picker_selected + 1 < count {
+                    self.overlay.picker_selected += 1;
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if self.overlay.picker_selected > 0 {
+                    self.overlay.picker_selected -= 1;
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.apply_language_picker_selection();
+                self.overlay.close();
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.overlay.close();
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if self.overlay.cursor_pos > 0 {
+                    let remove_at = self.overlay.cursor_pos - 1;
+                    self.overlay.input.remove(remove_at);
+                    self.overlay.cursor_pos -= 1;
+                    self.overlay.picker_selected = 0;
+                }
+            }
+            Key::Character(c) => {
+                self.overlay.input.insert_str(self.overlay.cursor_pos, c.as_str());
+                self.overlay.cursor_pos += c.len();
+                self.overlay.picker_selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn filtered_language_count(&self) -> usize {
+        let query_lower = self.overlay.input.to_lowercase();
+        if query_lower.is_empty() {
+            return self.syntax.language_count() + 1; // +1 for Plain Text
+        }
+        let mut count = 0;
+        if "plain text".contains(&query_lower) {
+            count += 1;
+        }
+        for i in 0..self.syntax.language_count() {
+            if self.syntax.language_name(i).to_lowercase().contains(&query_lower) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn apply_language_picker_selection(&mut self) {
+        let query_lower = self.overlay.input.to_lowercase();
+        let mut items: Vec<Option<usize>> = Vec::new(); // None = Plain Text, Some(i) = language index
+        if query_lower.is_empty() || "plain text".contains(&query_lower) {
+            items.push(None);
+        }
+        for i in 0..self.syntax.language_count() {
+            if query_lower.is_empty()
+                || self.syntax.language_name(i).to_lowercase().contains(&query_lower)
+            {
+                items.push(Some(i));
+            }
+        }
+        if let Some(selected) = items.get(self.overlay.picker_selected) {
+            self.editor.active_mut().language_index = *selected;
+        }
+    }
+
+    fn handle_line_ending_picker_key(&mut self, key: &Key) {
+        match key {
+            Key::Named(NamedKey::ArrowDown) => {
+                if self.overlay.picker_selected < 1 {
+                    self.overlay.picker_selected = 1;
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if self.overlay.picker_selected > 0 {
+                    self.overlay.picker_selected = 0;
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.apply_line_ending_selection();
+                self.overlay.close();
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.overlay.close();
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_line_ending_selection(&mut self) {
+        use editor::buffer::LineEnding;
+        let new_ending = match self.overlay.picker_selected {
+            0 => LineEnding::Lf,
+            _ => LineEnding::CrLf,
+        };
+        let buffer = self.editor.active_mut();
+        // Convert the actual text in the rope
+        let current = &buffer.line_ending;
+        if std::mem::discriminant(current) != std::mem::discriminant(&new_ending) {
+            let text = buffer.rope.to_string();
+            let converted = match new_ending {
+                LineEnding::Lf => text.replace("\r\n", "\n"),
+                LineEnding::CrLf => {
+                    // First normalize to LF, then convert to CRLF
+                    let normalized = text.replace("\r\n", "\n");
+                    normalized.replace('\n', "\r\n")
+                }
+            };
+            buffer.rope = ropey::Rope::from_str(&converted);
+            buffer.line_ending = new_ending;
+            buffer.dirty = true;
         }
     }
 
@@ -1748,6 +1948,12 @@ impl App {
         self.needs_redraw = true;
     }
 
+    fn track_recent_file(&mut self, path: &std::path::Path) {
+        self.config.add_recent_file(path.to_path_buf());
+        self.config.save();
+        self.menu.update_recent_files(&self.config.recent_files);
+    }
+
     fn save(&mut self) {
         let buffer = self.editor.active_mut();
         if buffer.file_path.is_some() {
@@ -1763,9 +1969,10 @@ impl App {
 
     fn save_as(&mut self) {
         if let Some(path) = rfd::FileDialog::new().save_file() {
-            if let Err(e) = self.editor.active_mut().save_as(path) {
+            if let Err(e) = self.editor.active_mut().save_as(path.clone()) {
                 log::error!("Save As failed: {}", e);
             } else {
+                self.track_recent_file(&path);
                 self.persist_session_now();
             }
         }
@@ -1783,6 +1990,7 @@ impl App {
                 if self.editor.active().is_large_file() {
                     self.editor.active_mut().wrap_enabled = false;
                 }
+                self.track_recent_file(&path);
                 self.persist_session_now();
             }
         }
@@ -1798,6 +2006,26 @@ impl App {
             }
             MenuAction::Open => {
                 self.open_file();
+                self.needs_redraw = true;
+            }
+            MenuAction::OpenRecent(path) => {
+                if path.exists() {
+                    if let Err(e) = self
+                        .editor
+                        .open_file(&path, Some(&self.syntax), &self.config)
+                    {
+                        log::error!("Open recent failed: {}", e);
+                    } else {
+                        self.editor.active_mut().wrap_enabled = self.config.line_wrap;
+                        if self.editor.active().is_large_file() {
+                            self.editor.active_mut().wrap_enabled = false;
+                        }
+                        self.track_recent_file(&path);
+                        self.persist_session_now();
+                    }
+                } else {
+                    log::warn!("Recent file no longer exists: {}", path.display());
+                }
                 self.needs_redraw = true;
             }
             MenuAction::OpenWorkspace => {
@@ -2047,15 +2275,48 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = (position.x, position.y);
 
-                // Update cursor icon
+                // Update cursor icon and hovered status bar segment
                 if let Some(window) = &self.window {
                     let scale = window.scale_factor();
                     let y = position.y / scale;
+                    let x = position.x / scale;
+                    let win_h = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| r.height as f32 / r.scale_factor)
+                        .unwrap_or(600.0);
+                    let status_top = (win_h - renderer::STATUS_BAR_HEIGHT) as f64;
                     use renderer::TAB_BAR_HEIGHT;
-                    if y >= TAB_BAR_HEIGHT as f64 {
+
+                    if y >= status_top {
+                        // Over the status bar — show pointer, track hovered segment
+                        window.set_cursor(winit::window::CursorIcon::Pointer);
+                        let new_seg = self
+                            .renderer
+                            .as_ref()
+                            .and_then(|r| r.hit_test_status_bar(x as f32));
+                        if let Some(renderer) = &mut self.renderer {
+                            if renderer.hovered_status_segment != new_seg {
+                                renderer.hovered_status_segment = new_seg;
+                                self.needs_redraw = true;
+                            }
+                        }
+                    } else if y >= TAB_BAR_HEIGHT as f64 {
                         window.set_cursor(winit::window::CursorIcon::Text);
+                        if let Some(renderer) = &mut self.renderer {
+                            if renderer.hovered_status_segment.is_some() {
+                                renderer.hovered_status_segment = None;
+                                self.needs_redraw = true;
+                            }
+                        }
                     } else {
                         window.set_cursor(winit::window::CursorIcon::Default);
+                        if let Some(renderer) = &mut self.renderer {
+                            if renderer.hovered_status_segment.is_some() {
+                                renderer.hovered_status_segment = None;
+                                self.needs_redraw = true;
+                            }
+                        }
                     }
                 }
 
@@ -2187,7 +2448,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // Process menu events
-        while let Some(action) = AppMenu::try_recv() {
+        while let Some(action) = self.menu.try_recv() {
             self.handle_menu_action(action);
         }
 
@@ -2234,6 +2495,8 @@ fn main() -> Result<()> {
         if path.exists() {
             if let Err(e) = app.editor.open_file(path, Some(&app.syntax), &app.config) {
                 log::error!("Failed to open {}: {}", path.display(), e);
+            } else {
+                app.track_recent_file(path);
             }
         }
         app.sync_session_baseline();
