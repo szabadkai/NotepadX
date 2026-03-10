@@ -1,5 +1,7 @@
 # NotepadX
 
+![Demo](docs/demo.gif)
+
 Fast native text editing with a GPU render pipeline.
 
 NotepadX is a Rust-built editor focused on one thing: making everyday editing feel immediate, even on large files, without shipping a browser in the box.
