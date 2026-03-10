@@ -110,17 +110,17 @@ impl AppMenu {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
-            let item = MenuItem::with_id(
-                MenuId::new(&format!("recent_{}", i)),
-                &label,
-                true,
-                None,
-            );
+            let item = MenuItem::with_id(MenuId::new(&format!("recent_{}", i)), &label, true, None);
             let _ = recent_submenu.append(&item);
             recent_paths.push(path.clone());
         }
         if recent_files.is_empty() {
-            let empty = MenuItem::with_id(MenuId::new("recent_empty"), "(No Recent Files)", false, None);
+            let empty = MenuItem::with_id(
+                MenuId::new("recent_empty"),
+                "(No Recent Files)",
+                false,
+                None,
+            );
             let _ = recent_submenu.append(&empty);
         }
 
@@ -355,8 +355,12 @@ impl AppMenu {
         // Remove all existing items
         for item in self.recent_submenu.items() {
             match item {
-                MenuItemKind::MenuItem(ref mi) => { let _ = self.recent_submenu.remove(mi); }
-                MenuItemKind::Predefined(ref pi) => { let _ = self.recent_submenu.remove(pi); }
+                MenuItemKind::MenuItem(ref mi) => {
+                    let _ = self.recent_submenu.remove(mi);
+                }
+                MenuItemKind::Predefined(ref pi) => {
+                    let _ = self.recent_submenu.remove(pi);
+                }
                 _ => {}
             }
         }
@@ -367,17 +371,17 @@ impl AppMenu {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
-            let item = MenuItem::with_id(
-                MenuId::new(&format!("recent_{}", i)),
-                &label,
-                true,
-                None,
-            );
+            let item = MenuItem::with_id(MenuId::new(&format!("recent_{}", i)), &label, true, None);
             let _ = self.recent_submenu.append(&item);
             self.recent_paths.push(path.clone());
         }
         if recent_files.is_empty() {
-            let empty = MenuItem::with_id(MenuId::new("recent_empty"), "(No Recent Files)", false, None);
+            let empty = MenuItem::with_id(
+                MenuId::new("recent_empty"),
+                "(No Recent Files)",
+                false,
+                None,
+            );
             let _ = self.recent_submenu.append(&empty);
         }
     }

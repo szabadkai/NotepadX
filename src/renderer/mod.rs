@@ -296,7 +296,10 @@ impl Renderer {
             let suffix_len = close_marker.chars().count();
             let max_name_chars = TAB_MAX_LABEL_CHARS.saturating_sub(prefix_len + suffix_len);
             let truncated_name: String = if name.chars().count() > max_name_chars {
-                let trimmed: String = name.chars().take(max_name_chars.saturating_sub(1)).collect();
+                let trimmed: String = name
+                    .chars()
+                    .take(max_name_chars.saturating_sub(1))
+                    .collect();
                 format!("{trimmed}…")
             } else {
                 name.to_string()
@@ -526,10 +529,7 @@ impl Renderer {
                     overlay.find.matches.len()
                 )
             } else if !overlay.find.matches.is_empty() {
-                format!(
-                    "   ·   Searching… ({} matches)",
-                    overlay.find.matches.len()
-                )
+                format!("   ·   Searching… ({} matches)", overlay.find.matches.len())
             } else {
                 "   ·   Searching…".to_string()
             }
@@ -550,7 +550,18 @@ impl Renderer {
 
         let status_text = format!(
             "{}{}{}{}{}{}{}{}{}{}{}{}",
-            padding, seg_cursor, sep, seg_lines, sep, seg_lang, sep, seg_encoding, sep, seg_line_ending, sep, seg_version
+            padding,
+            seg_cursor,
+            sep,
+            seg_lines,
+            sep,
+            seg_lang,
+            sep,
+            seg_encoding,
+            sep,
+            seg_line_ending,
+            sep,
+            seg_version
         );
 
         // Compute segment x boundaries (logical px, with 10px left offset matching TextArea left)
@@ -736,7 +747,12 @@ impl Renderer {
                         ),
                         (
                             "Show Line Numbers",
-                            (if config.show_line_numbers { " On" } else { " Off" }).to_string(),
+                            (if config.show_line_numbers {
+                                " On"
+                            } else {
+                                " Off"
+                            })
+                            .to_string(),
                         ),
                         ("Tab Size", format!("  {}  ", config.tab_size)),
                         (
@@ -745,7 +761,12 @@ impl Renderer {
                         ),
                         (
                             "Highlight Line",
-                            (if config.highlight_current_line { " On" } else { " Off" }).to_string(),
+                            (if config.highlight_current_line {
+                                " On"
+                            } else {
+                                " Off"
+                            })
+                            .to_string(),
                         ),
                     ];
                     let mut text = String::from(
@@ -786,7 +807,11 @@ impl Renderer {
                             None => *item_idx == 0,
                         };
                         let marker = if is_current { "● " } else { "  " };
-                        let sel = if idx == overlay.picker_selected { "▸ " } else { "  " };
+                        let sel = if idx == overlay.picker_selected {
+                            "▸ "
+                        } else {
+                            "  "
+                        };
                         text.push_str(&format!("{}{}{}\n", sel, marker, name));
                     }
                     text
@@ -800,7 +825,11 @@ impl Renderer {
                     let mut text = String::from("Select End of Line Sequence\n\n");
                     for (i, label) in items.iter().enumerate() {
                         let marker = if i == current { "● " } else { "  " };
-                        let sel = if i == overlay.picker_selected { "▸ " } else { "  " };
+                        let sel = if i == overlay.picker_selected {
+                            "▸ "
+                        } else {
+                            "  "
+                        };
                         text.push_str(&format!("{}{}{}\n", sel, marker, label));
                     }
                     text
@@ -919,12 +948,18 @@ impl Renderer {
         let mut overlay_rects = Vec::new();
 
         // 1. Tab Bar Background
-        base_rects.push(Rect::flat(0.0, 0.0, width, tab_bar_height, [
+        base_rects.push(Rect::flat(
+            0.0,
+            0.0,
+            width,
+            tab_bar_height,
+            [
                 theme.tab_bar_bg.r,
                 theme.tab_bar_bg.g,
                 theme.tab_bar_bg.b,
                 theme.tab_bar_bg.a,
-            ]));
+            ],
+        ));
 
         // 2. Per-tab backgrounds from precomputed tab_positions
         for (i, &(tx, tw)) in self.tab_positions.iter().enumerate() {
@@ -940,31 +975,56 @@ impl Renderer {
             };
             // Active tab: rounded top corners (6px), inactive: 4px
             let tab_radius = if is_active { 6.0 * s } else { 4.0 * s };
-            base_rects.push(Rect::rounded(tx_s, 0.0, tw_s, tab_bar_height, [tab_bg.r, tab_bg.g, tab_bg.b, tab_bg.a], tab_radius));
+            base_rects.push(Rect::rounded(
+                tx_s,
+                0.0,
+                tw_s,
+                tab_bar_height,
+                [tab_bg.r, tab_bg.g, tab_bg.b, tab_bg.a],
+                tab_radius,
+            ));
 
             // Active tab: 2px bottom accent line in cursor color
             if is_active {
                 let accent = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
-                base_rects.push(Rect::flat(tx_s, tab_bar_height - 2.0 * s, tw_s, 2.0 * s, accent));
+                base_rects.push(Rect::flat(
+                    tx_s,
+                    tab_bar_height - 2.0 * s,
+                    tw_s,
+                    2.0 * s,
+                    accent,
+                ));
             }
         }
 
         // 2b. Gutter Background
         let editor_height_px =
             height - tab_bar_height - status_bar_height - results_panel_height_px;
-        base_rects.push(Rect::flat(0.0, editor_top, gutter_width, editor_height_px, [
+        base_rects.push(Rect::flat(
+            0.0,
+            editor_top,
+            gutter_width,
+            editor_height_px,
+            [
                 theme.gutter_bg.r,
                 theme.gutter_bg.g,
                 theme.gutter_bg.b,
                 theme.gutter_bg.a,
-            ]));
+            ],
+        ));
 
         // 3. Active Line Highlight
         let (cursor_visual_line, cursor_visual_col) =
             buffer.visual_position_of_char(buffer.cursor, wrap_width, char_width);
         let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-            base_rects.push(Rect::flat(gutter_width, editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px, width - gutter_width, line_height, [theme.selection.r, theme.selection.g, theme.selection.b, 0.3]));
+            base_rects.push(Rect::flat(
+                gutter_width,
+                editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px,
+                width - gutter_width,
+                line_height,
+                [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
+            ));
         }
 
         // 4. Cursor I-beam (thin 2px line)
@@ -972,7 +1032,13 @@ impl Renderer {
             let caret_height = (self.current_font_size * s).max(1.0);
             let caret_y = editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px
                 + ((line_height - caret_height) / 2.0).max(0.0);
-            base_rects.push(Rect::flat(editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s, caret_y, 2.0 * s, caret_height, [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0]));
+            base_rects.push(Rect::flat(
+                editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s,
+                caret_y,
+                2.0 * s,
+                caret_height,
+                [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
+            ));
         }
 
         // 4. Bracket Matching Highlight
@@ -983,7 +1049,13 @@ impl Renderer {
                 let match_line_in_view = match_visual_line as i64 - scroll_line as i64;
 
                 if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
-                    base_rects.push(Rect::flat(editor_left + match_visual_col as f32 * char_width - buffer.scroll_x * s, editor_top + match_line_in_view as f32 * line_height - scroll_y_px, char_width, line_height, [theme.selection.r, theme.selection.g, theme.selection.b, 0.4]));
+                    base_rects.push(Rect::flat(
+                        editor_left + match_visual_col as f32 * char_width - buffer.scroll_x * s,
+                        editor_top + match_line_in_view as f32 * line_height - scroll_y_px,
+                        char_width,
+                        line_height,
+                        [theme.selection.r, theme.selection.g, theme.selection.b, 0.4],
+                    ));
                 }
             }
         }
@@ -998,12 +1070,18 @@ impl Renderer {
                     let col_start = sel_start - visual_line.start_char;
                     let col_end = sel_end - visual_line.start_char;
 
-                    base_rects.push(Rect::flat(editor_left + col_start as f32 * char_width - buffer.scroll_x * s, editor_top + i as f32 * line_height - scroll_y_px, (col_end - col_start) as f32 * char_width, line_height, [
+                    base_rects.push(Rect::flat(
+                        editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
+                        editor_top + i as f32 * line_height - scroll_y_px,
+                        (col_end - col_start) as f32 * char_width,
+                        line_height,
+                        [
                             theme.selection.r,
                             theme.selection.g,
                             theme.selection.b,
                             theme.selection.a.max(0.4),
-                        ]));
+                        ],
+                    ));
                 }
             }
         }
@@ -1063,24 +1141,36 @@ impl Renderer {
                     let col_end = clamped_end - visual_line.start_char;
 
                     if col_start < col_end {
-                        base_rects.push(Rect::flat(editor_left + col_start as f32 * char_width - buffer.scroll_x * s, editor_top + i as f32 * line_height - scroll_y_px, (col_end - col_start) as f32 * char_width, line_height, [
+                        base_rects.push(Rect::flat(
+                            editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
+                            editor_top + i as f32 * line_height - scroll_y_px,
+                            (col_end - col_start) as f32 * char_width,
+                            line_height,
+                            [
                                 highlight_color.r,
                                 highlight_color.g,
                                 highlight_color.b,
                                 highlight_color.a,
-                            ]));
+                            ],
+                        ));
                     }
                 }
             }
         }
 
         // 6. Status Bar Background
-        base_rects.push(Rect::flat(0.0, status_top, width, status_bar_height, [
+        base_rects.push(Rect::flat(
+            0.0,
+            status_top,
+            width,
+            status_bar_height,
+            [
                 theme.status_bar_bg.r,
                 theme.status_bar_bg.g,
                 theme.status_bar_bg.b,
                 theme.status_bar_bg.a,
-            ]));
+            ],
+        ));
 
         // 6a. Hovered status bar segment highlight
         if let Some(hovered) = self.hovered_status_segment {
@@ -1089,8 +1179,16 @@ impl Renderer {
                     let seg_left = seg_x0 * s - 4.0 * s;
                     let seg_w = (seg_x1 - seg_x0) * s + 8.0 * s;
                     base_rects.push(Rect::rounded(
-                        seg_left, status_top, seg_w, status_bar_height,
-                        [theme.selection.r, theme.selection.g, theme.selection.b, 0.25],
+                        seg_left,
+                        status_top,
+                        seg_w,
+                        status_bar_height,
+                        [
+                            theme.selection.r,
+                            theme.selection.g,
+                            theme.selection.b,
+                            0.25,
+                        ],
                         4.0 * s,
                     ));
                     break;
@@ -1102,22 +1200,40 @@ impl Renderer {
         if overlay.results_panel.visible && results_panel_height_px > 0.0 {
             let panel_top = editor_top + editor_height_px;
             // Panel background
-            base_rects.push(Rect::flat(0.0, panel_top, width, results_panel_height_px, [
+            base_rects.push(Rect::flat(
+                0.0,
+                panel_top,
+                width,
+                results_panel_height_px,
+                [
                     theme.tab_bar_bg.r,
                     theme.tab_bar_bg.g,
                     theme.tab_bar_bg.b,
                     1.0,
-                ]));
+                ],
+            ));
             // Header bar
             let header_h = RESULTS_PANEL_HEADER_HEIGHT * s;
-            base_rects.push(Rect::flat(0.0, panel_top, width, header_h, [
+            base_rects.push(Rect::flat(
+                0.0,
+                panel_top,
+                width,
+                header_h,
+                [
                     theme.status_bar_bg.r,
                     theme.status_bar_bg.g,
                     theme.status_bar_bg.b,
                     1.0,
-                ]));
+                ],
+            ));
             // Top border
-            base_rects.push(Rect::flat(0.0, panel_top, width, 1.0 * s, [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5]));
+            base_rects.push(Rect::flat(
+                0.0,
+                panel_top,
+                width,
+                1.0 * s,
+                [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5],
+            ));
 
             // Selected result highlight
             let panel = &overlay.results_panel;
@@ -1132,7 +1248,13 @@ impl Renderer {
                 let sel_y = panel_top + header_h + visual_row as f32 * RESULTS_PANEL_ROW_HEIGHT * s;
                 let sel_h = RESULTS_PANEL_ROW_HEIGHT * s;
                 if sel_y + sel_h < panel_top + results_panel_height_px {
-                    base_rects.push(Rect::flat(0.0, sel_y, width, sel_h, [theme.selection.r, theme.selection.g, theme.selection.b, 0.3]));
+                    base_rects.push(Rect::flat(
+                        0.0,
+                        sel_y,
+                        width,
+                        sel_h,
+                        [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
+                    ));
                 }
                 let _ = row_in_view; // suppress warning
             }
@@ -1147,12 +1269,18 @@ impl Renderer {
                     for m in overlay.find.matches.iter().take(500) {
                         let ratio = m.start as f32 / file_size;
                         let tick_y = editor_top + ratio * editor_height_px;
-                        base_rects.push(Rect::flat(scrollbar_x, tick_y, SCROLLBAR_WIDTH * s, 2.0 * s, [
+                        base_rects.push(Rect::flat(
+                            scrollbar_x,
+                            tick_y,
+                            SCROLLBAR_WIDTH * s,
+                            2.0 * s,
+                            [
                                 theme.find_match_active.r,
                                 theme.find_match_active.g,
                                 theme.find_match_active.b,
                                 theme.find_match_active.a.max(0.6),
-                            ]));
+                            ],
+                        ));
                     }
                 }
             } else {
@@ -1161,12 +1289,18 @@ impl Renderer {
                     let char_pos = buffer.rope.byte_to_char(m.start) as f32;
                     let ratio = char_pos / total_chars;
                     let tick_y = editor_top + ratio * editor_height_px;
-                    base_rects.push(Rect::flat(scrollbar_x, tick_y, SCROLLBAR_WIDTH * s, 2.0 * s, [
+                    base_rects.push(Rect::flat(
+                        scrollbar_x,
+                        tick_y,
+                        SCROLLBAR_WIDTH * s,
+                        2.0 * s,
+                        [
                             theme.find_match_active.r,
                             theme.find_match_active.g,
                             theme.find_match_active.b,
                             theme.find_match_active.a.max(0.6),
-                        ]));
+                        ],
+                    ));
                 }
             }
         }
@@ -1192,7 +1326,14 @@ impl Renderer {
                 theme.scrollbar_thumb.b,
                 theme.scrollbar_thumb.a,
             ];
-            base_rects.push(Rect::rounded(scrollbar_x, thumb_y, scrollbar_w, thumb_h, thumb_color, 4.0 * s));
+            base_rects.push(Rect::rounded(
+                scrollbar_x,
+                thumb_y,
+                scrollbar_w,
+                thumb_h,
+                thumb_color,
+                4.0 * s,
+            ));
         }
 
         // 5. Overlay Panel Backgrounds
@@ -1233,14 +1374,24 @@ impl Renderer {
                 1.0,
             ];
             overlay_rects.push(Rect::rounded_shadow(
-                overlay_left, overlay_top_panel, overlay_width, overlay_height,
-                overlay_bg, 8.0 * s, 12.0 * s, [0.0, 0.0, 0.0, 0.3],
+                overlay_left,
+                overlay_top_panel,
+                overlay_width,
+                overlay_height,
+                overlay_bg,
+                8.0 * s,
+                12.0 * s,
+                [0.0, 0.0, 0.0, 0.3],
             ));
             // 2px top accent line in cursor color
             let accent_color = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
             overlay_rects.push(Rect::rounded(
-                overlay_left, overlay_top_panel, overlay_width, 2.0 * s,
-                accent_color, 8.0 * s,
+                overlay_left,
+                overlay_top_panel,
+                overlay_width,
+                2.0 * s,
+                accent_color,
+                8.0 * s,
             ));
 
             let overlay_char_width = OVERLAY_CHAR_WIDTH * s;
@@ -1255,10 +1406,16 @@ impl Renderer {
             match overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
                     if let Some((start, end)) = overlay.find_selection_char_range() {
-                        overlay_rects.push(Rect::flat(overlay_left
+                        overlay_rects.push(Rect::flat(
+                            overlay_left
                                 + 8.0 * s
                                 + 6.0 * overlay_char_width
-                                + start as f32 * overlay_char_width, overlay_top_panel + 6.0 * s, (end - start) as f32 * overlay_char_width, overlay_line_height, selection_color));
+                                + start as f32 * overlay_char_width,
+                            overlay_top_panel + 6.0 * s,
+                            (end - start) as f32 * overlay_char_width,
+                            overlay_line_height,
+                            selection_color,
+                        ));
                     }
 
                     let pill_h = 18.0 * s;
@@ -1283,26 +1440,71 @@ impl Renderer {
                         theme.tab_bar_bg.b,
                         1.0,
                     ];
-                    let case_color = if overlay.find.case_sensitive { active } else { inactive };
-                    let word_color = if overlay.find.whole_word { active } else { inactive };
-                    let regex_color = if overlay.find.use_regex { active } else { inactive };
-                    overlay_rects.push(Rect::rounded(case_x, y, pill_case_w, pill_h, case_color, 4.0 * s));
-                    overlay_rects.push(Rect::rounded(word_x, y, pill_word_w, pill_h, word_color, 4.0 * s));
-                    overlay_rects.push(Rect::rounded(regex_x, y, pill_regex_w, pill_h, regex_color, 4.0 * s));
+                    let case_color = if overlay.find.case_sensitive {
+                        active
+                    } else {
+                        inactive
+                    };
+                    let word_color = if overlay.find.whole_word {
+                        active
+                    } else {
+                        inactive
+                    };
+                    let regex_color = if overlay.find.use_regex {
+                        active
+                    } else {
+                        inactive
+                    };
+                    overlay_rects.push(Rect::rounded(
+                        case_x,
+                        y,
+                        pill_case_w,
+                        pill_h,
+                        case_color,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        word_x,
+                        y,
+                        pill_word_w,
+                        pill_h,
+                        word_color,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        regex_x,
+                        y,
+                        pill_regex_w,
+                        pill_h,
+                        regex_color,
+                        4.0 * s,
+                    ));
                 }
                 crate::overlay::ActiveOverlay::FindReplace => {
                     if let Some((start, end)) = overlay.find_selection_char_range() {
-                        overlay_rects.push(Rect::flat(overlay_left
+                        overlay_rects.push(Rect::flat(
+                            overlay_left
                                 + 8.0 * s
                                 + 9.0 * overlay_char_width
-                                + start as f32 * overlay_char_width, overlay_top_panel + 6.0 * s, (end - start) as f32 * overlay_char_width, overlay_line_height, selection_color));
+                                + start as f32 * overlay_char_width,
+                            overlay_top_panel + 6.0 * s,
+                            (end - start) as f32 * overlay_char_width,
+                            overlay_line_height,
+                            selection_color,
+                        ));
                     }
 
                     if let Some((start, end)) = overlay.replace_selection_char_range() {
-                        overlay_rects.push(Rect::flat(overlay_left
+                        overlay_rects.push(Rect::flat(
+                            overlay_left
                                 + 8.0 * s
                                 + 9.0 * overlay_char_width
-                                + start as f32 * overlay_char_width, overlay_top_panel + 6.0 * s + overlay_line_height, (end - start) as f32 * overlay_char_width, overlay_line_height, selection_color));
+                                + start as f32 * overlay_char_width,
+                            overlay_top_panel + 6.0 * s + overlay_line_height,
+                            (end - start) as f32 * overlay_char_width,
+                            overlay_line_height,
+                            selection_color,
+                        ));
                     }
 
                     let pill_h = 18.0 * s;
@@ -1327,20 +1529,57 @@ impl Renderer {
                         theme.tab_bar_bg.b,
                         1.0,
                     ];
-                    let case_color = if overlay.find.case_sensitive { active } else { inactive };
-                    let word_color = if overlay.find.whole_word { active } else { inactive };
-                    let regex_color = if overlay.find.use_regex { active } else { inactive };
-                    overlay_rects.push(Rect::rounded(case_x, y, pill_case_w, pill_h, case_color, 4.0 * s));
-                    overlay_rects.push(Rect::rounded(word_x, y, pill_word_w, pill_h, word_color, 4.0 * s));
-                    overlay_rects.push(Rect::rounded(regex_x, y, pill_regex_w, pill_h, regex_color, 4.0 * s));
+                    let case_color = if overlay.find.case_sensitive {
+                        active
+                    } else {
+                        inactive
+                    };
+                    let word_color = if overlay.find.whole_word {
+                        active
+                    } else {
+                        inactive
+                    };
+                    let regex_color = if overlay.find.use_regex {
+                        active
+                    } else {
+                        inactive
+                    };
+                    overlay_rects.push(Rect::rounded(
+                        case_x,
+                        y,
+                        pill_case_w,
+                        pill_h,
+                        case_color,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        word_x,
+                        y,
+                        pill_word_w,
+                        pill_h,
+                        word_color,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        regex_x,
+                        y,
+                        pill_regex_w,
+                        pill_h,
+                        regex_color,
+                        4.0 * s,
+                    ));
                 }
                 crate::overlay::ActiveOverlay::Settings => {
                     // Selected row highlight
                     // Settings text: line 0 = header, line 1 = blank, lines 2-9 = setting rows
-                    let row_y = overlay_top_panel + 6.0 * s + (settings_cursor as f32 + 2.0) * overlay_line_height;
+                    let row_y = overlay_top_panel
+                        + 6.0 * s
+                        + (settings_cursor as f32 + 2.0) * overlay_line_height;
                     overlay_rects.push(Rect::rounded(
-                        overlay_left + 4.0 * s, row_y,
-                        overlay_width - 8.0 * s, overlay_line_height,
+                        overlay_left + 4.0 * s,
+                        row_y,
+                        overlay_width - 8.0 * s,
+                        overlay_line_height,
                         [theme.selection.r, theme.selection.g, theme.selection.b, 0.2],
                         4.0 * s,
                     ));
@@ -1355,26 +1594,60 @@ impl Renderer {
                         (6, config.use_spaces),
                         (7, config.highlight_current_line),
                     ];
-                    let checkbox_border = [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5];
-                    let checkbox_fill = [theme.selection.r, theme.selection.g, theme.selection.b, 1.0];
+                    let checkbox_border =
+                        [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5];
+                    let checkbox_fill =
+                        [theme.selection.r, theme.selection.g, theme.selection.b, 1.0];
                     for &(row_idx, is_on) in settings_bools {
-                        let cy = overlay_top_panel + 6.0 * s + (row_idx as f32 + 2.0) * overlay_line_height + (overlay_line_height - checkbox_size) / 2.0;
+                        let cy = overlay_top_panel
+                            + 6.0 * s
+                            + (row_idx as f32 + 2.0) * overlay_line_height
+                            + (overlay_line_height - checkbox_size) / 2.0;
                         if is_on {
-                            overlay_rects.push(Rect::rounded(checkbox_x, cy, checkbox_size, checkbox_size, checkbox_fill, 3.0 * s));
+                            overlay_rects.push(Rect::rounded(
+                                checkbox_x,
+                                cy,
+                                checkbox_size,
+                                checkbox_size,
+                                checkbox_fill,
+                                3.0 * s,
+                            ));
                         } else {
                             // Border only for unchecked — render as a slightly transparent rect
-                            overlay_rects.push(Rect::rounded(checkbox_x, cy, checkbox_size, checkbox_size, checkbox_border, 3.0 * s));
+                            overlay_rects.push(Rect::rounded(
+                                checkbox_x,
+                                cy,
+                                checkbox_size,
+                                checkbox_size,
+                                checkbox_border,
+                                3.0 * s,
+                            ));
                         }
                     }
 
                     // Value selector backgrounds for Theme (row 0), Font Size (row 1), Tab Size (row 5)
                     let selector_rows: &[usize] = &[0, 1, 5];
-                    let selector_bg = [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.15];
+                    let selector_bg = [
+                        theme.gutter_fg.r,
+                        theme.gutter_fg.g,
+                        theme.gutter_fg.b,
+                        0.15,
+                    ];
                     for &row_idx in selector_rows {
-                        let sy = overlay_top_panel + 6.0 * s + (row_idx as f32 + 2.0) * overlay_line_height + 1.0 * s;
+                        let sy = overlay_top_panel
+                            + 6.0 * s
+                            + (row_idx as f32 + 2.0) * overlay_line_height
+                            + 1.0 * s;
                         let sx = overlay_left + 8.0 * s + 24.0 * overlay_char_width;
                         let sw = overlay_width - 16.0 * s - 24.0 * overlay_char_width;
-                        overlay_rects.push(Rect::rounded(sx, sy, sw, overlay_line_height - 2.0 * s, selector_bg, 4.0 * s));
+                        overlay_rects.push(Rect::rounded(
+                            sx,
+                            sy,
+                            sw,
+                            overlay_line_height - 2.0 * s,
+                            selector_bg,
+                            4.0 * s,
+                        ));
                     }
                 }
                 _ => {}

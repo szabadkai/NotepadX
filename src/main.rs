@@ -1062,7 +1062,11 @@ impl App {
             }
 
             // Toggle Line Wrap (Alt+Z)
-            Key::Character(c) if self.modifiers.alt_key() && !cmd_or_ctrl && (c.as_str() == "Ω" || c.as_str() == "z") => {
+            Key::Character(c)
+                if self.modifiers.alt_key()
+                    && !cmd_or_ctrl
+                    && (c.as_str() == "Ω" || c.as_str() == "z") =>
+            {
                 self.config.line_wrap = !self.config.line_wrap;
                 for buf in &mut self.editor.buffers {
                     buf.wrap_enabled = self.config.line_wrap;
@@ -1688,7 +1692,9 @@ impl App {
                 }
             }
             Key::Character(c) => {
-                self.overlay.input.insert_str(self.overlay.cursor_pos, c.as_str());
+                self.overlay
+                    .input
+                    .insert_str(self.overlay.cursor_pos, c.as_str());
                 self.overlay.cursor_pos += c.len();
                 self.overlay.picker_selected = 0;
             }
@@ -1706,7 +1712,12 @@ impl App {
             count += 1;
         }
         for i in 0..self.syntax.language_count() {
-            if self.syntax.language_name(i).to_lowercase().contains(&query_lower) {
+            if self
+                .syntax
+                .language_name(i)
+                .to_lowercase()
+                .contains(&query_lower)
+            {
                 count += 1;
             }
         }
@@ -1721,7 +1732,11 @@ impl App {
         }
         for i in 0..self.syntax.language_count() {
             if query_lower.is_empty()
-                || self.syntax.language_name(i).to_lowercase().contains(&query_lower)
+                || self
+                    .syntax
+                    .language_name(i)
+                    .to_lowercase()
+                    .contains(&query_lower)
             {
                 items.push(Some(i));
             }
