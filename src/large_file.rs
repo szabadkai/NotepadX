@@ -904,7 +904,10 @@ mod tests {
     #[test]
     fn best_known_line_count_uses_global_progress() {
         let path = temp_path("best-known-lines");
-        let content: String = (0..20_000).map(|index| format!("line-{index}\n")).collect();
+        // Use a larger file (1M+ lines, ~10MB) to ensure indexing doesn't complete immediately
+        let content: String = (0..1_000_000)
+            .map(|index| format!("line-{index}\n"))
+            .collect();
         std::fs::write(&path, content).unwrap();
         let (mut state, _) = LargeFileState::open(&path, 8 * 1024).unwrap();
 

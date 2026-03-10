@@ -110,7 +110,7 @@ impl AppMenu {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
-            let item = MenuItem::with_id(MenuId::new(&format!("recent_{}", i)), &label, true, None);
+            let item = MenuItem::with_id(MenuId::new(format!("recent_{}", i)), &label, true, None);
             let _ = recent_submenu.append(&item);
             recent_paths.push(path.clone());
         }
@@ -371,7 +371,7 @@ impl AppMenu {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
-            let item = MenuItem::with_id(MenuId::new(&format!("recent_{}", i)), &label, true, None);
+            let item = MenuItem::with_id(MenuId::new(format!("recent_{}", i)), &label, true, None);
             let _ = self.recent_submenu.append(&item);
             self.recent_paths.push(path.clone());
         }

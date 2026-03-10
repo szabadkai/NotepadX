@@ -1956,6 +1956,7 @@ impl Rect {
     }
 
     /// Create a rounded rect with shadow
+    #[allow(clippy::too_many_arguments)]
     pub fn rounded_shadow(
         x: f32,
         y: f32,
