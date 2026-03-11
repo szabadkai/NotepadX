@@ -14,18 +14,48 @@ jobs:
     strategy:
       matrix:
         include:
+          # Minimal builds (default features: JS, Python, JSON)
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: notepadx
+            features: ""
+            suffix: "-minimal"
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: notepadx
+            features: ""
+            suffix: "-minimal"
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: notepadx
+            features: ""
+            suffix: "-minimal"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: notepadx.exe
+            features: ""
+            suffix: "-minimal"
+          # Full builds (all 20 languages)
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: notepadx
+            features: "--features full-syntax"
+            suffix: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: notepadx
+            features: "--features full-syntax"
+            suffix: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: notepadx
+            features: "--features full-syntax"
+            suffix: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: notepadx.exe
+            features: "--features full-syntax"
+            suffix: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +63,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.suffix }}
 
       - name: Read version from Cargo.toml
         shell: bash
@@ -47,7 +79,7 @@ jobs:
           sudo apt-get install -y pkg-config libglib2.0-dev libxdo-dev libgtk-3-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release ${{ matrix.features }} --target ${{ matrix.target }}
 
       # macOS: create .app bundle
       - name: Create macOS .app bundle
@@ -91,21 +123,21 @@ jobs:
 
       - name: Zip macOS .app
         if: runner.os == 'macOS'
-        run: zip -r NotepadX-${{ matrix.target }}.zip NotepadX.app
+        run: zip -r NotepadX-${{ matrix.target }}${{ matrix.suffix }}.zip NotepadX.app
 
       - name: Upload macOS .app
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: NotepadX-${{ matrix.target }}.app
-          path: NotepadX-${{ matrix.target }}.zip
+          name: NotepadX-${{ matrix.target }}${{ matrix.suffix }}.app
+          path: NotepadX-${{ matrix.target }}${{ matrix.suffix }}.zip
 
       # Linux / Windows: upload raw binary
       - name: Upload binary
         if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: notepadx-${{ matrix.target }}
+          name: notepadx-${{ matrix.target }}${{ matrix.suffix }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
 
   check:
@@ -125,8 +157,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Run clippy
+      - name: Run clippy (minimal)
         run: cargo clippy -- -D warnings
 
-      - name: Run tests
+      - name: Run clippy (full-syntax)
+        run: cargo clippy --features full-syntax -- -D warnings
+
+      - name: Run tests (minimal)
         run: cargo test --lib --test integration_tests
+
+      - name: Run tests (full-syntax)
+        run: cargo test --features full-syntax --lib --test integration_tests

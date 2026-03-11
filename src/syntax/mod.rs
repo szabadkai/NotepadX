@@ -162,6 +162,96 @@ fn language_defs() -> Vec<LangDef> {
             injections_query: "",
             locals_query: "",
         },
+        #[cfg(feature = "lang-rust")]
+        LangDef {
+            extensions: &["rs"],
+            name: "rust",
+            language: tree_sitter_rust::LANGUAGE.into(),
+            highlights_query: tree_sitter_rust::HIGHLIGHTS_QUERY,
+            injections_query: tree_sitter_rust::INJECTIONS_QUERY,
+            locals_query: "",
+        },
+        #[cfg(feature = "lang-go")]
+        LangDef {
+            extensions: &["go"],
+            name: "go",
+            language: tree_sitter_go::LANGUAGE.into(),
+            highlights_query: tree_sitter_go::HIGHLIGHTS_QUERY,
+            injections_query: "",
+            locals_query: "",
+        },
+        #[cfg(feature = "lang-c")]
+        LangDef {
+            extensions: &["c", "h"],
+            name: "c",
+            language: tree_sitter_c::LANGUAGE.into(),
+            highlights_query: tree_sitter_c::HIGHLIGHT_QUERY,
+            injections_query: "",
+            locals_query: "",
+        },
+        #[cfg(feature = "lang-cpp")]
+        LangDef {
+            extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+            name: "cpp",
+            language: tree_sitter_cpp::LANGUAGE.into(),
+            highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
+            injections_query: "",
+            locals_query: "",
+        },
+        #[cfg(feature = "lang-java")]
+        LangDef {
+            extensions: &["java"],
+            name: "java",
+            language: tree_sitter_java::LANGUAGE.into(),
+            highlights_query: tree_sitter_java::HIGHLIGHTS_QUERY,
+            injections_query: "",
+            locals_query: "",
+        },
+        #[cfg(feature = "lang-ruby")]
+        LangDef {
+            extensions: &["rb", "rake", "gemspec"],
+            name: "ruby",
+            language: tree_sitter_ruby::LANGUAGE.into(),
+            highlights_query: tree_sitter_ruby::HIGHLIGHTS_QUERY,
+            injections_query: "",
+            locals_query: tree_sitter_ruby::LOCALS_QUERY,
+        },
+        #[cfg(feature = "lang-php")]
+        LangDef {
+            extensions: &["php"],
+            name: "php",
+            language: tree_sitter_php::LANGUAGE_PHP.into(),
+            highlights_query: tree_sitter_php::HIGHLIGHTS_QUERY,
+            injections_query: tree_sitter_php::INJECTIONS_QUERY,
+            locals_query: "",
+        },
+        #[cfg(feature = "lang-lua")]
+        LangDef {
+            extensions: &["lua"],
+            name: "lua",
+            language: tree_sitter_lua::LANGUAGE.into(),
+            highlights_query: tree_sitter_lua::HIGHLIGHTS_QUERY,
+            injections_query: tree_sitter_lua::INJECTIONS_QUERY,
+            locals_query: tree_sitter_lua::LOCALS_QUERY,
+        },
+        #[cfg(feature = "lang-markdown")]
+        LangDef {
+            extensions: &["md", "markdown"],
+            name: "markdown",
+            language: tree_sitter_md::LANGUAGE.into(),
+            highlights_query: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+            injections_query: tree_sitter_md::INJECTION_QUERY_BLOCK,
+            locals_query: "",
+        },
+        #[cfg(feature = "lang-zig")]
+        LangDef {
+            extensions: &["zig"],
+            name: "zig",
+            language: tree_sitter_zig::LANGUAGE.into(),
+            highlights_query: tree_sitter_zig::HIGHLIGHTS_QUERY,
+            injections_query: tree_sitter_zig::INJECTIONS_QUERY,
+            locals_query: "",
+        },
     ]
 }
 
