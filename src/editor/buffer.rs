@@ -45,6 +45,21 @@ pub struct VisualLine {
     pub starts_logical_line: bool,
 }
 
+/// Cached prefix-sum array for visual line layout, enabling O(log n) lookups.
+///
+/// `prefix_sums[i]` is the total number of visual lines in logical lines `0..i`.
+/// So `prefix_sums[0] == 0` always, and `prefix_sums.last()` is the total visual
+/// line count of the buffer.
+struct VisualLineCache {
+    /// Content fingerprint — invalidated when char or line count changes.
+    len_chars: usize,
+    len_lines: usize,
+    /// The wrap column that was used to build this cache.
+    chars_per_visual_line: usize,
+    /// Cumulative visual-line counts: length is `len_lines + 1`.
+    prefix_sums: Vec<usize>,
+}
+
 /// A single editor buffer backed by a Rope data structure
 pub struct Buffer {
     /// The text content
@@ -82,6 +97,8 @@ pub struct Buffer {
     pub large_file: Option<LargeFileState>,
     /// Whether soft line wrapping is enabled
     pub wrap_enabled: bool,
+    /// Lazily-built visual line layout cache for fast scroll calculations.
+    layout_cache: std::cell::RefCell<Option<VisualLineCache>>,
 }
 
 #[derive(Clone, Debug)]
@@ -607,6 +624,7 @@ impl Buffer {
             is_binary: false,
             large_file: None,
             wrap_enabled: true, // default on; overridden by AppConfig on load
+            layout_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -702,6 +720,7 @@ impl Buffer {
                     is_binary: true,
                     large_file: None,
                     wrap_enabled: true,
+                    layout_cache: std::cell::RefCell::new(None),
                 });
             }
         }
@@ -738,6 +757,7 @@ impl Buffer {
                 is_binary: true,
                 large_file: None,
                 wrap_enabled: true,
+                layout_cache: std::cell::RefCell::new(None),
             });
         }
 
@@ -772,6 +792,7 @@ impl Buffer {
             is_binary: false,
             large_file: None,
             wrap_enabled: true, // default on; overridden by AppConfig after open
+            layout_cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -801,6 +822,7 @@ impl Buffer {
             is_binary: false,
             large_file: Some(large_file),
             wrap_enabled: false,
+            layout_cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -831,6 +853,7 @@ impl Buffer {
                 is_binary: false,
                 large_file: None,
                 wrap_enabled: state.wrap_enabled,
+                layout_cache: std::cell::RefCell::new(None),
             }
         } else if let Some(path) = state.file_path.as_deref() {
             if !path.exists() {
@@ -2447,15 +2470,68 @@ impl Buffer {
         }
     }
 
+    /// Ensure the visual-line prefix-sum cache is up to date for the given wrap column.
+    ///
+    /// The cache is keyed on `(rope.len_chars(), rope.len_lines(), chars_per_visual_line)`.
+    /// Any content edit changes at least one of the first two values, so the cache is
+    /// automatically invalidated and rebuilt on the next access.
+    fn ensure_layout_cache(&self, chars_per_visual_line: usize) {
+        let needs_rebuild = {
+            let cache = self.layout_cache.borrow();
+            match cache.as_ref() {
+                Some(c) => {
+                    c.len_chars != self.rope.len_chars()
+                        || c.len_lines != self.rope.len_lines()
+                        || c.chars_per_visual_line != chars_per_visual_line
+                }
+                None => true,
+            }
+        };
+
+        if needs_rebuild {
+            let len_chars = self.rope.len_chars();
+            let len_lines = self.rope.len_lines();
+            let mut prefix_sums = Vec::with_capacity(len_lines + 1);
+            prefix_sums.push(0usize);
+            for i in 0..len_lines {
+                let line_len = Self::line_len_without_ending(self.rope.line(i));
+                // `ensure_layout_cache` is only called when wrapping is enabled
+                // (chars_per_visual_line != usize::MAX), so empty lines still
+                // contribute 1 visual line.
+                let vl = if line_len == 0 {
+                    1
+                } else {
+                    line_len.div_ceil(chars_per_visual_line)
+                };
+                prefix_sums.push(prefix_sums.last().unwrap() + vl);
+            }
+            *self.layout_cache.borrow_mut() = Some(VisualLineCache {
+                len_chars,
+                len_lines,
+                chars_per_visual_line,
+                prefix_sums,
+            });
+        }
+    }
+
     pub fn visual_line_count(&self, wrap_width: Option<f32>, char_width: f32) -> usize {
         let chars_per_visual_line = self.chars_per_visual_line(wrap_width, char_width);
 
-        (0..self.rope.len_lines())
-            .map(|logical_line| {
-                let line_len = Self::line_len_without_ending(self.rope.line(logical_line));
-                self.visual_lines_for_len(line_len, chars_per_visual_line)
-            })
-            .sum::<usize>()
+        // Fast path: wrapping disabled → one visual line per logical line (O(1) via ropey).
+        if chars_per_visual_line == usize::MAX {
+            return self.rope.len_lines().max(1);
+        }
+
+        // Wrap enabled: use cached prefix-sum total (O(1) after first build).
+        self.ensure_layout_cache(chars_per_visual_line);
+        let cache = self.layout_cache.borrow();
+        cache
+            .as_ref()
+            .unwrap()
+            .prefix_sums
+            .last()
+            .copied()
+            .unwrap_or(1)
             .max(1)
     }
 
@@ -2471,40 +2547,75 @@ impl Buffer {
         }
 
         let chars_per_visual_line = self.chars_per_visual_line(wrap_width, char_width);
-        let mut visual_line_idx = 0usize;
+
+        // Fast path: wrapping disabled → visual line index == logical line index.
+        // Jump directly to the start line in O(log n) via ropey, avoiding a full scan.
+        if chars_per_visual_line == usize::MAX {
+            let total = self.rope.len_lines();
+            let start = start_visual_line.min(total);
+            let mut visible = Vec::with_capacity(max_visual_lines);
+            for logical_line in start..total {
+                let line = self.rope.line(logical_line);
+                let line_start_char = self.rope.line_to_char(logical_line);
+                let line_len = Self::line_len_without_ending(line);
+                visible.push(VisualLine {
+                    logical_line,
+                    line_start_char,
+                    start_char: line_start_char,
+                    end_char: line_start_char + line_len,
+                    starts_logical_line: true,
+                });
+                if visible.len() == max_visual_lines {
+                    break;
+                }
+            }
+            return visible;
+        }
+
+        // Wrap enabled: use prefix-sum cache for O(log n) start-line lookup.
+        self.ensure_layout_cache(chars_per_visual_line);
+        let cache_ref = self.layout_cache.borrow();
+        let cache = cache_ref.as_ref().unwrap();
+
+        // Binary search: find the logical line that contains `start_visual_line`.
+        // prefix_sums[i] = cumulative visual lines for logical lines 0..i.
+        let idx = cache
+            .prefix_sums
+            .partition_point(|&s| s <= start_visual_line);
+        // idx is in [1, len_lines+1] because prefix_sums[0]==0 <= start_visual_line always.
+        let start_logical = idx.saturating_sub(1).min(cache.len_lines.saturating_sub(1));
+
         let mut visible = Vec::with_capacity(max_visual_lines);
 
-        for logical_line in 0..self.rope.len_lines() {
+        for logical_line in start_logical..self.rope.len_lines() {
             let line = self.rope.line(logical_line);
             let line_start_char = self.rope.line_to_char(logical_line);
             let line_len = Self::line_len_without_ending(line);
             let visual_segments = self.visual_lines_for_len(line_len, chars_per_visual_line);
 
-            for segment in 0..visual_segments {
-                if visual_line_idx >= start_visual_line && visible.len() < max_visual_lines {
-                    let start_col = if chars_per_visual_line == usize::MAX {
-                        0
-                    } else {
-                        segment * chars_per_visual_line
-                    };
-                    let end_col = if line_len == 0 {
-                        0
-                    } else if chars_per_visual_line == usize::MAX {
-                        line_len
-                    } else {
-                        (start_col + chars_per_visual_line).min(line_len)
-                    };
+            // For the first logical line, skip segments that precede start_visual_line.
+            let logical_visual_start = cache.prefix_sums[logical_line];
+            let seg_start = if logical_line == start_logical {
+                start_visual_line.saturating_sub(logical_visual_start)
+            } else {
+                0
+            };
 
-                    visible.push(VisualLine {
-                        logical_line,
-                        line_start_char,
-                        start_char: line_start_char + start_col,
-                        end_char: line_start_char + end_col,
-                        starts_logical_line: segment == 0,
-                    });
-                }
+            for segment in seg_start..visual_segments {
+                let start_col = segment * chars_per_visual_line;
+                let end_col = if line_len == 0 {
+                    0
+                } else {
+                    (start_col + chars_per_visual_line).min(line_len)
+                };
 
-                visual_line_idx += 1;
+                visible.push(VisualLine {
+                    logical_line,
+                    line_start_char,
+                    start_char: line_start_char + start_col,
+                    end_char: line_start_char + end_col,
+                    starts_logical_line: segment == 0,
+                });
                 if visible.len() == max_visual_lines {
                     return visible;
                 }
@@ -2529,11 +2640,12 @@ impl Buffer {
             return (logical_line, col);
         }
 
-        let mut visual_line = 0usize;
-        for prior_line in 0..logical_line {
-            let line_len = Self::line_len_without_ending(self.rope.line(prior_line));
-            visual_line += self.visual_lines_for_len(line_len, chars_per_visual_line);
-        }
+        // Use cached prefix sums for O(1) visual-line lookup instead of O(n) loop.
+        self.ensure_layout_cache(chars_per_visual_line);
+        let cache_ref = self.layout_cache.borrow();
+        let cache = cache_ref.as_ref().unwrap();
+        let safe_idx = logical_line.min(cache.prefix_sums.len() - 1);
+        let visual_line = cache.prefix_sums[safe_idx];
 
         let line_start_char = self.rope.line_to_char(logical_line);
         let line_len = Self::line_len_without_ending(self.rope.line(logical_line));
