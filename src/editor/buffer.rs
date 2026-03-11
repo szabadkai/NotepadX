@@ -2523,6 +2523,24 @@ impl Buffer {
 
     // --- Word Selection ---
 
+    /// Select the entire line under the cursor
+    pub fn select_line_at_cursor(&mut self) {
+        let len = self.rope.len_chars();
+        if len == 0 {
+            return;
+        }
+        let pos = self.cursor().min(len.saturating_sub(1));
+        let line = self.rope.char_to_line(pos);
+        let start = self.rope.line_to_char(line);
+        let end = if line + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line + 1)
+        } else {
+            len
+        };
+        self.set_selection_anchor(Some(start));
+        self.set_cursor(end);
+    }
+
     /// Select the word under the cursor
     pub fn select_word_at_cursor(&mut self) {
         let len = self.rope.len_chars();

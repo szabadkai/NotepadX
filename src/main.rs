@@ -71,10 +71,11 @@ struct App {
     mouse_pos: (f64, f64),
     is_mouse_down: bool,
 
-    // Double-click detection
+    // Multi-click detection (double / triple)
     last_click_time: std::time::Instant,
     last_click_pos: (f64, f64),
-    // Suppress drag selection after double-click (word was already selected)
+    click_count: u8,
+    // Suppress drag selection after double/triple-click
     suppress_drag: bool,
 
     // Animation
@@ -120,6 +121,7 @@ impl App {
             is_mouse_down: false,
             last_click_time: std::time::Instant::now(),
             last_click_pos: (0.0, 0.0),
+            click_count: 0,
             suppress_drag: false,
             needs_redraw: true,
             last_large_file_index_version: None,
@@ -466,7 +468,7 @@ impl App {
         (w, h)
     }
 
-    fn handle_mouse_click(&mut self, is_double: bool) {
+    fn handle_mouse_click(&mut self, click_count: u8) {
         let (x, y) = self.mouse_pos;
         let scale = self
             .window
@@ -561,7 +563,7 @@ impl App {
             let alt = self.modifiers.alt_key();
             let cmd = self.modifiers.super_key();
 
-            if (alt || cmd) && !shift && !is_double {
+            if (alt || cmd) && !shift && click_count == 1 {
                 // Alt+Click or Cmd+Click: add a new cursor at the clicked position
                 buffer.add_cursor(new_pos);
                 // Suppress drag so the newly added cursor isn't disrupted
@@ -579,8 +581,12 @@ impl App {
             }
 
             // Double-click: select word
-            if is_double {
+            if click_count == 2 {
                 buffer.select_word_at_cursor();
+            }
+            // Triple-click: select entire line
+            if click_count >= 3 {
+                buffer.select_line_at_cursor();
             }
         }
         self.needs_redraw = true;
@@ -2424,9 +2430,14 @@ impl ApplicationHandler for App {
                         let dist = ((cx - self.last_click_pos.0).powi(2)
                             + (cy - self.last_click_pos.1).powi(2))
                         .sqrt();
-                        let is_double = elapsed.as_millis() < 400 && dist < 5.0;
-                        self.suppress_drag = is_double;
-                        self.handle_mouse_click(is_double);
+                        let is_multi = elapsed.as_millis() < 400 && dist < 5.0;
+                        if is_multi {
+                            self.click_count = (self.click_count + 1).min(3);
+                        } else {
+                            self.click_count = 1;
+                        }
+                        self.suppress_drag = self.click_count >= 2;
+                        self.handle_mouse_click(self.click_count);
                         self.last_click_time = now;
                         self.last_click_pos = (cx, cy);
                     } else if !self.is_mouse_down {
