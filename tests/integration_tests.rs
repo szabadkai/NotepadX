@@ -657,3 +657,73 @@ fn test_word_selection_at_boundaries() {
     assert_eq!(buffer2.selection_anchor(), Some(0));
     assert_eq!(buffer2.cursor(), 5);
 }
+
+/// Performance regression test: visual_line_count and visual_lines must
+/// return consistent results whether accessed once or many times in a row
+/// (verifying the cache does not return stale data).
+#[test]
+fn test_visual_line_cache_consistency() {
+    let mut buffer = Buffer::new();
+    // Build a buffer with lines of varying lengths so wrap produces different
+    // visual-line counts per logical line.
+    let content: String = (0..200)
+        .map(|i| {
+            // alternate short and long lines
+            if i % 2 == 0 {
+                format!("line {i}\n")
+            } else {
+                format!("{}\n", "x".repeat(200))
+            }
+        })
+        .collect();
+    buffer.rope = ropey::Rope::from_str(&content);
+    buffer.wrap_enabled = true;
+
+    let wrap_width = Some(800.0f32);
+    let char_width = 10.0f32;
+
+    let count_first = buffer.visual_line_count(wrap_width, char_width);
+
+    // Calling again with the same parameters must return the identical value
+    // (cache hit path).
+    let count_second = buffer.visual_line_count(wrap_width, char_width);
+    assert_eq!(
+        count_first, count_second,
+        "visual_line_count should be stable across consecutive calls"
+    );
+
+    // visual_lines at various offsets must be consistent with visual_line_count.
+    let lines_at_0 = buffer.visual_lines(0, 10, wrap_width, char_width);
+    assert!(!lines_at_0.is_empty());
+
+    // Jump deep into the buffer — the cache must allow this without scanning
+    // from the beginning.
+    let mid = count_first / 2;
+    let lines_mid = buffer.visual_lines(mid, 10, wrap_width, char_width);
+    assert!(!lines_mid.is_empty());
+
+    // The first line at mid must be beyond the first line at 0.
+    if let (Some(first), Some(second)) = (lines_at_0.first(), lines_mid.first()) {
+        assert!(
+            second.logical_line >= first.logical_line,
+            "lines at mid-scroll must start at a later logical line"
+        );
+    }
+
+    // No-wrap path: visual_line_count == rope.len_lines()
+    buffer.wrap_enabled = false;
+    let nowrap_count = buffer.visual_line_count(None, char_width);
+    assert_eq!(
+        nowrap_count,
+        buffer.rope.len_lines(),
+        "no-wrap visual_line_count must equal rope.len_lines()"
+    );
+
+    // No-wrap visual_lines must skip directly to start_visual_line.
+    let lines_100 = buffer.visual_lines(100, 5, None, char_width);
+    assert_eq!(lines_100.len(), 5);
+    assert_eq!(
+        lines_100[0].logical_line, 100,
+        "no-wrap: first returned line must be logical line 100"
+    );
+}
