@@ -34,6 +34,7 @@ pub enum CommandId {
     Settings,
     ChangeLanguage,
     ChangeLineEnding,
+    EnableLargeFileEdit,
 }
 
 /// Get all available commands
@@ -168,6 +169,11 @@ pub fn all_commands() -> Vec<Command> {
             name: "Change Line Ending",
             shortcut: "",
             id: CommandId::ChangeLineEnding,
+        },
+        Command {
+            name: "Large File: Enable Edit Mode",
+            shortcut: "",
+            id: CommandId::EnableLargeFileEdit,
         },
     ]
 }

@@ -219,90 +219,93 @@ impl FindState {
         max_results: usize,
         max_scan_bytes: Option<u64>,
     ) {
+        // In edit mode the full file is in the rope, so use the normal rope search path.
         if let Some(large_file) = buffer.large_file.as_ref() {
-            self.stop_search_worker();
-            self.reset_results();
-            self.search_complete = false;
-            self.regex_error = None;
+            if !buffer.large_file_edit_mode {
+                self.stop_search_worker();
+                self.reset_results();
+                self.search_complete = false;
+                self.regex_error = None;
 
-            if query.is_empty() {
-                self.search_complete = true;
-                return;
-            }
-
-            let (effective_query, use_regex) = self.effective_query(query);
-
-            if use_regex {
-                if let Err(err) = RegexBuilder::new(&effective_query)
-                    .case_insensitive(!self.case_sensitive)
-                    .build()
-                {
-                    self.regex_error = Some(err.to_string());
+                if query.is_empty() {
                     self.search_complete = true;
                     return;
                 }
-            }
 
-            let effective_max_scan_bytes =
-                if large_file.file_size_bytes <= FULL_SYNC_SEARCH_THRESHOLD_BYTES {
-                    None
-                } else {
-                    max_scan_bytes
-                };
+                let (effective_query, use_regex) = self.effective_query(query);
 
-            let generation = self.search_generation.wrapping_add(1);
-            self.search_generation = generation;
-            let (sender, receiver) = mpsc::channel();
-            let cancel = Arc::new(AtomicBool::new(false));
-            let progress = Arc::new(AtomicU64::new(0));
-            let incremental = Arc::new(Mutex::new(Vec::new()));
-            self.bytes_scanned = Arc::clone(&progress);
-            self.search_file_size = large_file.file_size_bytes;
-            self.incremental_results = Arc::clone(&incremental);
-            let search_options = SearchOptions {
-                case_sensitive: self.case_sensitive,
-                use_regex,
-                whole_word: self.whole_word,
-                max_results,
-                max_scan_bytes: effective_max_scan_bytes,
-                bytes_scanned: Some(Arc::clone(&progress)),
-                incremental_results: Some(Arc::clone(&incremental)),
-                ..SearchOptions::default()
-            };
-            let search_path_buf = large_file.path.clone();
-            let query = effective_query;
-            let worker_cancel = Arc::clone(&cancel);
-            let handle = std::thread::spawn(move || {
-                let result = search_path_with_cancel(
-                    &search_path_buf,
-                    &query,
-                    &search_options,
-                    Some(worker_cancel.as_ref()),
-                );
-
-                if worker_cancel.load(Ordering::Relaxed) {
-                    return;
+                if use_regex {
+                    if let Err(err) = RegexBuilder::new(&effective_query)
+                        .case_insensitive(!self.case_sensitive)
+                        .build()
+                    {
+                        self.regex_error = Some(err.to_string());
+                        self.search_complete = true;
+                        return;
+                    }
                 }
 
-                let search_result = match result {
-                    Ok(result) => result,
-                    Err(_) => crate::large_file::SearchResult {
-                        matches: Vec::new(),
-                        total_matches: 0,
-                        complete: true,
-                    },
+                let effective_max_scan_bytes =
+                    if large_file.file_size_bytes <= FULL_SYNC_SEARCH_THRESHOLD_BYTES {
+                        None
+                    } else {
+                        max_scan_bytes
+                    };
+
+                let generation = self.search_generation.wrapping_add(1);
+                self.search_generation = generation;
+                let (sender, receiver) = mpsc::channel();
+                let cancel = Arc::new(AtomicBool::new(false));
+                let progress = Arc::new(AtomicU64::new(0));
+                let incremental = Arc::new(Mutex::new(Vec::new()));
+                self.bytes_scanned = Arc::clone(&progress);
+                self.search_file_size = large_file.file_size_bytes;
+                self.incremental_results = Arc::clone(&incremental);
+                let search_options = SearchOptions {
+                    case_sensitive: self.case_sensitive,
+                    use_regex,
+                    whole_word: self.whole_word,
+                    max_results,
+                    max_scan_bytes: effective_max_scan_bytes,
+                    bytes_scanned: Some(Arc::clone(&progress)),
+                    incremental_results: Some(Arc::clone(&incremental)),
+                    ..SearchOptions::default()
                 };
+                let search_path_buf = large_file.path.clone();
+                let query = effective_query;
+                let worker_cancel = Arc::clone(&cancel);
+                let handle = std::thread::spawn(move || {
+                    let result = search_path_with_cancel(
+                        &search_path_buf,
+                        &query,
+                        &search_options,
+                        Some(worker_cancel.as_ref()),
+                    );
 
-                let _ = sender.send(SearchWorkerResult {
-                    generation,
-                    result: search_result,
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+
+                    let search_result = match result {
+                        Ok(result) => result,
+                        Err(_) => crate::large_file::SearchResult {
+                            matches: Vec::new(),
+                            total_matches: 0,
+                            complete: true,
+                        },
+                    };
+
+                    let _ = sender.send(SearchWorkerResult {
+                        generation,
+                        result: search_result,
+                    });
                 });
-            });
 
-            self.search_receiver = Some(receiver);
-            self.search_cancel = Some(cancel);
-            self.search_thread = Some(handle);
-            return;
+                self.search_receiver = Some(receiver);
+                self.search_cancel = Some(cancel);
+                self.search_thread = Some(handle);
+                return;
+            }
         }
 
         self.search(&buffer.rope, query);

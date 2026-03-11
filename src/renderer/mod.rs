@@ -1100,14 +1100,23 @@ impl Renderer {
         if overlay.is_active() && !overlay.find.matches.is_empty() {
             // For large files the rope only holds a window; translate file-level
             // byte offsets to window-relative offsets and skip out-of-range matches.
-            let window_start = buffer
-                .large_file
-                .as_ref()
-                .map(|lf| lf.window_start_byte as usize);
-            let window_end = buffer
-                .large_file
-                .as_ref()
-                .map(|lf| lf.window_end_byte as usize);
+            // In edit mode the full file is in the rope so no translation is needed.
+            let window_start = if !buffer.large_file_edit_mode {
+                buffer
+                    .large_file
+                    .as_ref()
+                    .map(|lf| lf.window_start_byte as usize)
+            } else {
+                None
+            };
+            let window_end = if !buffer.large_file_edit_mode {
+                buffer
+                    .large_file
+                    .as_ref()
+                    .map(|lf| lf.window_end_byte as usize)
+            } else {
+                None
+            };
 
             for (match_idx, m) in overlay.find.matches.iter().enumerate() {
                 // Compute rope-relative byte offsets
@@ -1274,10 +1283,15 @@ impl Renderer {
         if !overlay.find.matches.is_empty() {
             let scrollbar_x = width - SCROLLBAR_WIDTH * s;
             if let Some(lf) = buffer.large_file.as_ref() {
-                let file_size = lf.file_size_bytes as f32;
-                if file_size > 0.0 {
+                if buffer.large_file_edit_mode {
+                    // In edit mode the rope has the full file; use char-based ratios.
+                    let total_chars = buffer.rope.len_chars().max(1) as f32;
                     for m in overlay.find.matches.iter().take(500) {
-                        let ratio = m.start as f32 / file_size;
+                        let char_pos = buffer
+                            .rope
+                            .byte_to_char(m.start.min(buffer.rope.len_bytes()))
+                            as f32;
+                        let ratio = char_pos / total_chars;
                         let tick_y = editor_top + ratio * editor_height_px;
                         base_rects.push(Rect::flat(
                             scrollbar_x,
@@ -1291,6 +1305,26 @@ impl Renderer {
                                 theme.find_match_active.a.max(0.6),
                             ],
                         ));
+                    }
+                } else {
+                    let file_size = lf.file_size_bytes as f32;
+                    if file_size > 0.0 {
+                        for m in overlay.find.matches.iter().take(500) {
+                            let ratio = m.start as f32 / file_size;
+                            let tick_y = editor_top + ratio * editor_height_px;
+                            base_rects.push(Rect::flat(
+                                scrollbar_x,
+                                tick_y,
+                                SCROLLBAR_WIDTH * s,
+                                2.0 * s,
+                                [
+                                    theme.find_match_active.r,
+                                    theme.find_match_active.g,
+                                    theme.find_match_active.b,
+                                    theme.find_match_active.a.max(0.6),
+                                ],
+                            ));
+                        }
                     }
                 }
             } else {

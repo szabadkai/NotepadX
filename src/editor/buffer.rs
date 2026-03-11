@@ -95,6 +95,8 @@ pub struct Buffer {
     pub is_binary: bool,
     /// Whether this buffer is backed by a file-windowed large-file preview.
     pub large_file: Option<LargeFileState>,
+    /// Whether the full file has been loaded into the rope for editing (opt-in for large files).
+    pub large_file_edit_mode: bool,
     /// Whether soft line wrapping is enabled
     pub wrap_enabled: bool,
     /// Lazily-built visual line layout cache for fast scroll calculations.
@@ -623,6 +625,7 @@ impl Buffer {
             language_index: None,
             is_binary: false,
             large_file: None,
+            large_file_edit_mode: false,
             wrap_enabled: true, // default on; overridden by AppConfig on load
             layout_cache: std::cell::RefCell::new(None),
         }
@@ -719,6 +722,7 @@ impl Buffer {
                     language_index: None,
                     is_binary: true,
                     large_file: None,
+                    large_file_edit_mode: false,
                     wrap_enabled: true,
                     layout_cache: std::cell::RefCell::new(None),
                 });
@@ -756,6 +760,7 @@ impl Buffer {
                 language_index: None,
                 is_binary: true,
                 large_file: None,
+                large_file_edit_mode: false,
                 wrap_enabled: true,
                 layout_cache: std::cell::RefCell::new(None),
             });
@@ -791,6 +796,7 @@ impl Buffer {
             language_index: None,
             is_binary: false,
             large_file: None,
+            large_file_edit_mode: false,
             wrap_enabled: true, // default on; overridden by AppConfig after open
             layout_cache: std::cell::RefCell::new(None),
         })
@@ -821,6 +827,7 @@ impl Buffer {
             language_index: None,
             is_binary: false,
             large_file: Some(large_file),
+            large_file_edit_mode: false,
             wrap_enabled: false,
             layout_cache: std::cell::RefCell::new(None),
         })
@@ -852,6 +859,7 @@ impl Buffer {
                 language_index: None,
                 is_binary: false,
                 large_file: None,
+                large_file_edit_mode: false,
                 wrap_enabled: state.wrap_enabled,
                 layout_cache: std::cell::RefCell::new(None),
             }
@@ -898,7 +906,11 @@ impl Buffer {
     pub fn workspace_tab_state(&self) -> WorkspaceTabState {
         WorkspaceTabState {
             file_path: self.file_path.clone(),
-            contents: if self.file_path.is_none() || self.dirty {
+            contents: if self.large_file_edit_mode {
+                // Don't serialise hundreds of MB into session JSON;
+                // the file will be re-loaded from disk on restore.
+                None
+            } else if self.file_path.is_none() || self.dirty {
                 Some(self.rope.to_string())
             } else {
                 None
@@ -923,7 +935,71 @@ impl Buffer {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.is_binary || self.is_large_file()
+        self.is_binary || (self.is_large_file() && !self.large_file_edit_mode)
+    }
+
+    /// Load the entire large file into the rope for full editing.
+    /// This trades ~2-3x file-size memory for complete editing capability.
+    pub fn enable_large_file_edit_mode(
+        &mut self,
+        syntax: Option<&SyntaxHighlighter>,
+    ) -> Result<()> {
+        if !self.is_large_file() || self.large_file_edit_mode {
+            return Ok(());
+        }
+        let path = self
+            .file_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No file path set"))?
+            .clone();
+
+        // Preserve absolute cursor position before replacing the rope
+        let abs_byte = self
+            .large_file
+            .as_ref()
+            .map(|s| s.window_start_byte + self.rope.char_to_byte(self.cursor()) as u64)
+            .unwrap_or(0);
+
+        // Stream the full file into a rope (never materialises the whole String)
+        let file = std::fs::File::open(&path)?;
+        let reader = std::io::BufReader::new(file);
+        let rope = Rope::from_reader(reader)?;
+
+        // Detect line ending from first few lines of the full content
+        let line_ending = {
+            let sample: String = rope.lines().take(20).map(|l| l.to_string()).collect();
+            if sample.contains("\r\n") {
+                LineEnding::CrLf
+            } else {
+                LineEnding::Lf
+            }
+        };
+
+        self.rope = rope;
+        self.line_ending = line_ending;
+        self.large_file_edit_mode = true;
+        self.dirty = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.next_undo_group = 0;
+
+        // Restore cursor at absolute position
+        let abs_char = if abs_byte < self.rope.len_bytes() as u64 {
+            self.rope.byte_to_char(abs_byte as usize)
+        } else {
+            self.rope.len_chars().saturating_sub(1)
+        };
+        self.set_cursor(abs_char);
+        self.set_selection_anchor(None);
+        self.set_desired_col(None);
+
+        // Re-enable language detection (skipped when large file first opens)
+        if let Some(syntax) = syntax {
+            let filename = self.display_name();
+            self.language_index = syntax.detect_language(&filename);
+        }
+
+        Ok(())
     }
 
     pub fn large_file_index_version(&self) -> Option<u64> {
@@ -933,10 +1009,26 @@ impl Buffer {
     #[allow(dead_code)]
     pub fn current_large_file_byte_offset(&self) -> Option<u64> {
         let state = self.large_file.as_ref()?;
-        Some(state.window_start_byte + self.rope.char_to_byte(self.cursor()) as u64)
+        if self.large_file_edit_mode {
+            Some(self.rope.char_to_byte(self.cursor()) as u64)
+        } else {
+            Some(state.window_start_byte + self.rope.char_to_byte(self.cursor()) as u64)
+        }
     }
 
     pub fn focus_large_file_offset(&mut self, byte_offset: u64, window_bytes: usize) -> Result<()> {
+        if self.large_file_edit_mode {
+            // In edit mode the full file is in the rope; just move the cursor.
+            let char_pos = if (byte_offset as usize) < self.rope.len_bytes() {
+                self.rope.byte_to_char(byte_offset as usize)
+            } else {
+                self.rope.len_chars().saturating_sub(1)
+            };
+            self.set_cursor(char_pos);
+            self.set_selection_anchor(None);
+            self.set_desired_col(None);
+            return Ok(());
+        }
         let Some(state) = self.large_file.as_mut() else {
             return Ok(());
         };
@@ -955,8 +1047,10 @@ impl Buffer {
 
     pub fn goto_line_zero_based(&mut self, target_line: usize, window_bytes: usize) -> Result<()> {
         if let Some(state) = self.large_file.as_mut() {
-            let byte_offset = state.byte_offset_for_line(target_line)?;
-            return self.focus_large_file_offset(byte_offset, window_bytes);
+            if !self.large_file_edit_mode {
+                let byte_offset = state.byte_offset_for_line(target_line)?;
+                return self.focus_large_file_offset(byte_offset, window_bytes);
+            }
         }
 
         let total = self.line_count();
@@ -986,6 +1080,9 @@ impl Buffer {
     }
 
     fn replace_large_file_window(&mut self, text: String, cursor: usize, scroll_line: usize) {
+        if self.large_file_edit_mode {
+            return;
+        }
         self.rope = Rope::from_str(&text);
         self.set_cursor(cursor.min(self.rope.len_chars()));
         self.set_selection_anchor(None);
@@ -997,6 +1094,9 @@ impl Buffer {
     }
 
     fn shift_large_file_window_forward(&mut self, visible_lines: usize) -> Result<bool> {
+        if self.large_file_edit_mode {
+            return Ok(false);
+        }
         let Some(window_bytes) = self.large_file_window_bytes() else {
             return Ok(false);
         };
@@ -1028,6 +1128,9 @@ impl Buffer {
     }
 
     fn shift_large_file_window_backward(&mut self, visible_lines: usize) -> Result<bool> {
+        if self.large_file_edit_mode {
+            return Ok(false);
+        }
         let Some(window_bytes) = self.large_file_window_bytes() else {
             return Ok(false);
         };
@@ -1072,12 +1175,11 @@ impl Buffer {
 
     /// Save the buffer to its file path
     pub fn save(&mut self) -> Result<()> {
-        if self.is_large_file() {
+        if self.is_large_file() && !self.large_file_edit_mode {
             anyhow::bail!("Large-file save is not implemented yet")
         }
         if let Some(ref path) = self.file_path {
-            let text = self.rope.to_string();
-            std::fs::write(path, text.as_bytes())?;
+            self.write_rope_to_path(path)?;
             self.dirty = false;
             Ok(())
         } else {
@@ -1087,14 +1189,38 @@ impl Buffer {
 
     /// Save to a specific path
     pub fn save_as(&mut self, path: PathBuf) -> Result<()> {
-        if self.is_large_file() {
+        if self.is_large_file() && !self.large_file_edit_mode {
             anyhow::bail!("Large-file save is not implemented yet")
         }
-        let text = self.rope.to_string();
-        std::fs::write(&path, text.as_bytes())?;
+        self.write_rope_to_path(&path)?;
         self.file_path = Some(path);
         self.dirty = false;
         Ok(())
+    }
+
+    /// Write the rope to a path. For large files, writes to a temp file first
+    /// then atomically renames to prevent data loss on interrupted writes.
+    fn write_rope_to_path(&self, path: &std::path::Path) -> Result<()> {
+        if self.large_file_edit_mode {
+            // Atomic write: temp file in the same directory, then rename
+            let parent = path.parent().unwrap_or(std::path::Path::new("."));
+            let tmp_path = parent.join(format!(".notepadx-save-{}.tmp", std::process::id()));
+            {
+                let file = std::fs::File::create(&tmp_path)?;
+                let mut writer = std::io::BufWriter::new(file);
+                self.rope.write_to(&mut writer)?;
+            }
+            std::fs::rename(&tmp_path, path).or_else(|_| {
+                // rename can fail across filesystems; fall back to copy + remove
+                std::fs::copy(&tmp_path, path)?;
+                std::fs::remove_file(&tmp_path)?;
+                Ok(())
+            })
+        } else {
+            let text = self.rope.to_string();
+            std::fs::write(path, text.as_bytes())?;
+            Ok(())
+        }
     }
 
     /// Insert text at the cursor position
@@ -2352,7 +2478,11 @@ impl Buffer {
 
     pub fn display_cursor_line(&self) -> usize {
         if let Some(state) = self.large_file.as_ref() {
-            state.window_start_line + self.cursor_line()
+            if self.large_file_edit_mode {
+                self.cursor_line()
+            } else {
+                state.window_start_line + self.cursor_line()
+            }
         } else {
             self.cursor_line()
         }
@@ -2372,13 +2502,20 @@ impl Buffer {
 
     pub fn display_line_count(&self) -> Option<usize> {
         if let Some(state) = self.large_file.as_ref() {
-            Some(state.best_known_line_count(self.line_count()))
+            if self.large_file_edit_mode {
+                Some(self.line_count())
+            } else {
+                Some(state.best_known_line_count(self.line_count()))
+            }
         } else {
             Some(self.line_count())
         }
     }
 
     pub fn display_line_count_is_exact(&self) -> bool {
+        if self.large_file_edit_mode {
+            return true;
+        }
         self.large_file
             .as_ref()
             .map(|state| state.has_complete_line_count())
@@ -2387,7 +2524,11 @@ impl Buffer {
 
     pub fn display_line_number(&self, logical_line: usize) -> usize {
         if let Some(state) = self.large_file.as_ref() {
-            state.window_start_line + logical_line
+            if self.large_file_edit_mode {
+                logical_line
+            } else {
+                state.window_start_line + logical_line
+            }
         } else {
             logical_line
         }

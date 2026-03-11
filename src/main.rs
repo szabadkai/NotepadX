@@ -1275,7 +1275,7 @@ impl App {
                 if self.overlay.active == ActiveOverlay::FindReplace && self.overlay.focus_replace {
                     if cmd_or_ctrl && shift {
                         // Cmd+Shift+Enter => replace all matches
-                        if !self.editor.active().is_large_file() {
+                        if !self.editor.active().is_read_only() {
                             let replacement = self.overlay.replace_input.clone();
                             let mut new_rope = self.editor.active().rope.clone();
                             let replaced =
@@ -1294,7 +1294,7 @@ impl App {
                     } else {
                         // Replace current match
                         let replacement = self.overlay.replace_input.clone();
-                        if !self.editor.active().is_large_file() {
+                        if !self.editor.active().is_read_only() {
                             let mut preview_rope = self.editor.active().rope.clone();
                             if let Some((removed, start_byte, inserted)) = self
                                 .overlay
@@ -1619,6 +1619,19 @@ impl App {
                     editor::buffer::LineEnding::Lf => 0,
                     editor::buffer::LineEnding::CrLf => 1,
                 };
+            }
+            CommandId::EnableLargeFileEdit => {
+                if self.editor.active().is_large_file()
+                    && !self.editor.active().large_file_edit_mode
+                {
+                    if let Err(e) = self
+                        .editor
+                        .active_mut()
+                        .enable_large_file_edit_mode(Some(&self.syntax))
+                    {
+                        log::error!("Failed to enable large-file edit mode: {}", e);
+                    }
+                }
             }
         }
         self.needs_redraw = true;
