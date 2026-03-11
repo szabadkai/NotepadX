@@ -38,6 +38,7 @@ pub const OVERLAY_FONT_SIZE: f32 = 14.0;
 pub const OVERLAY_LINE_HEIGHT: f32 = 20.0;
 pub const OVERLAY_CHAR_WIDTH: f32 = OVERLAY_FONT_SIZE * 0.6;
 pub const COMMAND_PALETTE_MAX_VISIBLE_ITEMS: usize = 16;
+pub const PICKER_MAX_VISIBLE_ITEMS: usize = 12;
 
 pub fn command_palette_visible_items(item_count: usize) -> usize {
     item_count.min(COMMAND_PALETTE_MAX_VISIBLE_ITEMS)
@@ -45,6 +46,14 @@ pub fn command_palette_visible_items(item_count: usize) -> usize {
 
 pub fn command_palette_panel_height(item_count: usize) -> f32 {
     (1 + command_palette_visible_items(item_count)) as f32 * OVERLAY_LINE_HEIGHT + 12.0
+}
+
+pub fn picker_visible_items(item_count: usize) -> usize {
+    item_count.min(PICKER_MAX_VISIBLE_ITEMS)
+}
+
+pub fn picker_panel_height(item_count: usize) -> f32 {
+    (1 + picker_visible_items(item_count)) as f32 * OVERLAY_LINE_HEIGHT + 12.0
 }
 
 /// Status bar character width (12pt font)
@@ -1006,7 +1015,9 @@ impl Renderer {
                 }
                 crate::overlay::ActiveOverlay::Help => 600.0,
                 crate::overlay::ActiveOverlay::Settings => 360.0,
-                crate::overlay::ActiveOverlay::LanguagePicker => 260.0,
+                crate::overlay::ActiveOverlay::LanguagePicker => {
+                    picker_panel_height(PICKER_MAX_VISIBLE_ITEMS)
+                }
                 crate::overlay::ActiveOverlay::LineEndingPicker => 100.0,
                 _ => 32.0,
             };
@@ -1236,17 +1247,28 @@ impl Renderer {
                             .collect()
                     };
                     let current_lang = buffer.language_index;
-                    for (idx, (item_idx, name)) in filtered.iter().take(10).enumerate() {
+                    let selected = overlay
+                        .picker_selected
+                        .min(filtered.len().saturating_sub(1));
+                    let max_visible = picker_visible_items(filtered.len());
+                    let scroll_offset = if selected >= max_visible {
+                        selected - max_visible + 1
+                    } else {
+                        0
+                    };
+                    let visible_items: Vec<_> = filtered
+                        .iter()
+                        .skip(scroll_offset)
+                        .take(max_visible)
+                        .collect();
+                    for (row_idx, (item_idx, name)) in visible_items.iter().enumerate() {
+                        let idx = scroll_offset + row_idx;
                         let is_current = match current_lang {
                             Some(li) => *item_idx == li + 1,
                             None => *item_idx == 0,
                         };
                         let marker = if is_current { "● " } else { "  " };
-                        let sel = if idx == overlay.picker_selected {
-                            "▸ "
-                        } else {
-                            "  "
-                        };
+                        let sel = if idx == selected { "▸ " } else { "  " };
                         text.push_str(&format!("{}{}{}\n", sel, marker, name));
                     }
                     text
@@ -1932,7 +1954,9 @@ impl Renderer {
                 }
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
-                crate::overlay::ActiveOverlay::LanguagePicker => 260.0 * s,
+                crate::overlay::ActiveOverlay::LanguagePicker => {
+                    picker_panel_height(PICKER_MAX_VISIBLE_ITEMS) * s
+                }
                 crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * s,
                 crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
                 _ => 40.0 * s,
@@ -2537,7 +2561,9 @@ impl Renderer {
                 }
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
-                crate::overlay::ActiveOverlay::LanguagePicker => 260.0 * s,
+                crate::overlay::ActiveOverlay::LanguagePicker => {
+                    picker_panel_height(PICKER_MAX_VISIBLE_ITEMS) * s
+                }
                 crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * s,
                 crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
                 _ => 40.0 * s,

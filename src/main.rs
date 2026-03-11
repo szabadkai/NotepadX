@@ -1090,7 +1090,9 @@ impl App {
             ),
             ActiveOverlay::Help => 600.0,
             ActiveOverlay::Settings => 360.0,
-            ActiveOverlay::LanguagePicker => 260.0,
+            ActiveOverlay::LanguagePicker => {
+                renderer::picker_panel_height(renderer::PICKER_MAX_VISIBLE_ITEMS)
+            }
             ActiveOverlay::EncodingPicker => 180.0,
             ActiveOverlay::LineEndingPicker => 100.0,
             _ => 40.0,
