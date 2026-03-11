@@ -11,6 +11,15 @@ use wgpu::util::DeviceExt;
 
 /// Padding and layout constants
 pub const GUTTER_WIDTH: f32 = 60.0;
+
+/// Returns the effective gutter width based on whether line numbers are shown.
+pub fn effective_gutter_width(show_line_numbers: bool) -> f32 {
+    if show_line_numbers {
+        GUTTER_WIDTH
+    } else {
+        0.0
+    }
+}
 pub const LINE_PADDING_LEFT: f32 = 8.0;
 pub const TAB_BAR_HEIGHT: f32 = 32.0;
 pub const TAB_FONT_SIZE: f32 = 13.0;
@@ -248,6 +257,9 @@ pub struct Renderer {
 
     /// Tab drag insertion indicator: logical x position of the drop line (None = no drag)
     pub tab_drag_indicator_x: Option<f32>,
+
+    /// Effective gutter width (0 when line numbers are hidden)
+    pub effective_gutter_width: f32,
 }
 
 impl Renderer {
@@ -333,6 +345,7 @@ impl Renderer {
             status_segments: Vec::new(),
             hovered_status_segment: None,
             tab_drag_indicator_x: None,
+            effective_gutter_width: GUTTER_WIDTH,
         }
     }
 
@@ -404,7 +417,7 @@ impl Renderer {
         let height = self.height as f32;
         let tab_bar_height = TAB_BAR_HEIGHT * s;
         let status_bar_height = STATUS_BAR_HEIGHT * s;
-        let gutter_width = GUTTER_WIDTH * s;
+        let gutter_width = self.effective_gutter_width * s;
         let line_padding_left = LINE_PADDING_LEFT * s;
         let char_width = self.current_font_size * 0.6 * s;
         let editor_left = gutter_width + line_padding_left;
@@ -483,6 +496,9 @@ impl Renderer {
 
         // Update stored font size for rendering calculations
         self.current_font_size = font_size;
+
+        // Update effective gutter width based on show_line_numbers setting
+        self.effective_gutter_width = effective_gutter_width(config.show_line_numbers);
 
         // Update editor buffer metrics if font size changed
         self.editor_buffer
@@ -576,9 +592,10 @@ impl Renderer {
             .shape_until_scroll(&mut self.font_system, false);
 
         // --- Gutter (line numbers) ---
+        let gutter_w = self.effective_gutter_width;
         self.gutter_buffer.set_size(
             &mut self.font_system,
-            Some(GUTTER_WIDTH),
+            Some(gutter_w.max(1.0)),
             Some(editor_height),
         );
         let char_width = font_size * 0.6;
@@ -586,7 +603,7 @@ impl Renderer {
         let scroll_line = buffer.scroll_y.floor() as usize;
 
         // --- Editor Text (with syntax highlighting) ---
-        let editor_left = GUTTER_WIDTH + LINE_PADDING_LEFT;
+        let editor_left = gutter_w + LINE_PADDING_LEFT;
         let editor_width = width - editor_left - SCROLLBAR_WIDTH;
         // Use finite width for line wrapping, or None for unlimited (horizontal scroll)
         let buf_width = if buffer.wrap_enabled {
@@ -597,28 +614,37 @@ impl Renderer {
         let visible_visual_lines =
             buffer.visual_lines(scroll_line, visible_lines + 2, buf_width, char_width);
 
-        let mut gutter_text = String::new();
-        for line in &visible_visual_lines {
-            if line.starts_logical_line {
-                gutter_text.push_str(&format!(
-                    "{:>4}\n",
-                    buffer.display_line_number(line.logical_line) + 1
-                ));
-            } else {
-                gutter_text.push_str("    \n");
+        if config.show_line_numbers {
+            let mut gutter_text = String::new();
+            for line in &visible_visual_lines {
+                if line.starts_logical_line {
+                    gutter_text.push_str(&format!(
+                        "{:>4}\n",
+                        buffer.display_line_number(line.logical_line) + 1
+                    ));
+                } else {
+                    gutter_text.push_str("    \n");
+                }
             }
+            for _ in visible_visual_lines.len()..visible_lines {
+                gutter_text.push_str("   ~\n");
+            }
+            self.gutter_buffer.set_text(
+                &mut self.font_system,
+                &gutter_text,
+                Attrs::new()
+                    .family(Family::Name("JetBrains Mono"))
+                    .color(theme.gutter_fg.to_glyphon()),
+                Shaping::Advanced,
+            );
+        } else {
+            self.gutter_buffer.set_text(
+                &mut self.font_system,
+                "",
+                Attrs::new().family(Family::Name("JetBrains Mono")),
+                Shaping::Advanced,
+            );
         }
-        for _ in visible_visual_lines.len()..visible_lines {
-            gutter_text.push_str("   ~\n");
-        }
-        self.gutter_buffer.set_text(
-            &mut self.font_system,
-            &gutter_text,
-            Attrs::new()
-                .family(Family::Name("JetBrains Mono"))
-                .color(theme.gutter_fg.to_glyphon()),
-            Shaping::Advanced,
-        );
         self.gutter_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
@@ -1359,7 +1385,7 @@ impl Renderer {
 
         let tab_bar_height = TAB_BAR_HEIGHT * s;
         let status_bar_height = STATUS_BAR_HEIGHT * s;
-        let gutter_width = GUTTER_WIDTH * s;
+        let gutter_width = self.effective_gutter_width * s;
         let line_padding_left = LINE_PADDING_LEFT * s;
         // Use dynamic font metrics based on current font size
         let line_height = self.current_font_size * 1.44 * s;
@@ -2226,6 +2252,7 @@ impl Renderer {
                         (4, config.show_line_numbers),
                         (6, config.use_spaces),
                         (7, config.highlight_current_line),
+                        (8, config.show_whitespace),
                     ];
                     let checkbox_border =
                         [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5];

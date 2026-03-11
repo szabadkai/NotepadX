@@ -659,7 +659,8 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{GUTTER_WIDTH, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        use renderer::{LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        let gutter_w = renderer::effective_gutter_width(self.config.show_line_numbers);
 
         let (win_w, win_h) = self.logical_window_size();
 
@@ -738,7 +739,7 @@ impl App {
                         .as_ref()
                         .map(|r| r.width as f32 / r.scale_factor.max(1.0))
                         .unwrap_or(800.0)
-                        - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
+                        - (gutter_w + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
                         .max(100.0),
                 )
             } else {
@@ -749,7 +750,7 @@ impl App {
             let new_pos = buffer.char_at_pos(
                 x as f32,
                 editor_y as f32,
-                GUTTER_WIDTH + LINE_PADDING_LEFT,
+                gutter_w + LINE_PADDING_LEFT,
                 line_height,
                 char_width,
                 wrap_width,
@@ -827,7 +828,7 @@ impl App {
             .unwrap_or(1200.0);
         Some(
             (win_width
-                - renderer::GUTTER_WIDTH
+                - renderer::effective_gutter_width(self.config.show_line_numbers)
                 - renderer::LINE_PADDING_LEFT
                 - renderer::SCROLLBAR_WIDTH)
                 .max(100.0),
@@ -835,6 +836,13 @@ impl App {
     }
 
     fn try_begin_scrollbar_drag(&mut self, x: f32, y: f32) -> bool {
+        let s = self
+            .renderer
+            .as_ref()
+            .map(|r| r.scale_factor)
+            .unwrap_or(1.0);
+        let px = x * s;
+        let py = y * s;
         let Some(scrollbar) = self
             .renderer
             .as_ref()
@@ -843,12 +851,12 @@ impl App {
             return false;
         };
 
-        if !scrollbar.contains_track(x, y) {
+        if !scrollbar.contains_track(px, py) {
             return false;
         }
 
-        let grab_offset_y = if scrollbar.contains_thumb(x, y) {
-            y - scrollbar.thumb_y
+        let grab_offset_y = if scrollbar.contains_thumb(px, py) {
+            py - scrollbar.thumb_y
         } else {
             scrollbar.thumb_height * 0.5
         };
@@ -856,11 +864,11 @@ impl App {
         self.scrollbar_drag = Some(ScrollbarDrag { grab_offset_y });
         self.suppress_drag = true;
         self.block_drag_anchor = None;
-        self.drag_scrollbar_to(y);
+        self.drag_scrollbar_to(y * s);
         true
     }
 
-    fn drag_scrollbar_to(&mut self, y: f32) {
+    fn drag_scrollbar_to(&mut self, physical_y: f32) {
         let Some(drag) = self.scrollbar_drag.as_ref() else {
             return;
         };
@@ -873,7 +881,8 @@ impl App {
         };
 
         let travel = (scrollbar.track_height - scrollbar.thumb_height).max(0.0);
-        let thumb_y = (y - drag.grab_offset_y).clamp(scrollbar.track_y, scrollbar.track_y + travel);
+        let thumb_y =
+            (physical_y - drag.grab_offset_y).clamp(scrollbar.track_y, scrollbar.track_y + travel);
         let ratio = if travel > 0.0 {
             (thumb_y - scrollbar.track_y) / travel
         } else {
@@ -901,12 +910,7 @@ impl App {
 
     fn handle_mouse_drag(&mut self) {
         if self.scrollbar_drag.is_some() {
-            let scale = self
-                .window
-                .as_ref()
-                .map(|w| w.scale_factor())
-                .unwrap_or(1.0);
-            let y = (self.mouse_pos.1 / scale) as f32;
+            let y = self.mouse_pos.1 as f32;
             self.drag_scrollbar_to(y);
             return;
         }
@@ -926,7 +930,8 @@ impl App {
             return;
         }
 
-        use renderer::{GUTTER_WIDTH, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        use renderer::{LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        let gutter_w = renderer::effective_gutter_width(self.config.show_line_numbers);
         let line_height = self.config.font_size * 1.44;
         let char_width = self.config.font_size * 0.6;
 
@@ -942,7 +947,7 @@ impl App {
                         .as_ref()
                         .map(|r| r.width as f32 / r.scale_factor.max(1.0))
                         .unwrap_or(800.0)
-                        - (GUTTER_WIDTH + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
+                        - (gutter_w + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
                         .max(100.0),
                 )
             } else {
@@ -952,7 +957,7 @@ impl App {
             let new_pos = self.editor.active().char_at_pos(
                 x as f32,
                 editor_y as f32,
-                GUTTER_WIDTH + LINE_PADDING_LEFT,
+                gutter_w + LINE_PADDING_LEFT,
                 line_height,
                 char_width,
                 wrap_width,
@@ -1566,7 +1571,7 @@ impl App {
                     .map(|w| w.scale_factor() as f32)
                     .unwrap_or(1.0);
             let editor_width = win_width
-                - renderer::GUTTER_WIDTH
+                - renderer::effective_gutter_width(self.config.show_line_numbers)
                 - renderer::LINE_PADDING_LEFT
                 - renderer::SCROLLBAR_WIDTH;
             let wrap_width = if self.editor.active().wrap_enabled {
@@ -1854,7 +1859,9 @@ impl App {
                                     .unwrap_or(1.0);
                             Some(
                                 (win_width
-                                    - renderer::GUTTER_WIDTH
+                                    - renderer::effective_gutter_width(
+                                        self.config.show_line_numbers,
+                                    )
                                     - renderer::LINE_PADDING_LEFT
                                     - renderer::SCROLLBAR_WIDTH)
                                     .max(100.0),
@@ -2371,7 +2378,7 @@ impl App {
                             .unwrap_or(1.0);
                     Some(
                         (win_width
-                            - renderer::GUTTER_WIDTH
+                            - renderer::effective_gutter_width(self.config.show_line_numbers)
                             - renderer::LINE_PADDING_LEFT
                             - renderer::SCROLLBAR_WIDTH)
                             .max(100.0),
@@ -2462,7 +2469,7 @@ impl App {
                             .unwrap_or(1.0);
                     Some(
                         (win_width
-                            - renderer::GUTTER_WIDTH
+                            - renderer::effective_gutter_width(self.config.show_line_numbers)
                             - renderer::LINE_PADDING_LEFT
                             - renderer::SCROLLBAR_WIDTH)
                             .max(100.0),
@@ -2836,7 +2843,9 @@ impl ApplicationHandler for App {
                             .and_then(|renderer| {
                                 renderer.scrollbar_thumb(self.editor.active(), &self.overlay)
                             })
-                            .map(|scrollbar| scrollbar.contains_track(x as f32, y as f32))
+                            .map(|scrollbar| {
+                                scrollbar.contains_track(position.x as f32, position.y as f32)
+                            })
                             .unwrap_or(false);
 
                     if y >= status_top {
@@ -2984,7 +2993,7 @@ impl ApplicationHandler for App {
                         .unwrap_or(1200.0);
                     Some(
                         (win_width
-                            - renderer::GUTTER_WIDTH
+                            - renderer::effective_gutter_width(self.config.show_line_numbers)
                             - renderer::LINE_PADDING_LEFT
                             - renderer::SCROLLBAR_WIDTH)
                             .max(100.0),
