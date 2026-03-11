@@ -1167,6 +1167,11 @@ impl App {
                 }
             }
 
+            // Editing — delete to line start (Shift+Backspace)
+            Key::Named(NamedKey::Backspace) if shift && !alt && !cmd_or_ctrl => {
+                self.editor.active_mut().delete_to_line_start_multi();
+            }
+
             // Editing — word-wise deletion
             Key::Named(NamedKey::Backspace) if alt => {
                 self.editor.active_mut().delete_word_left_multi()

@@ -8,6 +8,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::editor::buffer::Cursor;
     use crate::editor::buffer::LineEnding;
     use ropey::Rope;
 
@@ -376,5 +377,111 @@ mod tests {
 
         assert_eq!(visual_line, 1);
         assert_eq!(col, 5);
+    }
+
+    // =========================================================================
+    // Delete to Line Start (Shift+Backspace) Tests
+    // =========================================================================
+
+    #[test]
+    fn test_delete_to_line_start_middle_of_line() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("aaa\nbbb\nccc\n");
+        buffer.set_cursor(6); // middle of "bbb" (at second 'b')
+        buffer.delete_to_line_start_multi();
+        // "bb" before cursor deleted, "b\n" remains
+        assert_eq!(buffer.rope.to_string(), "aaa\nb\nccc\n");
+        assert_eq!(buffer.cursor(), 4); // at line start
+    }
+
+    #[test]
+    fn test_delete_to_line_start_at_line_start() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("aaa\nbbb\n");
+        buffer.set_cursor(4); // start of "bbb"
+        buffer.delete_to_line_start_multi();
+        // Nothing before cursor on this line — no change
+        assert_eq!(buffer.rope.to_string(), "aaa\nbbb\n");
+    }
+
+    #[test]
+    fn test_delete_to_line_start_end_of_line() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello\nworld\n");
+        buffer.set_cursor(11); // end of "world" (before \n)
+        buffer.delete_to_line_start_multi();
+        assert_eq!(buffer.rope.to_string(), "hello\n\n");
+        assert_eq!(buffer.cursor(), 6); // at line start
+    }
+
+    #[test]
+    fn test_delete_to_line_start_multi_cursor_different_lines() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("aaaa\nbbbb\ncccc\n");
+        // Cursor at pos 2 in "aaaa" and pos 12 in "cccc"
+        buffer.cursors = vec![
+            Cursor {
+                position: 2,
+                selection_anchor: None,
+                desired_col: None,
+            },
+            Cursor {
+                position: 12,
+                selection_anchor: None,
+                desired_col: None,
+            },
+        ];
+        buffer.delete_to_line_start_multi();
+        // "aa" deleted from line 0, "cc" deleted from line 2
+        assert_eq!(buffer.rope.to_string(), "aa\nbbbb\ncc\n");
+    }
+
+    #[test]
+    fn test_delete_to_line_start_multi_cursor_same_line() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("abcdef\n");
+        // Two cursors on same line: pos 2 and pos 5
+        buffer.cursors = vec![
+            Cursor {
+                position: 2,
+                selection_anchor: None,
+                desired_col: None,
+            },
+            Cursor {
+                position: 5,
+                selection_anchor: None,
+                desired_col: None,
+            },
+        ];
+        buffer.delete_to_line_start_multi();
+        // First cursor deletes "ab" (0..2), leaving "cdef\n", cursor at 0
+        // Second cursor (was 5, offset -2 = 3) deletes 0..3 = "cde", leaving "f\n"
+        assert_eq!(buffer.rope.to_string(), "f\n");
+    }
+
+    #[test]
+    fn test_delete_to_line_start_with_selection() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("aaa\nbbb\nccc\n");
+        // Selection on line 1: selects "bb"
+        buffer.cursors = vec![Cursor {
+            position: 5,
+            selection_anchor: Some(7),
+            desired_col: None,
+        }];
+        buffer.delete_to_line_start_multi();
+        // Selection "bb" deleted, not line-start-to-cursor
+        assert_eq!(buffer.rope.to_string(), "aaa\nb\nccc\n");
+    }
+
+    #[test]
+    fn test_delete_to_line_start_undo() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello world\n");
+        buffer.set_cursor(5); // after "hello"
+        buffer.delete_to_line_start_multi();
+        assert_eq!(buffer.rope.to_string(), " world\n");
+        buffer.undo();
+        assert_eq!(buffer.rope.to_string(), "hello world\n");
     }
 }

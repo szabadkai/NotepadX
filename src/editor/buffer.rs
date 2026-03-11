@@ -443,6 +443,67 @@ impl Buffer {
         self.merge_cursors();
     }
 
+    /// Delete from the start of the line to the cursor position at every cursor.
+    /// If a cursor has a selection, deletes the selection instead. Multi-cursor safe.
+    pub fn delete_to_line_start_multi(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let group_id = self.new_undo_group();
+        let cursors_snapshot = self.cursors.clone();
+        self.cursors.sort();
+        let mut offset: isize = 0;
+        for i in 0..self.cursors.len() {
+            let pos = (self.cursors[i].position as isize + offset) as usize;
+            let save = if i == 0 {
+                Some(cursors_snapshot.clone())
+            } else {
+                None
+            };
+
+            if let Some(anchor) = self.cursors[i].selection_anchor.take() {
+                // Selection exists: delete selection range (same as backspace)
+                let adj_anchor = (anchor as isize + offset) as usize;
+                let start = pos.min(adj_anchor);
+                let end = pos.max(adj_anchor);
+                let removed: String = self.rope.slice(start..end).into();
+                self.rope.remove(start..end);
+                offset -= (end - start) as isize;
+                self.cursors[i].position = start;
+                self.undo_stack.push(EditOperation {
+                    offset: start,
+                    removed,
+                    inserted: String::new(),
+                    cursor_before: pos,
+                    group_id,
+                    cursors_before: save,
+                });
+            } else {
+                // Delete from line start to cursor
+                let line = self.rope.char_to_line(pos);
+                let line_start = self.rope.line_to_char(line);
+                if pos > line_start {
+                    let removed: String = self.rope.slice(line_start..pos).into();
+                    self.rope.remove(line_start..pos);
+                    offset -= (pos - line_start) as isize;
+                    self.cursors[i].position = line_start;
+                    self.undo_stack.push(EditOperation {
+                        offset: line_start,
+                        removed,
+                        inserted: String::new(),
+                        cursor_before: pos,
+                        group_id,
+                        cursors_before: save,
+                    });
+                }
+            }
+            self.cursors[i].desired_col = None;
+        }
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.merge_cursors();
+    }
+
     /// Multi-cursor movement: move all cursors left.
     pub fn move_all_left(&mut self, shift: bool) {
         for c in &mut self.cursors {
