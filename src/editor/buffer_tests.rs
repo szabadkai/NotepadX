@@ -19,86 +19,86 @@ mod tests {
     fn test_select_word_at_cursor_basic() {
         let mut buffer = Buffer::new();
         buffer.rope = Rope::from_str("hello world test");
-        buffer.cursor = 6; // Position at 'w' in "world"
+        buffer.set_cursor(6); // Position at 'w' in "world"
 
         buffer.select_word_at_cursor();
 
-        assert!(buffer.selection_anchor.is_some());
-        let anchor = buffer.selection_anchor.unwrap();
+        assert!(buffer.selection_anchor().is_some());
+        let anchor = buffer.selection_anchor().unwrap();
         assert_eq!(anchor, 6); // Start of "world"
-        assert_eq!(buffer.cursor, 11); // End of "world" (exclusive)
+        assert_eq!(buffer.cursor(), 11); // End of "world" (exclusive)
     }
 
     #[test]
     fn test_select_word_at_cursor_start_of_word() {
         let mut buffer = Buffer::new();
         buffer.rope = Rope::from_str("hello world");
-        buffer.cursor = 0; // Start of buffer
+        buffer.set_cursor(0); // Start of buffer
 
         buffer.select_word_at_cursor();
 
-        assert_eq!(buffer.selection_anchor, Some(0));
-        assert_eq!(buffer.cursor, 5); // End of "hello"
+        assert_eq!(buffer.selection_anchor(), Some(0));
+        assert_eq!(buffer.cursor(), 5); // End of "hello"
     }
 
     #[test]
     fn test_select_word_at_cursor_end_of_word() {
         let mut buffer = Buffer::new();
         buffer.rope = Rope::from_str("hello world");
-        buffer.cursor = 4; // Last char of "hello" ('o')
+        buffer.set_cursor(4); // Last char of "hello" ('o')
 
         buffer.select_word_at_cursor();
 
-        assert_eq!(buffer.selection_anchor, Some(0));
-        assert_eq!(buffer.cursor, 5); // End of "hello"
+        assert_eq!(buffer.selection_anchor(), Some(0));
+        assert_eq!(buffer.cursor(), 5); // End of "hello"
     }
 
     #[test]
     fn test_select_word_at_cursor_on_whitespace() {
         let mut buffer = Buffer::new();
         buffer.rope = Rope::from_str("hello  world"); // Two spaces
-        buffer.cursor = 5; // Position on first space
+        buffer.set_cursor(5); // Position on first space
 
         buffer.select_word_at_cursor();
 
         // Should not select anything when on whitespace
-        assert!(buffer.selection_anchor.is_none());
+        assert!(buffer.selection_anchor().is_none());
     }
 
     #[test]
     fn test_select_word_at_cursor_empty_buffer() {
         let mut buffer = Buffer::new();
-        buffer.cursor = 0;
+        buffer.set_cursor(0);
 
         buffer.select_word_at_cursor();
 
         // Should not crash on empty buffer
-        assert!(buffer.selection_anchor.is_none());
+        assert!(buffer.selection_anchor().is_none());
     }
 
     #[test]
     fn test_select_word_with_underscores() {
         let mut buffer = Buffer::new();
         buffer.rope = Rope::from_str("hello_world_test");
-        buffer.cursor = 5; // Position at '_'
+        buffer.set_cursor(5); // Position at '_'
 
         buffer.select_word_at_cursor();
 
         // Underscores are considered word characters
-        assert_eq!(buffer.selection_anchor, Some(0));
-        assert_eq!(buffer.cursor, 16); // Whole string is one word
+        assert_eq!(buffer.selection_anchor(), Some(0));
+        assert_eq!(buffer.cursor(), 16); // Whole string is one word
     }
 
     #[test]
     fn test_select_word_with_numbers() {
         let mut buffer = Buffer::new();
         buffer.rope = Rope::from_str("test123variable");
-        buffer.cursor = 7; // Middle of the alphanumeric word
+        buffer.set_cursor(7); // Middle of the alphanumeric word
 
         buffer.select_word_at_cursor();
 
-        assert_eq!(buffer.selection_anchor, Some(0));
-        assert_eq!(buffer.cursor, 15);
+        assert_eq!(buffer.selection_anchor(), Some(0));
+        assert_eq!(buffer.cursor(), 15);
     }
 
     // =========================================================================
@@ -310,7 +310,7 @@ mod tests {
         );
 
         // Set cursor to the calculated position
-        buffer.cursor = click_pos;
+        buffer.set_cursor(click_pos);
 
         // Now select word at cursor
         buffer.select_word_at_cursor();
@@ -318,7 +318,7 @@ mod tests {
         // With correct position calculation, we should have a selection
         // The exact position depends on the math, but it shouldn't panic
         // and should result in a valid cursor position
-        assert!(buffer.cursor <= buffer.rope.len_chars());
+        assert!(buffer.cursor() <= buffer.rope.len_chars());
     }
 
     /// Test that char_at_pos_wrapped handles very long lines correctly

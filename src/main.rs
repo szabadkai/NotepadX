@@ -541,15 +541,25 @@ impl App {
                 wrap_width,
             );
 
-            if shift {
-                if buffer.selection_anchor.is_none() {
-                    buffer.selection_anchor = Some(buffer.cursor);
-                }
-            } else {
-                buffer.selection_anchor = None;
-            }
+            let alt = self.modifiers.alt_key();
+            let cmd = self.modifiers.super_key();
 
-            buffer.cursor = new_pos;
+            if (alt || cmd) && !shift && !is_double {
+                // Alt+Click or Cmd+Click: add a new cursor at the clicked position
+                buffer.add_cursor(new_pos);
+                // Suppress drag so the newly added cursor isn't disrupted
+                self.suppress_drag = true;
+            } else if shift {
+                if buffer.selection_anchor().is_none() {
+                    buffer.set_selection_anchor(Some(buffer.cursor()));
+                }
+                buffer.set_cursor(new_pos);
+            } else {
+                // Normal click: clear extra cursors and move
+                buffer.clear_extra_cursors();
+                buffer.set_selection_anchor(None);
+                buffer.set_cursor(new_pos);
+            }
 
             // Double-click: select word
             if is_double {
@@ -625,8 +635,8 @@ impl App {
             };
 
             let buffer = self.editor.active_mut();
-            if buffer.selection_anchor.is_none() {
-                buffer.selection_anchor = Some(buffer.cursor);
+            if buffer.selection_anchor().is_none() {
+                buffer.set_selection_anchor(Some(buffer.cursor()));
             }
 
             let new_pos = buffer.char_at_pos(
@@ -637,7 +647,7 @@ impl App {
                 char_width,
                 wrap_width,
             );
-            buffer.cursor = new_pos;
+            buffer.set_cursor(new_pos);
         }
         self.needs_redraw = true;
     }
@@ -864,8 +874,11 @@ impl App {
                     self.overlay.close();
                     self.needs_redraw = true;
                     return;
+                } else if self.editor.active().has_multiple_cursors() {
+                    // Clear extra cursors first, then selection
+                    self.editor.active_mut().clear_extra_cursors();
                 } else {
-                    self.editor.active_mut().selection_anchor = None;
+                    self.editor.active_mut().set_selection_anchor(None);
                 }
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "f" => {
@@ -980,14 +993,14 @@ impl App {
 
             // Clipboard
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
-                if let Some(text) = self.editor.active().copy() {
+                if let Some(text) = self.editor.active().copy_multi() {
                     if let Some(clip) = &mut self.clipboard {
                         let _ = clip.set_text(text);
                     }
                 }
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "x" => {
-                if let Some(text) = self.editor.active_mut().cut() {
+                if let Some(text) = self.editor.active_mut().cut_multi() {
                     if let Some(clip) = &mut self.clipboard {
                         let _ = clip.set_text(text);
                     }
@@ -996,7 +1009,7 @@ impl App {
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "v" => {
                 if let Some(clip) = &mut self.clipboard {
                     if let Ok(text) = clip.get_text() {
-                        self.editor.active_mut().insert_text(&text);
+                        self.editor.active_mut().insert_text_multi(&text);
                     }
                 }
             }
@@ -1023,6 +1036,11 @@ impl App {
                 if cmd_or_ctrl && shift && (c.as_str() == "d" || c.as_str() == "D") =>
             {
                 self.editor.active_mut().duplicate_line();
+            }
+
+            // Select Next Occurrence (Cmd+D)
+            Key::Character(c) if cmd_or_ctrl && !shift && c.as_str() == "d" => {
+                self.editor.active_mut().select_next_occurrence();
             }
 
             // Toggle Comment (Cmd+/)
@@ -1093,16 +1111,18 @@ impl App {
             Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
 
             // Navigation — word-wise (Alt/Opt+Arrow)
-            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_word_left(),
-            Key::Named(NamedKey::ArrowRight) if alt => self.editor.active_mut().move_word_right(),
+            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_all_word_left(),
+            Key::Named(NamedKey::ArrowRight) if alt => {
+                self.editor.active_mut().move_all_word_right()
+            }
 
-            // Navigation — basic (with shift-selection support)
-            Key::Named(NamedKey::ArrowLeft) => self.editor.active_mut().move_left_sel(shift),
-            Key::Named(NamedKey::ArrowRight) => self.editor.active_mut().move_right_sel(shift),
-            Key::Named(NamedKey::ArrowUp) => self.editor.active_mut().move_up_sel(shift),
-            Key::Named(NamedKey::ArrowDown) => self.editor.active_mut().move_down_sel(shift),
-            Key::Named(NamedKey::Home) => self.editor.active_mut().move_to_line_start_sel(shift),
-            Key::Named(NamedKey::End) => self.editor.active_mut().move_to_line_end_sel(shift),
+            // Navigation — basic (with shift-selection + multi-cursor support)
+            Key::Named(NamedKey::ArrowLeft) => self.editor.active_mut().move_all_left(shift),
+            Key::Named(NamedKey::ArrowRight) => self.editor.active_mut().move_all_right(shift),
+            Key::Named(NamedKey::ArrowUp) => self.editor.active_mut().move_all_up(shift),
+            Key::Named(NamedKey::ArrowDown) => self.editor.active_mut().move_all_down(shift),
+            Key::Named(NamedKey::Home) => self.editor.active_mut().move_all_to_line_start(shift),
+            Key::Named(NamedKey::End) => self.editor.active_mut().move_all_to_line_end(shift),
             Key::Named(NamedKey::PageUp) => {
                 let visible = self
                     .renderer
@@ -1110,7 +1130,7 @@ impl App {
                     .map(|r| r.visible_lines())
                     .unwrap_or(20);
                 for _ in 0..visible {
-                    self.editor.active_mut().move_up_sel(shift);
+                    self.editor.active_mut().move_all_up(shift);
                 }
             }
             Key::Named(NamedKey::PageDown) => {
@@ -1120,36 +1140,50 @@ impl App {
                     .map(|r| r.visible_lines())
                     .unwrap_or(20);
                 for _ in 0..visible {
-                    self.editor.active_mut().move_down_sel(shift);
+                    self.editor.active_mut().move_all_down(shift);
                 }
             }
 
             // Editing — word-wise deletion
-            Key::Named(NamedKey::Backspace) if alt => self.editor.active_mut().delete_word_left(),
-            Key::Named(NamedKey::Delete) if alt => self.editor.active_mut().delete_word_right(),
+            Key::Named(NamedKey::Backspace) if alt => {
+                self.editor.active_mut().delete_word_left_multi()
+            }
+            Key::Named(NamedKey::Delete) if alt => {
+                self.editor.active_mut().delete_word_right_multi()
+            }
 
-            // Editing — basic
-            Key::Named(NamedKey::Backspace) => self.editor.active_mut().backspace(),
-            Key::Named(NamedKey::Delete) => self.editor.active_mut().delete_forward(),
+            // Editing — basic (multi-cursor aware)
+            Key::Named(NamedKey::Backspace) => {
+                self.editor.active_mut().backspace_multi();
+            }
+            Key::Named(NamedKey::Delete) => {
+                self.editor.active_mut().delete_forward_multi();
+            }
             Key::Named(NamedKey::Enter) => {
                 let le = self.editor.active().line_ending.as_str().to_string();
-                self.editor.active_mut().insert_newline(&le);
+                if self.editor.active().has_multiple_cursors() {
+                    self.editor.active_mut().insert_text_multi(&le);
+                } else {
+                    self.editor.active_mut().insert_newline(&le);
+                }
             }
             Key::Named(NamedKey::Tab) if shift => {
                 let ts = self.config.tab_size;
                 self.editor.active_mut().dedent_line(ts);
             }
             Key::Named(NamedKey::Tab) => {
-                self.editor.active_mut().insert_text("    ");
+                self.editor.active_mut().insert_text_multi("    ");
             }
             Key::Named(NamedKey::Space) => {
-                self.editor.active_mut().insert_text(" ");
+                self.editor.active_mut().insert_text_multi(" ");
             }
 
             // Text input (with auto-close for brackets/quotes)
             Key::Character(c) if !cmd_or_ctrl => {
                 let s = c.as_str();
-                if !self.editor.active_mut().insert_with_autoclose(s) {
+                if self.editor.active().has_multiple_cursors() {
+                    self.editor.active_mut().insert_text_multi(s);
+                } else if !self.editor.active_mut().insert_with_autoclose(s) {
                     self.editor.active_mut().insert_text(s);
                 }
             }
@@ -1229,7 +1263,7 @@ impl App {
                                 let buffer = self.editor.active_mut();
                                 buffer.replace_all_text_snapshot(&new_text);
                                 if let Some(start) = first_match_byte {
-                                    buffer.cursor = buffer.rope.byte_to_char(start);
+                                    buffer.set_cursor(buffer.rope.byte_to_char(start));
                                 }
                                 self.refresh_find_results();
                             }
@@ -1514,14 +1548,14 @@ impl App {
             CommandId::NextTab => self.editor.next_tab(),
             CommandId::PrevTab => self.editor.prev_tab(),
             CommandId::Copy => {
-                if let Some(text) = self.editor.active().copy() {
+                if let Some(text) = self.editor.active().copy_multi() {
                     if let Some(clip) = &mut self.clipboard {
                         let _ = clip.set_text(text);
                     }
                 }
             }
             CommandId::Cut => {
-                if let Some(text) = self.editor.active_mut().cut() {
+                if let Some(text) = self.editor.active_mut().cut_multi() {
                     if let Some(clip) = &mut self.clipboard {
                         let _ = clip.set_text(text);
                     }
@@ -1530,7 +1564,7 @@ impl App {
             CommandId::Paste => {
                 if let Some(clip) = &mut self.clipboard {
                     if let Ok(text) = clip.get_text() {
-                        self.editor.active_mut().insert_text(&text);
+                        self.editor.active_mut().insert_text_multi(&text);
                     }
                 }
             }
@@ -1826,7 +1860,7 @@ impl App {
                 }
             } else {
                 // Find matches store byte offsets; convert to char index
-                buffer.cursor = buffer.rope.byte_to_char(start_byte);
+                buffer.set_cursor(buffer.rope.byte_to_char(start_byte));
             }
             if let Some(renderer) = &self.renderer {
                 let visible = renderer.visible_lines();
@@ -1917,7 +1951,7 @@ impl App {
                     return;
                 }
             } else {
-                buffer.cursor = buffer.rope.byte_to_char(byte_offset);
+                buffer.set_cursor(buffer.rope.byte_to_char(byte_offset));
             }
             if let Some(renderer) = &self.renderer {
                 let visible = renderer.visible_lines_with_panel(&self.overlay);
@@ -2087,7 +2121,7 @@ impl App {
                         self.on_overlay_input_changed();
                     }
                 } else if !self.overlay.is_active() {
-                    if let Some(text) = self.editor.active_mut().cut() {
+                    if let Some(text) = self.editor.active_mut().cut_multi() {
                         if let Some(clip) = &mut self.clipboard {
                             let _ = clip.set_text(text);
                         }
@@ -2109,7 +2143,7 @@ impl App {
                         }
                     }
                 } else if !self.overlay.is_active() {
-                    if let Some(text) = self.editor.active().copy() {
+                    if let Some(text) = self.editor.active().copy_multi() {
                         if let Some(clip) = &mut self.clipboard {
                             let _ = clip.set_text(text);
                         }
@@ -2147,8 +2181,8 @@ impl App {
                     self.overlay.select_all();
                 } else if !self.overlay.is_active() {
                     let buffer = self.editor.active_mut();
-                    buffer.selection_anchor = Some(0);
-                    buffer.cursor = buffer.rope.len_chars();
+                    buffer.set_selection_anchor(Some(0));
+                    buffer.set_cursor(buffer.rope.len_chars());
                 }
                 self.needs_redraw = true;
             }

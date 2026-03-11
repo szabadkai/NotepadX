@@ -118,13 +118,13 @@ fn test_double_click_scenarios_with_various_content() {
     for (content, cursor_pos, expected_start, expected_end) in test_cases {
         let mut buffer = Buffer::new();
         buffer.rope = ropey::Rope::from_str(content);
-        buffer.cursor = cursor_pos;
+        buffer.set_cursor(cursor_pos);
 
         buffer.select_word_at_cursor();
 
-        if let Some(anchor) = buffer.selection_anchor {
+        if let Some(anchor) = buffer.selection_anchor() {
             assert_eq!(
-                (anchor, buffer.cursor),
+                (anchor, buffer.cursor()),
                 (expected_start, expected_end),
                 "Failed for content '{}' at cursor {}",
                 content,
@@ -169,11 +169,11 @@ fn test_double_click_with_line_wrap_integration() {
     assert!(pos <= buffer.rope.len_chars());
 
     // Now set cursor and try to select word
-    buffer.cursor = pos;
+    buffer.set_cursor(pos);
     buffer.select_word_at_cursor();
 
     // Should not panic and should have valid cursor
-    assert!(buffer.cursor <= buffer.rope.len_chars());
+    assert!(buffer.cursor() <= buffer.rope.len_chars());
 }
 
 #[test]
@@ -467,8 +467,8 @@ fn test_workspace_snapshot_embeds_dirty_file_contents() {
     editor.active_mut().file_path = Some(path.clone());
     editor.active_mut().rope = ropey::Rope::from_str("unsaved\r\nchanges\r\n");
     editor.active_mut().dirty = true;
-    editor.active_mut().cursor = 4;
-    editor.active_mut().selection_anchor = Some(1);
+    editor.active_mut().set_cursor(4);
+    editor.active_mut().set_selection_anchor(Some(1));
     editor.active_mut().scroll_y = 6.0;
     editor.active_mut().scroll_x = 12.0;
     editor.active_mut().line_ending = LineEnding::CrLf;
@@ -543,15 +543,15 @@ fn test_workspace_restore_dedupes_paths_and_keeps_untitled_state() {
     assert_eq!(editor.active_buffer, 1);
     assert_eq!(editor.buffers[0].file_path.as_ref(), Some(&path));
     assert!(!editor.buffers[0].dirty);
-    assert_eq!(editor.buffers[0].cursor, 2);
-    assert_eq!(editor.buffers[0].selection_anchor, Some(1));
+    assert_eq!(editor.buffers[0].cursor(), 2);
+    assert_eq!(editor.buffers[0].selection_anchor(), Some(1));
     assert_eq!(editor.buffers[0].scroll_y, 3.0);
     assert_eq!(editor.buffers[0].scroll_x, 4.0);
     assert!(editor.buffers[1].file_path.is_none());
     assert_eq!(editor.buffers[1].rope.to_string(), "scratch pad");
     assert!(editor.buffers[1].dirty);
-    assert_eq!(editor.buffers[1].cursor, 7);
-    assert_eq!(editor.buffers[1].selection_anchor, Some(2));
+    assert_eq!(editor.buffers[1].cursor(), 7);
+    assert_eq!(editor.buffers[1].selection_anchor(), Some(2));
     assert_eq!(editor.buffers[1].scroll_y, 5.0);
     assert_eq!(editor.buffers[1].scroll_x, 9.0);
 
@@ -644,16 +644,16 @@ fn test_word_selection_at_boundaries() {
     // Start of buffer
     let mut buffer1 = Buffer::new();
     buffer1.rope = ropey::Rope::from_str("hello");
-    buffer1.cursor = 0;
+    buffer1.set_cursor(0);
     buffer1.select_word_at_cursor();
-    assert_eq!(buffer1.selection_anchor, Some(0));
-    assert_eq!(buffer1.cursor, 5);
+    assert_eq!(buffer1.selection_anchor(), Some(0));
+    assert_eq!(buffer1.cursor(), 5);
 
     // End of buffer
     let mut buffer2 = Buffer::new();
     buffer2.rope = ropey::Rope::from_str("hello");
-    buffer2.cursor = 4; // Last character
+    buffer2.set_cursor(4); // Last character
     buffer2.select_word_at_cursor();
-    assert_eq!(buffer2.selection_anchor, Some(0));
-    assert_eq!(buffer2.cursor, 5);
+    assert_eq!(buffer2.selection_anchor(), Some(0));
+    assert_eq!(buffer2.cursor(), 5);
 }

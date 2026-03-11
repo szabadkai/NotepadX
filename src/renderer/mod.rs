@@ -473,7 +473,7 @@ impl Renderer {
 
         // --- Cursor ---
         let (cursor_visual_line, _cursor_visual_col) =
-            buffer.visual_position_of_char(buffer.cursor, buf_width, char_width);
+            buffer.visual_position_of_char(buffer.cursor(), buf_width, char_width);
         let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
             let caret_height = font_size.max(1.0);
@@ -1013,32 +1013,68 @@ impl Renderer {
             ],
         ));
 
-        // 3. Active Line Highlight
-        let (cursor_visual_line, cursor_visual_col) =
-            buffer.visual_position_of_char(buffer.cursor, wrap_width, char_width);
-        let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
-        if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-            base_rects.push(Rect::flat(
-                gutter_width,
-                editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px,
-                width - gutter_width,
-                line_height,
-                [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
-            ));
+        // 3. Active Line Highlight + 4. Cursor I-beam (for all cursors)
+        for cursor in &buffer.cursors {
+            let (cursor_visual_line, cursor_visual_col) =
+                buffer.visual_position_of_char(cursor.position, wrap_width, char_width);
+            let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
+            if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
+                base_rects.push(Rect::flat(
+                    gutter_width,
+                    editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px,
+                    width - gutter_width,
+                    line_height,
+                    [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
+                ));
+            }
+
+            // Cursor I-beam (thin 2px line)
+            if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
+                let caret_height = (self.current_font_size * s).max(1.0);
+                let caret_y = editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px
+                    + ((line_height - caret_height) / 2.0).max(0.0);
+                base_rects.push(Rect::flat(
+                    editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s,
+                    caret_y,
+                    2.0 * s,
+                    caret_height,
+                    [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
+                ));
+            }
         }
 
-        // 4. Cursor I-beam (thin 2px line)
-        if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-            let caret_height = (self.current_font_size * s).max(1.0);
-            let caret_y = editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px
-                + ((line_height - caret_height) / 2.0).max(0.0);
-            base_rects.push(Rect::flat(
-                editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s,
-                caret_y,
-                2.0 * s,
-                caret_height,
-                [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
-            ));
+        // 5. Selection Highlights (for all cursors)
+        for cursor in &buffer.cursors {
+            let sel_range = cursor.selection_anchor.map(|anchor| {
+                if anchor < cursor.position {
+                    (anchor, cursor.position)
+                } else {
+                    (cursor.position, anchor)
+                }
+            });
+            if let Some((start, end)) = sel_range {
+                for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                    let sel_start = start.max(visual_line.start_char);
+                    let sel_end = end.min(visual_line.end_char);
+
+                    if sel_start < sel_end {
+                        let col_start = sel_start - visual_line.start_char;
+                        let col_end = sel_end - visual_line.start_char;
+                        base_rects.push(Rect::flat(
+                            editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
+                            editor_top + i as f32 * line_height - scroll_y_px,
+                            (col_end - col_start) as f32 * char_width,
+                            line_height,
+                            [
+                                theme.selection.r,
+                                theme.selection.g,
+                                theme.selection.b,
+                                theme.selection.a,
+                            ],
+                        ));
+                    }
+                }
+            }
         }
 
         // 4. Bracket Matching Highlight
@@ -1055,32 +1091,6 @@ impl Renderer {
                         char_width,
                         line_height,
                         [theme.selection.r, theme.selection.g, theme.selection.b, 0.4],
-                    ));
-                }
-            }
-        }
-
-        // 5. Selection Highlight
-        if let Some((start, end)) = buffer.selection_range() {
-            for (i, visual_line) in visible_visual_lines.iter().enumerate() {
-                let sel_start = start.max(visual_line.start_char);
-                let sel_end = end.min(visual_line.end_char);
-
-                if sel_start < sel_end {
-                    let col_start = sel_start - visual_line.start_char;
-                    let col_end = sel_end - visual_line.start_char;
-
-                    base_rects.push(Rect::flat(
-                        editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
-                        editor_top + i as f32 * line_height - scroll_y_px,
-                        (col_end - col_start) as f32 * char_width,
-                        line_height,
-                        [
-                            theme.selection.r,
-                            theme.selection.g,
-                            theme.selection.b,
-                            theme.selection.a.max(0.4),
-                        ],
                     ));
                 }
             }
