@@ -377,4 +377,106 @@ mod tests {
         assert_eq!(visual_line, 1);
         assert_eq!(col, 5);
     }
+
+    // =========================================================================
+    // Multi-cursor modifier tests
+    // =========================================================================
+
+    #[test]
+    fn test_move_all_word_left_no_shift_clears_selection() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello world");
+        buffer.set_cursor(11);
+        buffer.add_cursor(5);
+        // Give each cursor a selection anchor
+        buffer.cursors[0].selection_anchor = Some(11);
+        buffer.cursors[1].selection_anchor = Some(7);
+
+        buffer.move_all_word_left(false);
+
+        for c in &buffer.cursors {
+            assert!(c.selection_anchor.is_none(), "selection_anchor should be cleared without shift");
+        }
+    }
+
+    #[test]
+    fn test_move_all_word_left_with_shift_sets_anchors() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello world");
+        // cursor 0 at position 11 (end), cursor 1 at position 5 (space)
+        buffer.set_cursor(11);
+        buffer.add_cursor(5);
+
+        buffer.move_all_word_left(true);
+
+        for c in &buffer.cursors {
+            assert!(c.selection_anchor.is_some(), "selection_anchor should be set with shift");
+        }
+    }
+
+    #[test]
+    fn test_move_all_word_right_no_shift_clears_selection() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello world");
+        buffer.set_cursor(0);
+        buffer.add_cursor(6);
+        buffer.cursors[0].selection_anchor = Some(0);
+        buffer.cursors[1].selection_anchor = Some(6);
+
+        buffer.move_all_word_right(false);
+
+        for c in &buffer.cursors {
+            assert!(c.selection_anchor.is_none(), "selection_anchor should be cleared without shift");
+        }
+    }
+
+    #[test]
+    fn test_move_all_word_right_with_shift_sets_anchors() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello world");
+        buffer.set_cursor(0);
+        buffer.add_cursor(6);
+
+        buffer.move_all_word_right(true);
+
+        for c in &buffer.cursors {
+            assert!(c.selection_anchor.is_some(), "selection_anchor should be set with shift");
+        }
+    }
+
+    #[test]
+    fn test_move_all_to_line_start_with_shift_selects_on_all_cursors() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello\nworld\n");
+        // cursor 0 at end of first line (pos 5), cursor 1 at end of second line (pos 11)
+        buffer.set_cursor(5);
+        buffer.add_cursor(11);
+
+        buffer.move_all_to_line_start(true);
+
+        for c in &buffer.cursors {
+            assert!(c.selection_anchor.is_some(), "each cursor should have a selection anchor");
+        }
+        // Both cursors should now be at their respective line starts
+        assert_eq!(buffer.cursors[0].position, 0);  // start of "hello"
+        assert_eq!(buffer.cursors[1].position, 6);  // start of "world"
+    }
+
+    #[test]
+    fn test_move_all_to_line_end_with_shift_selects_on_all_cursors() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello\nworld\n");
+        // cursor 0 at start of first line, cursor 1 at start of second line
+        buffer.set_cursor(0);
+        buffer.add_cursor(6);
+
+        buffer.move_all_to_line_end(true);
+
+        for c in &buffer.cursors {
+            assert!(c.selection_anchor.is_some(), "each cursor should have a selection anchor");
+        }
+        // Both cursors should be at their respective line ends (before newline)
+        assert_eq!(buffer.cursors[0].position, 5);  // end of "hello" before \n
+        assert_eq!(buffer.cursors[1].position, 11); // end of "world" before \n
+    }
 }

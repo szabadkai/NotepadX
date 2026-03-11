@@ -1094,10 +1094,10 @@ impl App {
 
             // Navigation — line start/end (Cmd+Left/Right)
             Key::Named(NamedKey::ArrowLeft) if cmd_or_ctrl => {
-                self.editor.active_mut().move_to_line_start_sel(shift)
+                self.editor.active_mut().move_all_to_line_start(shift)
             }
             Key::Named(NamedKey::ArrowRight) if cmd_or_ctrl => {
-                self.editor.active_mut().move_to_line_end_sel(shift)
+                self.editor.active_mut().move_all_to_line_end(shift)
             }
 
             // Navigation — document start/end (Cmd+Up/Down or Cmd+Home/End)
@@ -1111,9 +1111,9 @@ impl App {
             Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
 
             // Navigation — word-wise (Alt/Opt+Arrow)
-            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_all_word_left(),
+            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_all_word_left(shift),
             Key::Named(NamedKey::ArrowRight) if alt => {
-                self.editor.active_mut().move_all_word_right()
+                self.editor.active_mut().move_all_word_right(shift)
             }
 
             // Navigation — basic (with shift-selection + multi-cursor support)
