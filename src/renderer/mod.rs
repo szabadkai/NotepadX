@@ -102,6 +102,9 @@ pub struct Renderer {
 
     // Currently hovered status bar segment (set from main.rs)
     pub hovered_status_segment: Option<StatusBarSegment>,
+
+    /// Tab drag insertion indicator: logical x position of the drop line (None = no drag)
+    pub tab_drag_indicator_x: Option<f32>,
 }
 
 impl Renderer {
@@ -186,6 +189,7 @@ impl Renderer {
             current_font_size: FONT_SIZE,
             status_segments: Vec::new(),
             hovered_status_segment: None,
+            tab_drag_indicator_x: None,
         }
     }
 
@@ -768,8 +772,11 @@ impl Renderer {
                     text.push_str("           Shift+Arr: Sel| Home/End\n");
                     text.push_str("           Cmd+Arr: Doc Start/End\n");
                     text.push_str("           PgUp/PgDn     | Cmd+[/]: Tab\n\n");
+                    text.push_str("Lines:     Alt+Up/Dn: Move Line\n");
+                    text.push_str("           Tab/Shift+Tab: Indent (sel)\n\n");
                     text.push_str("Search:    Cmd+F: Find   | Cmd+H: Replace\n");
                     text.push_str("           Cmd+G: Goto   | Cmd+P: Palette\n\n");
+                    text.push_str("Tabs:      Drag to reorder tabs.\n\n");
                     text.push_str("Other:     Cmd+K/Shift+K: Theme Cycle\n");
                     text.push_str("           Cmd+,: Settings | Alt+Z: Wrap\n");
                     text.push_str("           Cmd+Shift+E: Large File Edit Mode\n");
@@ -1050,6 +1057,19 @@ impl Renderer {
             }
         }
 
+        // 2a. Tab drag insertion indicator
+        if let Some(indicator_x) = self.tab_drag_indicator_x {
+            let ix = indicator_x * s;
+            let accent = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
+            base_rects.push(Rect::flat(
+                ix - 1.0 * s,
+                2.0 * s,
+                2.0 * s,
+                tab_bar_height - 4.0 * s,
+                accent,
+            ));
+        }
+
         // 2b. Gutter Background
         let editor_height_px =
             height - tab_bar_height - status_bar_height - results_panel_height_px;
@@ -1130,21 +1150,23 @@ impl Renderer {
             }
         }
 
-        // 4. Bracket Matching Highlight
+        // 4. Bracket Matching Highlight (both source and matching bracket)
         if !buffer.is_read_only() {
-            if let Some(match_char) = buffer.find_matching_bracket() {
-                let (match_visual_line, match_visual_col) =
-                    buffer.visual_position_of_char(match_char, wrap_width, char_width);
-                let match_line_in_view = match_visual_line as i64 - scroll_line as i64;
-
-                if match_line_in_view >= 0 && match_line_in_view < visible_lines as i64 {
-                    base_rects.push(Rect::flat(
-                        editor_left + match_visual_col as f32 * char_width - buffer.scroll_x * s,
-                        editor_top + match_line_in_view as f32 * line_height - scroll_y_px,
-                        char_width,
-                        line_height,
-                        [theme.selection.r, theme.selection.g, theme.selection.b, 0.4],
-                    ));
+            if let Some((source_char, match_char)) = buffer.find_matching_bracket() {
+                let bracket_color = [theme.selection.r, theme.selection.g, theme.selection.b, 0.4];
+                for &bracket_pos in &[source_char, match_char] {
+                    let (bv_line, bv_col) =
+                        buffer.visual_position_of_char(bracket_pos, wrap_width, char_width);
+                    let line_in_view = bv_line as i64 - scroll_line as i64;
+                    if line_in_view >= 0 && line_in_view < visible_lines as i64 {
+                        base_rects.push(Rect::flat(
+                            editor_left + bv_col as f32 * char_width - buffer.scroll_x * s,
+                            editor_top + line_in_view as f32 * line_height - scroll_y_px,
+                            char_width,
+                            line_height,
+                            bracket_color,
+                        ));
+                    }
                 }
             }
         }

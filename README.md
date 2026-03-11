@@ -27,7 +27,7 @@ NotepadX is an attempt to keep all three:
 - Multi-cursor editing (Cmd+Click, Cmd+D to select next occurrence)
 - Find/replace with case, whole-word, and regex toggles, plus a results panel
 - Go-to-line, command palette, settings, and language/line-ending pickers
-- Undo/redo, duplicate line, comment toggling, bracket auto-close
+- Undo/redo, duplicate line, comment toggling, bracket auto-close and matching
 - Clipboard operations (copy/cut/paste) across multiple cursors
 - Word/line selection (double/triple click), select next occurrence
 - Smooth scrolling and selection behavior
@@ -128,6 +128,9 @@ On macOS use Cmd, on Linux/Windows use Ctrl for equivalent shortcuts.
 | Cmd+K | Next theme |
 | Cmd+Shift+K | Previous theme |
 | Alt+Z | Toggle line wrap |
+| Alt+Up / Alt+Down | Move line up / down |
+| Tab (with selection) | Indent selected lines |
+| Shift+Tab | Outdent line / selected lines |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / Previous tab |
 | Cmd+] / Cmd+[ | Next / Previous tab |
 | F1 | Show keyboard shortcuts |
@@ -151,8 +154,11 @@ On macOS use Cmd, on Linux/Windows use Ctrl for equivalent shortcuts.
 - Alt+Backspace / Alt+Delete to delete word left/right
 - Shift+Backspace to delete to line start
 - Auto-close for (), [], {}, "", '', \`\`
+- Matching bracket highlighted when cursor is adjacent
 - Skip-over when a closing bracket already exists
 - Smart indentation on Enter around bracketed blocks
+- Drag tabs to reorder them
+- Files modified externally are detected on focus and reloaded automatically (or prompted if unsaved changes exist)
 
 ## Themes
 

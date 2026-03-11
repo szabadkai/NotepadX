@@ -105,6 +105,8 @@ pub struct Buffer {
     pub wrap_enabled: bool,
     /// Lazily-built visual line layout cache for fast scroll calculations.
     layout_cache: std::cell::RefCell<Option<VisualLineCache>>,
+    /// Modification time of the file on disk when last read/saved (for external change detection)
+    pub file_mtime: Option<std::time::SystemTime>,
 }
 
 /// Tracks the background thread loading a large file into a Rope.
@@ -719,6 +721,7 @@ impl Buffer {
             edit_mode_loader: None,
             wrap_enabled: true, // default on; overridden by AppConfig on load
             layout_cache: std::cell::RefCell::new(None),
+            file_mtime: None,
         }
     }
 
@@ -817,6 +820,7 @@ impl Buffer {
                     edit_mode_loader: None,
                     wrap_enabled: true,
                     layout_cache: std::cell::RefCell::new(None),
+                    file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
                 });
             }
         }
@@ -856,6 +860,7 @@ impl Buffer {
                 edit_mode_loader: None,
                 wrap_enabled: true,
                 layout_cache: std::cell::RefCell::new(None),
+                file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
             });
         }
 
@@ -893,6 +898,7 @@ impl Buffer {
             edit_mode_loader: None,
             wrap_enabled: true, // default on; overridden by AppConfig after open
             layout_cache: std::cell::RefCell::new(None),
+            file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
         })
     }
 
@@ -925,6 +931,7 @@ impl Buffer {
             edit_mode_loader: None,
             wrap_enabled: false,
             layout_cache: std::cell::RefCell::new(None),
+            file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
         })
     }
 
@@ -958,6 +965,11 @@ impl Buffer {
                 edit_mode_loader: None,
                 wrap_enabled: state.wrap_enabled,
                 layout_cache: std::cell::RefCell::new(None),
+                file_mtime: state
+                    .file_path
+                    .as_deref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .and_then(|m| m.modified().ok()),
             }
         } else if let Some(path) = state.file_path.as_deref() {
             if !path.exists() {
@@ -1333,6 +1345,7 @@ impl Buffer {
         if let Some(ref path) = self.file_path {
             self.write_rope_to_path(path)?;
             self.dirty = false;
+            self.file_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
             Ok(())
         } else {
             anyhow::bail!("No file path set")
@@ -1347,6 +1360,48 @@ impl Buffer {
         self.write_rope_to_path(&path)?;
         self.file_path = Some(path);
         self.dirty = false;
+        self.file_mtime = self
+            .file_path
+            .as_deref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        Ok(())
+    }
+
+    /// Check if the file on disk has been modified since we last read/saved it.
+    pub fn check_external_modification(&self) -> bool {
+        if let (Some(path), Some(our_mtime)) = (self.file_path.as_deref(), self.file_mtime) {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if let Ok(disk_mtime) = meta.modified() {
+                    return disk_mtime > our_mtime;
+                }
+            }
+        }
+        false
+    }
+
+    /// Reload the buffer contents from disk, preserving cursor position as best we can.
+    pub fn reload_from_disk(&mut self) -> Result<()> {
+        let path = self
+            .file_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No file path"))?;
+        let bytes = std::fs::read(&path)?;
+        let (encoding, _) = Self::detect_encoding(&bytes);
+        let (text, _, _) = encoding.decode(&bytes);
+        let old_cursor = self.cursor();
+        self.rope = Rope::from_str(&text);
+        let clamped = old_cursor.min(self.rope.len_chars());
+        self.set_cursor(clamped);
+        self.set_selection_anchor(None);
+        self.dirty = false;
+        self.encoding = encoding.name();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.file_mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        *self.layout_cache.borrow_mut() = None;
         Ok(())
     }
 
@@ -2234,6 +2289,119 @@ impl Buffer {
         self.set_cursor(new_line_start + target_col);
     }
 
+    /// Move the current line up by one (swap with line above). Cursor follows.
+    pub fn move_line_up(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let line = self.rope.char_to_line(self.cursor());
+        if line == 0 {
+            return;
+        }
+        let col = self.cursor() - self.rope.line_to_char(line);
+
+        let cur_start = self.rope.line_to_char(line);
+        let cur_end = if line + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        let cur_text: String = self.rope.slice(cur_start..cur_end).into();
+
+        let prev_start = self.rope.line_to_char(line - 1);
+        let prev_text: String = self.rope.slice(prev_start..cur_start).into();
+
+        // Remove both lines and reinsert in swapped order
+        let cursor_before = self.cursor();
+        let group_id = self.new_undo_group();
+        let combined_start = prev_start;
+        let combined_end = cur_end;
+        let old_text: String = self.rope.slice(combined_start..combined_end).into();
+
+        // Handle case where current line is the last and has no trailing newline
+        let new_text = if line + 1 >= self.rope.len_lines() && !cur_text.ends_with('\n') {
+            // Last line without newline: add newline after cur_text, strip from prev_text
+            let cur_with_nl = format!("{}\n", cur_text);
+            let prev_trimmed = prev_text.trim_end_matches(['\n', '\r']);
+            format!("{}{}", cur_with_nl, prev_trimmed)
+        } else {
+            format!("{}{}", cur_text, prev_text)
+        };
+
+        self.rope.remove(combined_start..combined_end);
+        self.rope.insert(combined_start, &new_text);
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.push_edit(
+            combined_start,
+            old_text,
+            new_text,
+            cursor_before,
+            group_id,
+            None,
+        );
+
+        // Place cursor on the same column in the moved line (now at line - 1)
+        let new_line_start = self.rope.line_to_char(line - 1);
+        let new_line_len = self.rope.line(line - 1).len_chars().saturating_sub(1);
+        self.set_cursor(new_line_start + col.min(new_line_len));
+    }
+
+    /// Move the current line down by one (swap with line below). Cursor follows.
+    pub fn move_line_down(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let line = self.rope.char_to_line(self.cursor());
+        if line + 1 >= self.rope.len_lines() {
+            return;
+        }
+        let col = self.cursor() - self.rope.line_to_char(line);
+
+        let cur_start = self.rope.line_to_char(line);
+        let next_start = self.rope.line_to_char(line + 1);
+        let next_end = if line + 2 < self.rope.len_lines() {
+            self.rope.line_to_char(line + 2)
+        } else {
+            self.rope.len_chars()
+        };
+        let cur_text: String = self.rope.slice(cur_start..next_start).into();
+        let next_text: String = self.rope.slice(next_start..next_end).into();
+
+        let cursor_before = self.cursor();
+        let group_id = self.new_undo_group();
+        let combined_start = cur_start;
+        let combined_end = next_end;
+        let old_text: String = self.rope.slice(combined_start..combined_end).into();
+
+        // Handle case where next line is the last and has no trailing newline
+        let new_text = if line + 2 >= self.rope.len_lines() && !next_text.ends_with('\n') {
+            let next_with_nl = format!("{}\n", next_text);
+            let cur_trimmed = cur_text.trim_end_matches(['\n', '\r']);
+            format!("{}{}", next_with_nl, cur_trimmed)
+        } else {
+            format!("{}{}", next_text, cur_text)
+        };
+
+        self.rope.remove(combined_start..combined_end);
+        self.rope.insert(combined_start, &new_text);
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.push_edit(
+            combined_start,
+            old_text,
+            new_text,
+            cursor_before,
+            group_id,
+            None,
+        );
+
+        // Place cursor on the same column in the moved line (now at line + 1)
+        let new_line_start = self.rope.line_to_char(line + 1);
+        let new_line_len = self.rope.line(line + 1).len_chars().saturating_sub(1);
+        self.set_cursor(new_line_start + col.min(new_line_len));
+    }
+
     /// Toggle line comment for the current line or each line in the selection
     pub fn toggle_comment(&mut self, comment_prefix: &str) {
         if self.is_read_only() {
@@ -2321,8 +2489,8 @@ impl Buffer {
     const BRACKET_PAIRS: &'static [(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}')];
 
     /// Find the matching bracket for the character at or near the cursor.
-    /// Returns the char index of the matching bracket, or None.
-    pub fn find_matching_bracket(&self) -> Option<usize> {
+    /// Returns (source_bracket_char_idx, matching_bracket_char_idx), or None.
+    pub fn find_matching_bracket(&self) -> Option<(usize, usize)> {
         let char_idx = self.cursor();
         let len = self.rope.len_chars();
         if len == 0 {
@@ -2349,7 +2517,7 @@ impl Buffer {
                         depth -= 1;
                     }
                     if depth == 0 {
-                        return Some(pos);
+                        return Some((check_idx, pos));
                     }
                     pos += 1;
                 }
@@ -2368,7 +2536,7 @@ impl Buffer {
                         depth -= 1;
                     }
                     if depth == 0 {
-                        return Some(pos);
+                        return Some((check_idx, pos));
                     }
                 }
             }
@@ -2464,6 +2632,131 @@ impl Buffer {
             0,
             None,
         );
+    }
+
+    /// Indent current line or all selected lines by tab_size spaces (or a tab character).
+    /// If no selection, inserts indent at cursor position (single-line behavior).
+    pub fn indent_lines(&mut self, tab_size: usize, use_spaces: bool) {
+        if self.is_read_only() {
+            return;
+        }
+        let indent_str = if use_spaces {
+            " ".repeat(tab_size)
+        } else {
+            "\t".to_string()
+        };
+
+        // If no selection, just insert at cursor (preserves old Tab behavior)
+        if self.selection_anchor().is_none() {
+            self.insert_text_multi(&indent_str);
+            return;
+        }
+
+        let anchor = self.selection_anchor().unwrap();
+        let cursor = self.cursor();
+        let sel_start = anchor.min(cursor);
+        let sel_end = anchor.max(cursor);
+        let start_line = self.rope.char_to_line(sel_start);
+        let end_line = self.rope.char_to_line(sel_end);
+
+        let group_id = self.new_undo_group();
+        let indent_len = indent_str.len();
+        let mut total_added: usize = 0;
+        let mut added_before_cursor: usize = 0;
+        let mut added_before_anchor: usize = 0;
+
+        for line_idx in start_line..=end_line {
+            let line_start = self.rope.line_to_char(line_idx) + total_added;
+            self.rope.insert(line_start, &indent_str);
+            self.push_edit(
+                line_start,
+                String::new(),
+                indent_str.clone(),
+                0,
+                group_id,
+                None,
+            );
+
+            // Track how many chars were added before cursor/anchor positions
+            let original_line_start = line_start - total_added;
+            if original_line_start < cursor || (original_line_start == cursor && cursor <= anchor) {
+                added_before_cursor += indent_len;
+            }
+            if original_line_start < anchor || (original_line_start == anchor && anchor < cursor) {
+                added_before_anchor += indent_len;
+            }
+            total_added += indent_len;
+        }
+
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.set_cursor(cursor + added_before_cursor);
+        self.set_selection_anchor(Some(anchor + added_before_anchor));
+    }
+
+    /// Dedent current line or all selected lines by removing up to tab_size leading spaces.
+    /// If no selection, dedents only the current line (preserves old Shift+Tab behavior).
+    pub fn dedent_lines(&mut self, tab_size: usize) {
+        if self.is_read_only() {
+            return;
+        }
+
+        // If no selection, fall back to single-line dedent
+        if self.selection_anchor().is_none() {
+            self.dedent_line(tab_size);
+            return;
+        }
+
+        let anchor = self.selection_anchor().unwrap();
+        let cursor = self.cursor();
+        let sel_start = anchor.min(cursor);
+        let sel_end = anchor.max(cursor);
+        let start_line = self.rope.char_to_line(sel_start);
+        let end_line = self.rope.char_to_line(sel_end);
+
+        let group_id = self.new_undo_group();
+        let mut total_removed: usize = 0;
+        let mut removed_before_cursor: usize = 0;
+        let mut removed_before_anchor: usize = 0;
+
+        for line_idx in start_line..=end_line {
+            let line_start = self.rope.line_to_char(line_idx) - total_removed;
+            let line_text: String = self
+                .rope
+                .line(line_idx - if total_removed > 0 { 0 } else { 0 })
+                .into();
+            let spaces: usize = line_text
+                .chars()
+                .take(tab_size)
+                .take_while(|c| *c == ' ')
+                .count();
+            if spaces == 0 {
+                continue;
+            }
+
+            let removed: String = self.rope.slice(line_start..line_start + spaces).into();
+            self.rope.remove(line_start..line_start + spaces);
+            self.push_edit(line_start, removed, String::new(), 0, group_id, None);
+
+            let original_line_start = line_start + total_removed;
+            // Only count removal if cursor/anchor is after the removed region
+            if cursor > original_line_start {
+                removed_before_cursor += spaces.min(cursor - original_line_start);
+            }
+            if anchor > original_line_start {
+                removed_before_anchor += spaces.min(anchor - original_line_start);
+            }
+            total_removed += spaces;
+        }
+
+        if total_removed == 0 {
+            return;
+        }
+
+        self.dirty = true;
+        self.redo_stack.clear();
+        self.set_cursor(cursor.saturating_sub(removed_before_cursor));
+        self.set_selection_anchor(Some(anchor.saturating_sub(removed_before_anchor)));
     }
 
     // --- Smart Auto-Indent ---

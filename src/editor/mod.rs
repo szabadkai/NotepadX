@@ -103,6 +103,23 @@ impl Editor {
         }
     }
 
+    /// Move a tab from one index to another, updating active_buffer
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.buffers.len() || to >= self.buffers.len() {
+            return;
+        }
+        let buf = self.buffers.remove(from);
+        self.buffers.insert(to, buf);
+        // Update active_buffer to follow
+        if self.active_buffer == from {
+            self.active_buffer = to;
+        } else if from < self.active_buffer && to >= self.active_buffer {
+            self.active_buffer -= 1;
+        } else if from > self.active_buffer && to <= self.active_buffer {
+            self.active_buffer += 1;
+        }
+    }
+
     /// Switch to a specific tab
     #[allow(dead_code)]
     pub fn switch_tab(&mut self, index: usize) {

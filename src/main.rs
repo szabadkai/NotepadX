@@ -43,6 +43,18 @@ fn char_offset_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// State for an in-progress tab drag-to-reorder gesture
+struct TabDrag {
+    /// Tab index being dragged
+    from: usize,
+    /// Logical x coordinate where the drag started
+    start_x: f32,
+    /// Current logical x coordinate
+    current_x: f32,
+    /// Whether the mouse has moved far enough to be a drag (vs click)
+    is_dragging: bool,
+}
+
 struct App {
     // Core state
     editor: Editor,
@@ -77,6 +89,8 @@ struct App {
     click_count: u8,
     // Suppress drag selection after double/triple-click
     suppress_drag: bool,
+    // Tab drag-to-reorder state
+    tab_drag: Option<TabDrag>,
 
     // Animation
     needs_redraw: bool,
@@ -123,6 +137,7 @@ impl App {
             last_click_pos: (0.0, 0.0),
             click_count: 0,
             suppress_drag: false,
+            tab_drag: None,
             needs_redraw: true,
             last_large_file_index_version: None,
             pending_find_jump: false,
@@ -413,6 +428,27 @@ impl App {
             label: Some("NotepadX Encoder"),
         });
 
+        // Update tab drag indicator for rendering
+        if let Some(ref drag) = self.tab_drag {
+            if drag.is_dragging {
+                // Compute the insertion indicator x position
+                let mut indicator_x = 0.0f32;
+                for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
+                    if drag.current_x < tx + tw / 2.0 {
+                        indicator_x = tx;
+                        break;
+                    }
+                    indicator_x = tx + tw;
+                    let _ = i;
+                }
+                renderer.tab_drag_indicator_x = Some(indicator_x);
+            } else {
+                renderer.tab_drag_indicator_x = None;
+            }
+        } else {
+            renderer.tab_drag_indicator_x = None;
+        }
+
         renderer.render(
             device,
             queue,
@@ -518,6 +554,13 @@ impl App {
                                 self.editor.close_tab(i);
                             }
                         } else {
+                            // Start potential tab drag (resolved on mouse release)
+                            self.tab_drag = Some(TabDrag {
+                                from: i,
+                                start_x: click_x,
+                                current_x: click_x,
+                                is_dragging: false,
+                            });
                             self.editor.active_buffer = i;
                         }
                         break;
@@ -1160,6 +1203,14 @@ impl App {
             Key::Named(NamedKey::Home) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
             Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
 
+            // Move line up/down (Alt+Up/Down)
+            Key::Named(NamedKey::ArrowUp) if alt && !cmd_or_ctrl && !shift => {
+                self.editor.active_mut().move_line_up();
+            }
+            Key::Named(NamedKey::ArrowDown) if alt && !cmd_or_ctrl && !shift => {
+                self.editor.active_mut().move_line_down();
+            }
+
             // Navigation — word-wise (Alt/Opt+Arrow)
             Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_all_word_left(),
             Key::Named(NamedKey::ArrowRight) if alt => {
@@ -1224,10 +1275,12 @@ impl App {
             }
             Key::Named(NamedKey::Tab) if shift => {
                 let ts = self.config.tab_size;
-                self.editor.active_mut().dedent_line(ts);
+                self.editor.active_mut().dedent_lines(ts);
             }
             Key::Named(NamedKey::Tab) => {
-                self.editor.active_mut().insert_text_multi("    ");
+                let ts = self.config.tab_size;
+                let use_spaces = self.config.use_spaces;
+                self.editor.active_mut().indent_lines(ts, use_spaces);
             }
             Key::Named(NamedKey::Space) => {
                 self.editor.active_mut().insert_text_multi(" ");
@@ -2465,6 +2518,21 @@ impl ApplicationHandler for App {
                 } else if self.is_mouse_down && !self.overlay.is_active() && !self.suppress_drag {
                     self.handle_mouse_drag();
                 }
+
+                // Tab drag tracking
+                if let Some(ref mut drag) = self.tab_drag {
+                    let scale = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.scale_factor())
+                        .unwrap_or(1.0);
+                    let lx = self.mouse_pos.0 / scale;
+                    drag.current_x = lx as f32;
+                    if (drag.current_x - drag.start_x).abs() > 4.0 {
+                        drag.is_dragging = true;
+                        self.needs_redraw = true;
+                    }
+                }
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
@@ -2492,6 +2560,27 @@ impl ApplicationHandler for App {
                     } else if !self.is_mouse_down {
                         // Mouse released — always re-enable drag for next click
                         self.suppress_drag = false;
+
+                        // Resolve tab drag-to-reorder
+                        if let Some(drag) = self.tab_drag.take() {
+                            if drag.is_dragging {
+                                // Find target tab index based on current x
+                                if let Some(renderer) = &self.renderer {
+                                    let mut target = renderer.tab_positions.len().saturating_sub(1);
+                                    for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate()
+                                    {
+                                        if drag.current_x < tx + tw / 2.0 {
+                                            target = i;
+                                            break;
+                                        }
+                                    }
+                                    if target != drag.from {
+                                        self.editor.move_tab(drag.from, target);
+                                    }
+                                }
+                                self.needs_redraw = true;
+                            }
+                        }
                     }
                 }
             }
@@ -2560,11 +2649,60 @@ impl ApplicationHandler for App {
                 self.needs_redraw = true;
             }
 
+            WindowEvent::Focused(true) => {
+                // Check for external modifications on focus gain
+                for buf in &mut self.editor.buffers {
+                    if buf.file_path.is_some()
+                        && !buf.is_binary
+                        && buf.check_external_modification()
+                    {
+                        let name = buf.display_name();
+                        if buf.dirty {
+                            // File has local changes AND external changes — ask user
+                            let reload = rfd::MessageDialog::new()
+                                .set_title("File Changed on Disk")
+                                .set_description(format!(
+                                    "\"{}\" has been modified externally and has unsaved changes.\nReload from disk? (unsaved changes will be lost)",
+                                    name
+                                ))
+                                .set_buttons(rfd::MessageButtons::YesNo)
+                                .show()
+                                == rfd::MessageDialogResult::Yes;
+                            if reload {
+                                let _ = buf.reload_from_disk();
+                            } else {
+                                // Update mtime so we don't ask again
+                                buf.file_mtime = buf
+                                    .file_path
+                                    .as_deref()
+                                    .and_then(|p| std::fs::metadata(p).ok())
+                                    .and_then(|m| m.modified().ok());
+                            }
+                        } else {
+                            // No local changes — silently reload
+                            let _ = buf.reload_from_disk();
+                        }
+                    }
+                }
+                self.needs_redraw = true;
+            }
+
             WindowEvent::Focused(false) => {
                 // Reset mouse state when the window loses focus (e.g. taskbar click)
                 // so that stale press/drag state does not produce unwanted selections.
                 self.is_mouse_down = false;
                 self.suppress_drag = false;
+                self.tab_drag = None;
+
+                // Auto-save dirty buffers on focus loss
+                if self.config.auto_save {
+                    for buf in &mut self.editor.buffers {
+                        if buf.dirty && buf.file_path.is_some() && !buf.is_binary {
+                            let _ = buf.save();
+                        }
+                    }
+                    self.persist_session_now();
+                }
             }
 
             WindowEvent::DroppedFile(path) => {
