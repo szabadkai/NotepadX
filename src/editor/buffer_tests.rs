@@ -377,4 +377,84 @@ mod tests {
         assert_eq!(visual_line, 1);
         assert_eq!(col, 5);
     }
+
+    // =========================================================================
+    // Multi-cursor line navigation with shift selection
+    // =========================================================================
+
+    /// move_all_to_line_start with shift=true must extend selection on every cursor
+    #[test]
+    fn test_move_all_to_line_start_shift_multicursor() {
+        // "hello\nworld\nfoo" — cursors at end of "hello" (5) and end of "world" (11)
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello\nworld\nfoo");
+        buffer.set_cursor(5); // end of first line
+        buffer.add_cursor(11); // end of second line
+
+        buffer.move_all_to_line_start(true); // shift=true → select
+
+        // Primary cursor: moved to 0, anchor remains at 5
+        assert_eq!(buffer.cursors[0].position, 0);
+        assert_eq!(buffer.cursors[0].selection_anchor, Some(5));
+        // Second cursor: moved to 6 (start of "world"), anchor remains at 11
+        assert_eq!(buffer.cursors[1].position, 6);
+        assert_eq!(buffer.cursors[1].selection_anchor, Some(11));
+    }
+
+    /// move_all_to_line_end with shift=true must extend selection on every cursor
+    #[test]
+    fn test_move_all_to_line_end_shift_multicursor() {
+        // "hello\nworld\nfoo" — cursors at start of "hello" (0) and start of "world" (6)
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello\nworld\nfoo");
+        buffer.set_cursor(0);
+        buffer.add_cursor(6);
+
+        buffer.move_all_to_line_end(true); // shift=true → select
+
+        // Primary cursor: moved to 5 (before '\n'), anchor at 0
+        assert_eq!(buffer.cursors[0].position, 5);
+        assert_eq!(buffer.cursors[0].selection_anchor, Some(0));
+        // Second cursor: moved to 11 (before '\n'), anchor at 6
+        assert_eq!(buffer.cursors[1].position, 11);
+        assert_eq!(buffer.cursors[1].selection_anchor, Some(6));
+    }
+
+    /// move_all_word_left with shift=true must extend selection on every cursor
+    #[test]
+    fn test_move_all_word_left_shift_multicursor() {
+        // "hello world" — cursors at end of each word
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello world");
+        buffer.set_cursor(5); // after "hello"
+        buffer.add_cursor(11); // after "world"
+
+        buffer.move_all_word_left(true); // shift=true → select
+
+        // Primary cursor: moved left over "hello" to 0, anchor at 5
+        assert_eq!(buffer.cursors[0].position, 0);
+        assert_eq!(buffer.cursors[0].selection_anchor, Some(5));
+        // Second cursor: moved left over "world" to 6, anchor at 11
+        assert_eq!(buffer.cursors[1].position, 6);
+        assert_eq!(buffer.cursors[1].selection_anchor, Some(11));
+    }
+
+    /// move_all_word_right with shift=true must extend selection on every cursor
+    #[test]
+    fn test_move_all_word_right_shift_multicursor() {
+        // "hello world" — cursors at start of each word
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("hello world");
+        buffer.set_cursor(0); // start of "hello"
+        buffer.add_cursor(6); // start of "world"
+
+        buffer.move_all_word_right(true); // shift=true → select
+
+        // Primary cursor: moved right past "hello" and the space to 6 (start of "world"), anchor at 0
+        assert_eq!(buffer.cursors[0].position, 6);
+        assert_eq!(buffer.cursors[0].selection_anchor, Some(0));
+        // Second cursor: moved right past "world" to 11 (end of string), anchor at 6
+        assert_eq!(buffer.cursors[1].position, 11);
+        assert_eq!(buffer.cursors[1].selection_anchor, Some(6));
+    }
 }

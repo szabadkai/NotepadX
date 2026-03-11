@@ -545,9 +545,15 @@ impl Buffer {
     }
 
     /// Multi-cursor movement: move all cursors one word left.
-    pub fn move_all_word_left(&mut self) {
+    pub fn move_all_word_left(&mut self, shift: bool) {
         for c in &mut self.cursors {
-            c.selection_anchor = None;
+            if shift {
+                if c.selection_anchor.is_none() {
+                    c.selection_anchor = Some(c.position);
+                }
+            } else {
+                c.selection_anchor = None;
+            }
             if c.position == 0 {
                 continue;
             }
@@ -565,10 +571,16 @@ impl Buffer {
     }
 
     /// Multi-cursor movement: move all cursors one word right.
-    pub fn move_all_word_right(&mut self) {
+    pub fn move_all_word_right(&mut self, shift: bool) {
         let len = self.rope.len_chars();
         for c in &mut self.cursors {
-            c.selection_anchor = None;
+            if shift {
+                if c.selection_anchor.is_none() {
+                    c.selection_anchor = Some(c.position);
+                }
+            } else {
+                c.selection_anchor = None;
+            }
             if c.position >= len {
                 continue;
             }
