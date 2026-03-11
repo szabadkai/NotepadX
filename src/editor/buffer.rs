@@ -6,6 +6,8 @@ use anyhow::Result;
 use encoding_rs::Encoding;
 use ropey::{Rope, RopeSlice};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cursor {
@@ -97,10 +99,37 @@ pub struct Buffer {
     pub large_file: Option<LargeFileState>,
     /// Whether the full file has been loaded into the rope for editing (opt-in for large files).
     pub large_file_edit_mode: bool,
+    /// Background loader for async large-file edit mode activation.
+    pub edit_mode_loader: Option<LargeFileEditLoader>,
     /// Whether soft line wrapping is enabled
     pub wrap_enabled: bool,
     /// Lazily-built visual line layout cache for fast scroll calculations.
     layout_cache: std::cell::RefCell<Option<VisualLineCache>>,
+}
+
+/// Tracks the background thread loading a large file into a Rope.
+pub struct LargeFileEditLoader {
+    receiver: mpsc::Receiver<Result<Rope>>,
+    /// Bytes loaded so far (updated from the background thread).
+    pub bytes_loaded: Arc<AtomicU64>,
+    /// Total file size in bytes.
+    pub file_size: u64,
+    /// Absolute byte offset of the cursor before the load started.
+    abs_cursor_byte: u64,
+}
+
+/// A wrapper around a reader that updates an atomic counter on each read.
+struct ProgressReader<R> {
+    inner: R,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl<R: std::io::Read> std::io::Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -626,6 +655,7 @@ impl Buffer {
             is_binary: false,
             large_file: None,
             large_file_edit_mode: false,
+            edit_mode_loader: None,
             wrap_enabled: true, // default on; overridden by AppConfig on load
             layout_cache: std::cell::RefCell::new(None),
         }
@@ -723,6 +753,7 @@ impl Buffer {
                     is_binary: true,
                     large_file: None,
                     large_file_edit_mode: false,
+                    edit_mode_loader: None,
                     wrap_enabled: true,
                     layout_cache: std::cell::RefCell::new(None),
                 });
@@ -761,6 +792,7 @@ impl Buffer {
                 is_binary: true,
                 large_file: None,
                 large_file_edit_mode: false,
+                edit_mode_loader: None,
                 wrap_enabled: true,
                 layout_cache: std::cell::RefCell::new(None),
             });
@@ -797,6 +829,7 @@ impl Buffer {
             is_binary: false,
             large_file: None,
             large_file_edit_mode: false,
+            edit_mode_loader: None,
             wrap_enabled: true, // default on; overridden by AppConfig after open
             layout_cache: std::cell::RefCell::new(None),
         })
@@ -828,6 +861,7 @@ impl Buffer {
             is_binary: false,
             large_file: Some(large_file),
             large_file_edit_mode: false,
+            edit_mode_loader: None,
             wrap_enabled: false,
             layout_cache: std::cell::RefCell::new(None),
         })
@@ -860,6 +894,7 @@ impl Buffer {
                 is_binary: false,
                 large_file: None,
                 large_file_edit_mode: false,
+                edit_mode_loader: None,
                 wrap_enabled: state.wrap_enabled,
                 layout_cache: std::cell::RefCell::new(None),
             }
@@ -938,32 +973,78 @@ impl Buffer {
         self.is_binary || (self.is_large_file() && !self.large_file_edit_mode)
     }
 
-    /// Load the entire large file into the rope for full editing.
-    /// This trades ~2-3x file-size memory for complete editing capability.
-    pub fn enable_large_file_edit_mode(
-        &mut self,
-        syntax: Option<&SyntaxHighlighter>,
-    ) -> Result<()> {
-        if !self.is_large_file() || self.large_file_edit_mode {
-            return Ok(());
+    /// Kick off loading the entire large file in a background thread.
+    /// Call `poll_edit_mode_load()` each frame to check for completion.
+    pub fn enable_large_file_edit_mode(&mut self) {
+        if !self.is_large_file() || self.large_file_edit_mode || self.edit_mode_loader.is_some() {
+            return;
         }
-        let path = self
-            .file_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No file path set"))?
-            .clone();
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
 
-        // Preserve absolute cursor position before replacing the rope
-        let abs_byte = self
+        let file_size = self
+            .large_file
+            .as_ref()
+            .map(|s| s.file_size_bytes)
+            .unwrap_or(0);
+
+        // Preserve absolute cursor position before the load
+        let abs_cursor_byte = self
             .large_file
             .as_ref()
             .map(|s| s.window_start_byte + self.rope.char_to_byte(self.cursor()) as u64)
             .unwrap_or(0);
 
-        // Stream the full file into a rope (never materialises the whole String)
-        let file = std::fs::File::open(&path)?;
-        let reader = std::io::BufReader::new(file);
-        let rope = Rope::from_reader(reader)?;
+        let progress = Arc::new(AtomicU64::new(0));
+        let progress_clone = Arc::clone(&progress);
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Rope> {
+                let file = std::fs::File::open(&path)?;
+                let reader = std::io::BufReader::new(file);
+                let reader = ProgressReader {
+                    inner: reader,
+                    bytes_read: progress_clone,
+                };
+                Ok(Rope::from_reader(reader)?)
+            })();
+            let _ = tx.send(result);
+        });
+
+        self.edit_mode_loader = Some(LargeFileEditLoader {
+            receiver: rx,
+            bytes_loaded: progress,
+            file_size,
+            abs_cursor_byte,
+        });
+    }
+
+    /// Poll the background loader. Returns `true` when loading just completed.
+    /// `syntax` is needed to re-detect the language after the rope is swapped in.
+    pub fn poll_edit_mode_load(&mut self, syntax: Option<&SyntaxHighlighter>) -> bool {
+        let Some(loader) = &self.edit_mode_loader else {
+            return false;
+        };
+
+        let rope = match loader.receiver.try_recv() {
+            Ok(Ok(rope)) => rope,
+            Ok(Err(e)) => {
+                log::error!("Large-file edit-mode load failed: {}", e);
+                self.edit_mode_loader = None;
+                return false;
+            }
+            Err(mpsc::TryRecvError::Empty) => return false, // still loading
+            Err(mpsc::TryRecvError::Disconnected) => {
+                log::error!("Large-file edit-mode loader thread panicked");
+                self.edit_mode_loader = None;
+                return false;
+            }
+        };
+
+        let abs_byte = loader.abs_cursor_byte;
+        self.edit_mode_loader = None;
 
         // Detect line ending from first few lines of the full content
         let line_ending = {
@@ -993,13 +1074,22 @@ impl Buffer {
         self.set_selection_anchor(None);
         self.set_desired_col(None);
 
-        // Re-enable language detection (skipped when large file first opens)
+        // Re-enable language detection
         if let Some(syntax) = syntax {
             let filename = self.display_name();
             self.language_index = syntax.detect_language(&filename);
         }
 
-        Ok(())
+        true
+    }
+
+    /// Returns the edit-mode loading progress as (bytes_loaded, file_size), or None.
+    pub fn edit_mode_load_progress(&self) -> Option<(u64, u64)> {
+        let loader = self.edit_mode_loader.as_ref()?;
+        Some((
+            loader.bytes_loaded.load(Ordering::Relaxed),
+            loader.file_size,
+        ))
     }
 
     pub fn large_file_index_version(&self) -> Option<u64> {

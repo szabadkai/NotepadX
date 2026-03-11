@@ -537,6 +537,22 @@ impl Renderer {
             String::new()
         };
 
+        let edit_load_info = if let Some((loaded, total)) = buffer.edit_mode_load_progress() {
+            if total > 0 {
+                let pct = (loaded as f64 / total as f64 * 100.0).min(100.0);
+                let loaded_mb = loaded as f64 / (1024.0 * 1024.0);
+                let total_mb = total as f64 / (1024.0 * 1024.0);
+                format!(
+                    "   ·   Loading for edit: {:.0}% ({:.0}/{:.0} MB)",
+                    pct, loaded_mb, total_mb
+                )
+            } else {
+                "   ·   Loading for edit…".to_string()
+            }
+        } else {
+            String::new()
+        };
+
         // Build status text and compute segment boundaries for hit testing.
         // Each segment is separated by "   ·   " (7 chars).
         let sep = "   ·   ";
@@ -545,7 +561,7 @@ impl Renderer {
         let seg_lines = format!("{} lines", total_lines);
         let seg_lang = lang_name.to_string();
         let seg_encoding = encoding.to_string();
-        let seg_line_ending = format!("{}{}", line_ending, search_info);
+        let seg_line_ending = format!("{}{}{}", line_ending, search_info, edit_load_info);
         let seg_version = "NotepadX v0.1".to_string();
 
         let status_text = format!(

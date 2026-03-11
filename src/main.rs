@@ -1623,14 +1623,9 @@ impl App {
             CommandId::EnableLargeFileEdit => {
                 if self.editor.active().is_large_file()
                     && !self.editor.active().large_file_edit_mode
+                    && self.editor.active().edit_mode_loader.is_none()
                 {
-                    if let Err(e) = self
-                        .editor
-                        .active_mut()
-                        .enable_large_file_edit_mode(Some(&self.syntax))
-                    {
-                        log::error!("Failed to enable large-file edit mode: {}", e);
-                    }
+                    self.editor.active_mut().enable_large_file_edit_mode();
                 }
             }
         }
@@ -2558,6 +2553,21 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Poll the background edit-mode loader
+        if self.editor.active().edit_mode_loader.is_some() {
+            if self
+                .editor
+                .active_mut()
+                .poll_edit_mode_load(Some(&self.syntax))
+            {
+                // Loading just finished
+                self.needs_redraw = true;
+            } else if self.editor.active().edit_mode_loader.is_some() {
+                // Still loading — keep requesting redraws for progress
+                self.needs_redraw = true;
+            }
+        }
+
         self.persist_session_if_due();
 
         let scroll_diff_y =
@@ -2565,6 +2575,14 @@ impl ApplicationHandler for App {
         let scroll_diff_x =
             (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
         if scroll_diff_y > 0.1 || scroll_diff_x > 0.1 {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+
+        // While the edit-mode loader is active, keep the event loop ticking
+        // so we can poll for completion and update the progress bar.
+        if self.editor.active().edit_mode_loader.is_some() {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
