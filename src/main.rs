@@ -491,6 +491,7 @@ impl App {
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
+            self.suppress_drag = true;
             if let Some(renderer) = &self.renderer {
                 let click_x = x as f32;
                 for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
@@ -526,6 +527,7 @@ impl App {
         }
         // Status Bar
         else if y >= status_top {
+            self.suppress_drag = true;
             self.handle_status_bar_click(x as f32);
         }
         // Editor Area
@@ -645,7 +647,8 @@ impl App {
         let line_height = self.config.font_size * 1.44;
         let char_width = self.config.font_size * 0.6;
 
-        if y >= TAB_BAR_HEIGHT as f64 {
+        let status_top = win_h - renderer::STATUS_BAR_HEIGHT as f64;
+        if y >= TAB_BAR_HEIGHT as f64 && y < status_top {
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
 
             // Calculate wrap width for line wrapping
