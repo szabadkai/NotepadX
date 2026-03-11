@@ -451,6 +451,21 @@ impl App {
         }
     }
 
+    /// Logical window size (width, height) in unscaled pixels.
+    fn logical_window_size(&self) -> (f64, f64) {
+        let w = self
+            .renderer
+            .as_ref()
+            .map(|r| r.width as f32 / r.scale_factor)
+            .unwrap_or(800.0) as f64;
+        let h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.height as f32 / r.scale_factor)
+            .unwrap_or(600.0) as f64;
+        (w, h)
+    }
+
     fn handle_mouse_click(&mut self, is_double: bool) {
         let (x, y) = self.mouse_pos;
         let scale = self
@@ -463,12 +478,14 @@ impl App {
 
         use renderer::{GUTTER_WIDTH, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
 
-        let win_h = self
-            .renderer
-            .as_ref()
-            .map(|r| r.height as f32 / r.scale_factor)
-            .unwrap_or(600.0);
-        let status_top = (win_h - renderer::STATUS_BAR_HEIGHT) as f64;
+        let (win_w, win_h) = self.logical_window_size();
+
+        // Ignore clicks outside the window bounds (e.g. taskbar clicks)
+        if x < 0.0 || y < 0.0 || x >= win_w || y >= win_h {
+            return;
+        }
+
+        let status_top = win_h - renderer::STATUS_BAR_HEIGHT as f64;
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
@@ -611,6 +628,12 @@ impl App {
             .unwrap_or(1.0);
         let x = x / scale;
         let y = y / scale;
+
+        // Ignore drags outside the window bounds (e.g. after a taskbar click)
+        let (win_w, win_h) = self.logical_window_size();
+        if x < 0.0 || y < 0.0 || x >= win_w || y >= win_h {
+            return;
+        }
 
         use renderer::{GUTTER_WIDTH, LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
         let line_height = self.config.font_size * 1.44;
@@ -2462,6 +2485,13 @@ impl ApplicationHandler for App {
                     }
                 }
                 self.needs_redraw = true;
+            }
+
+            WindowEvent::Focused(false) => {
+                // Reset mouse state when the window loses focus (e.g. taskbar click)
+                // so that stale press/drag state does not produce unwanted selections.
+                self.is_mouse_down = false;
+                self.suppress_drag = false;
             }
 
             WindowEvent::DroppedFile(path) => {
