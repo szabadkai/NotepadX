@@ -18,6 +18,7 @@ pub enum ActiveOverlay {
     Help,
     Settings,
     LanguagePicker,
+    EncodingPicker,
     LineEndingPicker,
 }
 
@@ -40,7 +41,7 @@ pub struct OverlayState {
     // Results panel
     pub results_panel: results_panel::ResultsPanel,
 
-    // Picker selection index (for LanguagePicker, LineEndingPicker)
+    // Picker selection index (for LanguagePicker, EncodingPicker, LineEndingPicker)
     pub picker_selected: usize,
 
     // Recently-used command IDs for palette ordering (session-scoped)

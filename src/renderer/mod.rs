@@ -51,6 +51,18 @@ pub enum StatusBarSegment {
     Version,
 }
 
+impl StatusBarSegment {
+    pub fn is_actionable(self) -> bool {
+        matches!(
+            self,
+            StatusBarSegment::CursorPosition
+                | StatusBarSegment::Language
+                | StatusBarSegment::Encoding
+                | StatusBarSegment::LineEnding
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverlayTextPassLayer {
     TabBar,
@@ -748,14 +760,28 @@ impl Renderer {
                     } else {
                         0
                     };
-                    for (idx, cmd) in filtered
+                    let visible_commands: Vec<_> = filtered
                         .iter()
-                        .enumerate()
                         .skip(scroll_offset)
                         .take(max_visible)
-                    {
+                        .collect();
+                    let name_width = visible_commands
+                        .iter()
+                        .map(|cmd| cmd.name.len())
+                        .max()
+                        .unwrap_or(0);
+                    for (row_idx, cmd) in visible_commands.iter().enumerate() {
+                        let idx = scroll_offset + row_idx;
                         let sel = if idx == selected { "▸ " } else { "  " };
-                        text.push_str(&format!("{}{}  {}\n", sel, cmd.name, cmd.shortcut));
+                        let shortcut = crate::overlay::palette::format_shortcut_badge(cmd.shortcut);
+                        if shortcut.is_empty() {
+                            text.push_str(&format!("{}{:<name_width$}\n", sel, cmd.name));
+                        } else {
+                            text.push_str(&format!(
+                                "{}{:<name_width$}  {}\n",
+                                sel, cmd.name, shortcut,
+                            ));
+                        }
                     }
                     text
                 }
@@ -775,7 +801,7 @@ impl Renderer {
                     text.push_str("Lines:     Alt+Up/Dn: Move Line\n");
                     text.push_str("           Tab/Shift+Tab: Indent (sel)\n\n");
                     text.push_str("Search:    Cmd+F: Find   | Cmd+H: Replace\n");
-                    text.push_str("           Cmd+G: Goto   | Cmd+P: Palette\n\n");
+                    text.push_str("           Cmd+G: Goto   | Cmd+Shift+P: Palette\n\n");
                     text.push_str("Tabs:      Drag to reorder tabs.\n\n");
                     text.push_str("Other:     Cmd+K/Shift+K: Theme Cycle\n");
                     text.push_str("           Cmd+,: Settings | Alt+Z: Wrap\n");
@@ -873,6 +899,37 @@ impl Renderer {
                             "  "
                         };
                         text.push_str(&format!("{}{}{}\n", sel, marker, name));
+                    }
+                    text
+                }
+                crate::overlay::ActiveOverlay::EncodingPicker => {
+                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                    let mut text = format!("> {}│{}\n", before, after);
+                    let query_lower = overlay.input.to_lowercase();
+                    let current_encoding = buffer.encoding;
+                    let items = [
+                        ("UTF-8", encoding_rs::UTF_8),
+                        ("UTF-16 LE", encoding_rs::UTF_16LE),
+                        ("UTF-16 BE", encoding_rs::UTF_16BE),
+                        ("Windows-1252", encoding_rs::WINDOWS_1252),
+                    ];
+                    let filtered: Vec<_> = items
+                        .into_iter()
+                        .filter(|(label, encoding)| {
+                            query_lower.is_empty()
+                                || label.to_lowercase().contains(&query_lower)
+                                || encoding.name().to_lowercase().contains(&query_lower)
+                        })
+                        .collect();
+                    for (idx, (label, encoding)) in filtered.iter().take(10).enumerate() {
+                        let is_current = encoding.name().eq_ignore_ascii_case(current_encoding);
+                        let marker = if is_current { "● " } else { "  " };
+                        let sel = if idx == overlay.picker_selected {
+                            "▸ "
+                        } else {
+                            "  "
+                        };
+                        text.push_str(&format!("{}{}{}\n", sel, marker, label));
                     }
                     text
                 }
@@ -1488,6 +1545,7 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 crate::overlay::ActiveOverlay::LanguagePicker => 260.0 * s,
+                crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * s,
                 crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
                 _ => 40.0 * s,
             };
@@ -1537,9 +1595,48 @@ impl Renderer {
                 theme.selection.b,
                 theme.selection.a.max(0.4),
             ];
+            let input_bg = [theme.bg.r, theme.bg.g, theme.bg.b, 0.95];
+            let input_border = [
+                theme.gutter_fg.r,
+                theme.gutter_fg.g,
+                theme.gutter_fg.b,
+                0.35,
+            ];
+            let input_focus = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 0.9];
 
             match overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
+                    let pill_h = 18.0 * s;
+                    let pill_gap = 6.0 * s;
+                    let pill_regex_w = 40.0 * s;
+                    let pill_word_w = 28.0 * s;
+                    let pill_case_w = 36.0 * s;
+                    let right = overlay_left + overlay_width - 8.0 * s;
+                    let y = overlay_top_panel + 6.0 * s;
+                    let regex_x = right - pill_regex_w;
+                    let word_x = regex_x - pill_gap - pill_word_w;
+                    let case_x = word_x - pill_gap - pill_case_w;
+                    let field_x = overlay_left + 8.0 * s + 5.0 * overlay_char_width;
+                    let field_y = overlay_top_panel + 4.0 * s;
+                    let field_w = (case_x - 6.0 * s - field_x).max(80.0 * s);
+                    let field_h = overlay_line_height + 4.0 * s;
+                    overlay_rects.push(Rect::rounded(
+                        field_x,
+                        field_y,
+                        field_w,
+                        field_h,
+                        input_focus,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        field_x + 1.0 * s,
+                        field_y + 1.0 * s,
+                        field_w - 2.0 * s,
+                        field_h - 2.0 * s,
+                        input_bg,
+                        3.0 * s,
+                    ));
+
                     if let Some((start, end)) = overlay.find_selection_char_range() {
                         overlay_rects.push(Rect::flat(
                             overlay_left
@@ -1552,17 +1649,6 @@ impl Renderer {
                             selection_color,
                         ));
                     }
-
-                    let pill_h = 18.0 * s;
-                    let pill_gap = 6.0 * s;
-                    let pill_regex_w = 40.0 * s;
-                    let pill_word_w = 28.0 * s;
-                    let pill_case_w = 36.0 * s;
-                    let right = overlay_left + overlay_width - 8.0 * s;
-                    let y = overlay_top_panel + 6.0 * s;
-                    let regex_x = right - pill_regex_w;
-                    let word_x = regex_x - pill_gap - pill_word_w;
-                    let case_x = word_x - pill_gap - pill_case_w;
                     let active = [
                         theme.selection.r,
                         theme.selection.g,
@@ -1616,6 +1702,67 @@ impl Renderer {
                     ));
                 }
                 crate::overlay::ActiveOverlay::FindReplace => {
+                    let pill_h = 18.0 * s;
+                    let pill_gap = 6.0 * s;
+                    let pill_regex_w = 40.0 * s;
+                    let pill_word_w = 28.0 * s;
+                    let pill_case_w = 36.0 * s;
+                    let right = overlay_left + overlay_width - 8.0 * s;
+                    let y = overlay_top_panel + 6.0 * s;
+                    let regex_x = right - pill_regex_w;
+                    let word_x = regex_x - pill_gap - pill_word_w;
+                    let case_x = word_x - pill_gap - pill_case_w;
+                    let find_field_x = overlay_left + 8.0 * s + 8.0 * overlay_char_width;
+                    let find_field_y = overlay_top_panel + 4.0 * s;
+                    let find_field_w = (case_x - 6.0 * s - find_field_x).max(80.0 * s);
+                    let replace_field_x = overlay_left + 8.0 * s + 8.0 * overlay_char_width;
+                    let replace_field_y = overlay_top_panel + 4.0 * s + overlay_line_height;
+                    let replace_field_w =
+                        (overlay_left + overlay_width - 8.0 * s - replace_field_x).max(80.0 * s);
+                    let field_h = overlay_line_height + 4.0 * s;
+                    let find_ring = if overlay.focus_replace {
+                        input_border
+                    } else {
+                        input_focus
+                    };
+                    let replace_ring = if overlay.focus_replace {
+                        input_focus
+                    } else {
+                        input_border
+                    };
+                    overlay_rects.push(Rect::rounded(
+                        find_field_x,
+                        find_field_y,
+                        find_field_w,
+                        field_h,
+                        find_ring,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        find_field_x + 1.0 * s,
+                        find_field_y + 1.0 * s,
+                        find_field_w - 2.0 * s,
+                        field_h - 2.0 * s,
+                        input_bg,
+                        3.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        replace_field_x,
+                        replace_field_y,
+                        replace_field_w,
+                        field_h,
+                        replace_ring,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        replace_field_x + 1.0 * s,
+                        replace_field_y + 1.0 * s,
+                        replace_field_w - 2.0 * s,
+                        field_h - 2.0 * s,
+                        input_bg,
+                        3.0 * s,
+                    ));
+
                     if let Some((start, end)) = overlay.find_selection_char_range() {
                         overlay_rects.push(Rect::flat(
                             overlay_left
@@ -1641,17 +1788,6 @@ impl Renderer {
                             selection_color,
                         ));
                     }
-
-                    let pill_h = 18.0 * s;
-                    let pill_gap = 6.0 * s;
-                    let pill_regex_w = 40.0 * s;
-                    let pill_word_w = 28.0 * s;
-                    let pill_case_w = 36.0 * s;
-                    let right = overlay_left + overlay_width - 8.0 * s;
-                    let y = overlay_top_panel + 6.0 * s;
-                    let regex_x = right - pill_regex_w;
-                    let word_x = regex_x - pill_gap - pill_word_w;
-                    let case_x = word_x - pill_gap - pill_case_w;
                     let active = [
                         theme.selection.r,
                         theme.selection.g,
@@ -1784,6 +1920,52 @@ impl Renderer {
                             4.0 * s,
                         ));
                     }
+                }
+                crate::overlay::ActiveOverlay::GotoLine => {
+                    let field_x = overlay_left + 8.0 * s + 11.0 * overlay_char_width;
+                    let field_y = overlay_top_panel + 4.0 * s;
+                    let field_w = (overlay_left + overlay_width - 8.0 * s - field_x).max(80.0 * s);
+                    let field_h = overlay_line_height + 4.0 * s;
+                    overlay_rects.push(Rect::rounded(
+                        field_x,
+                        field_y,
+                        field_w,
+                        field_h,
+                        input_focus,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        field_x + 1.0 * s,
+                        field_y + 1.0 * s,
+                        field_w - 2.0 * s,
+                        field_h - 2.0 * s,
+                        input_bg,
+                        3.0 * s,
+                    ));
+                }
+                crate::overlay::ActiveOverlay::CommandPalette
+                | crate::overlay::ActiveOverlay::LanguagePicker
+                | crate::overlay::ActiveOverlay::EncodingPicker => {
+                    let field_x = overlay_left + 6.0 * s;
+                    let field_y = overlay_top_panel + 4.0 * s;
+                    let field_w = overlay_width - 12.0 * s;
+                    let field_h = overlay_line_height + 4.0 * s;
+                    overlay_rects.push(Rect::rounded(
+                        field_x,
+                        field_y,
+                        field_w,
+                        field_h,
+                        input_focus,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        field_x + 1.0 * s,
+                        field_y + 1.0 * s,
+                        field_w - 2.0 * s,
+                        field_h - 2.0 * s,
+                        input_bg,
+                        3.0 * s,
+                    ));
                 }
                 _ => {}
             }
@@ -1967,6 +2149,7 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::Help => 600.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 crate::overlay::ActiveOverlay::LanguagePicker => 260.0 * s,
+                crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * s,
                 crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
                 _ => 40.0 * s,
             };

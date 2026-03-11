@@ -43,6 +43,16 @@ fn char_offset_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+fn status_bar_command(segment: renderer::StatusBarSegment) -> Option<CommandId> {
+    match segment {
+        renderer::StatusBarSegment::CursorPosition => Some(CommandId::GotoLine),
+        renderer::StatusBarSegment::Language => Some(CommandId::ChangeLanguage),
+        renderer::StatusBarSegment::Encoding => Some(CommandId::ChangeEncoding),
+        renderer::StatusBarSegment::LineEnding => Some(CommandId::ChangeLineEnding),
+        renderer::StatusBarSegment::LineCount | renderer::StatusBarSegment::Version => None,
+    }
+}
+
 /// State for an in-progress tab drag-to-reorder gesture
 struct TabDrag {
     /// Tab index being dragged
@@ -102,6 +112,48 @@ struct App {
 }
 
 impl App {
+    fn can_change_encoding(&self) -> bool {
+        let buffer = self.editor.active();
+        buffer.file_path.is_some() && !buffer.is_binary && !buffer.is_large_file()
+    }
+
+    fn status_bar_segment_is_actionable(&self, segment: renderer::StatusBarSegment) -> bool {
+        if !segment.is_actionable() {
+            return false;
+        }
+
+        match status_bar_command(segment) {
+            Some(CommandId::ChangeEncoding) => self.can_change_encoding(),
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn supported_encodings() -> [(&'static str, &'static encoding_rs::Encoding); 4] {
+        [
+            ("UTF-8", encoding_rs::UTF_8),
+            ("UTF-16 LE", encoding_rs::UTF_16LE),
+            ("UTF-16 BE", encoding_rs::UTF_16BE),
+            ("Windows-1252", encoding_rs::WINDOWS_1252),
+        ]
+    }
+
+    fn filtered_encoding_items(
+        &self,
+    ) -> Vec<(usize, &'static str, &'static encoding_rs::Encoding)> {
+        let query_lower = self.overlay.input.to_lowercase();
+        Self::supported_encodings()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (label, encoding))| {
+                query_lower.is_empty()
+                    || label.to_lowercase().contains(&query_lower)
+                    || encoding.name().to_lowercase().contains(&query_lower)
+            })
+            .map(|(idx, (label, encoding))| (idx, label, encoding))
+            .collect()
+    }
+
     fn new() -> Self {
         let config = AppConfig::load();
         let all_themes = Theme::all_themes();
@@ -638,35 +690,17 @@ impl App {
     }
 
     fn handle_status_bar_click(&mut self, x: f32) {
-        use renderer::StatusBarSegment;
-
-        let seg = self
+        let command = self
             .renderer
             .as_ref()
-            .and_then(|r| r.hit_test_status_bar(x));
+            .and_then(|r| r.hit_test_status_bar(x))
+            .and_then(status_bar_command);
 
-        match seg {
-            Some(StatusBarSegment::CursorPosition) => {
-                self.overlay.open(ActiveOverlay::GotoLine);
-            }
-            Some(StatusBarSegment::Language) => {
-                self.overlay.open(ActiveOverlay::LanguagePicker);
-                // Pre-select the current language
-                if let Some(idx) = self.editor.active().language_index {
-                    // +1 because item 0 is "Plain Text" / auto-detect
-                    self.overlay.picker_selected = idx + 1;
-                }
-            }
-            Some(StatusBarSegment::LineEnding) => {
-                self.overlay.open(ActiveOverlay::LineEndingPicker);
-                // Pre-select current line ending
-                self.overlay.picker_selected = match self.editor.active().line_ending {
-                    editor::buffer::LineEnding::Lf => 0,
-                    editor::buffer::LineEnding::CrLf => 1,
-                };
-            }
-            _ => {}
+        if let Some(command) = command {
+            self.execute_command(command);
+            return;
         }
+
         self.needs_redraw = true;
     }
 
@@ -841,6 +875,7 @@ impl App {
             ActiveOverlay::Help => 600.0,
             ActiveOverlay::Settings => 360.0,
             ActiveOverlay::LanguagePicker => 260.0,
+            ActiveOverlay::EncodingPicker => 180.0,
             ActiveOverlay::LineEndingPicker => 100.0,
             _ => 40.0,
         };
@@ -925,7 +960,16 @@ impl App {
                     self.overlay.replace_sel_anchor = None;
                 }
             }
-            _ => {} // Help, Settings, Palette, Goto — no editable text fields to target
+            ActiveOverlay::CommandPalette
+            | ActiveOverlay::LanguagePicker
+            | ActiveOverlay::EncodingPicker => {
+                let cursor = self.overlay_cursor_from_x(x, false);
+                self.overlay.focus_replace = false;
+                self.overlay.cursor_pos = cursor;
+                self.overlay.input_sel_anchor = Some(cursor);
+                self.overlay.replace_sel_anchor = None;
+            }
+            _ => {} // Help, Settings, Goto — no editable text fields to target
         }
 
         self.needs_redraw = true;
@@ -989,7 +1033,9 @@ impl App {
                     return;
                 }
             }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "p" => {
+            Key::Character(c)
+                if cmd_or_ctrl && shift && (c.as_str() == "P" || c.as_str() == "p") =>
+            {
                 self.overlay.open(ActiveOverlay::CommandPalette);
                 self.needs_redraw = true;
                 return;
@@ -1347,6 +1393,11 @@ impl App {
             self.needs_redraw = true;
             return;
         }
+        if self.overlay.active == ActiveOverlay::EncodingPicker {
+            self.handle_encoding_picker_key(&event.logical_key);
+            self.needs_redraw = true;
+            return;
+        }
         if self.overlay.active == ActiveOverlay::LineEndingPicker {
             self.handle_line_ending_picker_key(&event.logical_key);
             self.needs_redraw = true;
@@ -1632,7 +1683,9 @@ impl App {
             ActiveOverlay::Settings => {
                 // Settings handled separately in handle_settings_key
             }
-            ActiveOverlay::LanguagePicker | ActiveOverlay::LineEndingPicker => {
+            ActiveOverlay::LanguagePicker
+            | ActiveOverlay::EncodingPicker
+            | ActiveOverlay::LineEndingPicker => {
                 // Handled separately in their own key handlers
             }
         }
@@ -1726,6 +1779,7 @@ impl App {
                     self.overlay.picker_selected = idx + 1;
                 }
             }
+            CommandId::ChangeEncoding => self.open_encoding_picker(),
             CommandId::ChangeLineEnding => {
                 self.overlay.open(ActiveOverlay::LineEndingPicker);
                 self.overlay.picker_selected = match self.editor.active().line_ending {
@@ -1922,6 +1976,94 @@ impl App {
         if let Some(selected) = items.get(self.overlay.picker_selected) {
             self.editor.active_mut().language_index = *selected;
         }
+    }
+
+    fn open_encoding_picker(&mut self) {
+        if !self.can_change_encoding() {
+            return;
+        }
+
+        self.overlay.open(ActiveOverlay::EncodingPicker);
+        let current = self.editor.active().encoding;
+        if let Some((idx, _, _)) = self
+            .filtered_encoding_items()
+            .into_iter()
+            .find(|(_, _, encoding)| encoding.name().eq_ignore_ascii_case(current))
+        {
+            self.overlay.picker_selected = idx;
+        }
+    }
+
+    fn handle_encoding_picker_key(&mut self, key: &Key) {
+        match key {
+            Key::Named(NamedKey::ArrowDown) => {
+                let count = self.filtered_encoding_items().len();
+                if self.overlay.picker_selected + 1 < count {
+                    self.overlay.picker_selected += 1;
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if self.overlay.picker_selected > 0 {
+                    self.overlay.picker_selected -= 1;
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                if self.apply_encoding_picker_selection() {
+                    self.overlay.close();
+                }
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.overlay.close();
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if self.overlay.cursor_pos > 0 {
+                    let remove_at = self.overlay.cursor_pos - 1;
+                    self.overlay.input.remove(remove_at);
+                    self.overlay.cursor_pos -= 1;
+                    self.overlay.picker_selected = 0;
+                }
+            }
+            Key::Character(c) => {
+                self.overlay
+                    .input
+                    .insert_str(self.overlay.cursor_pos, c.as_str());
+                self.overlay.cursor_pos += c.len();
+                self.overlay.picker_selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_encoding_picker_selection(&mut self) -> bool {
+        let items = self.filtered_encoding_items();
+        let Some((_, _, encoding)) = items.get(self.overlay.picker_selected).copied() else {
+            return true;
+        };
+
+        if self.editor.active().dirty {
+            let should_reload = rfd::MessageDialog::new()
+                .set_title("Reload with Encoding")
+                .set_description(
+                    "Reloading with a different encoding discards unsaved changes. Continue?",
+                )
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show()
+                == rfd::MessageDialogResult::Yes;
+            if !should_reload {
+                return false;
+            }
+        }
+
+        if let Err(err) = self
+            .editor
+            .active_mut()
+            .reload_from_disk_with_encoding(encoding)
+        {
+            log::error!("Reload with encoding failed: {}", err);
+            return false;
+        }
+
+        true
     }
 
     fn handle_line_ending_picker_key(&mut self, key: &Key) {
@@ -2482,12 +2624,16 @@ impl ApplicationHandler for App {
                     use renderer::TAB_BAR_HEIGHT;
 
                     if y >= status_top {
-                        // Over the status bar — show pointer, track hovered segment
-                        window.set_cursor(winit::window::CursorIcon::Pointer);
                         let new_seg = self
                             .renderer
                             .as_ref()
-                            .and_then(|r| r.hit_test_status_bar(x as f32));
+                            .and_then(|r| r.hit_test_status_bar(x as f32))
+                            .filter(|seg| self.status_bar_segment_is_actionable(*seg));
+                        window.set_cursor(if new_seg.is_some() {
+                            winit::window::CursorIcon::Pointer
+                        } else {
+                            winit::window::CursorIcon::Default
+                        });
                         if let Some(renderer) = &mut self.renderer {
                             if renderer.hovered_status_segment != new_seg {
                                 renderer.hovered_status_segment = new_seg;

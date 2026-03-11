@@ -6,6 +6,19 @@ pub struct Command {
     pub id: CommandId,
 }
 
+pub fn format_shortcut_badge(shortcut: &str) -> String {
+    if shortcut.trim().is_empty() {
+        return String::new();
+    }
+
+    let tokens: Vec<String> = shortcut
+        .split('+')
+        .map(|token| token.trim().to_ascii_uppercase())
+        .collect();
+
+    format!("[ {} ]", tokens.join(" "))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CommandId {
     NewTab,
@@ -34,6 +47,7 @@ pub enum CommandId {
     ToggleLineNumbers,
     Settings,
     ChangeLanguage,
+    ChangeEncoding,
     ChangeLineEnding,
     EnableLargeFileEdit,
 }
@@ -172,6 +186,11 @@ pub fn all_commands() -> Vec<Command> {
             id: CommandId::ChangeLanguage,
         },
         Command {
+            name: "Reopen with Encoding",
+            shortcut: "",
+            id: CommandId::ChangeEncoding,
+        },
+        Command {
             name: "Change Line Ending",
             shortcut: "",
             id: CommandId::ChangeLineEnding,
@@ -301,4 +320,22 @@ pub fn filter_commands(query: &str, recent: &[CommandId]) -> Vec<Command> {
     });
 
     scored.into_iter().map(|(cmd, _)| cmd).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_shortcut_badge;
+
+    #[test]
+    fn test_format_shortcut_badge_uses_consistent_badge_style() {
+        assert_eq!(format_shortcut_badge("Cmd+Shift+P"), "[ CMD SHIFT P ]");
+        assert_eq!(format_shortcut_badge("Ctrl+Tab"), "[ CTRL TAB ]");
+        assert_eq!(format_shortcut_badge("Alt+Z"), "[ ALT Z ]");
+    }
+
+    #[test]
+    fn test_format_shortcut_badge_ignores_empty_shortcuts() {
+        assert!(format_shortcut_badge("").is_empty());
+        assert!(format_shortcut_badge("   ").is_empty());
+    }
 }

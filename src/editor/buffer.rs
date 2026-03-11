@@ -1388,6 +1388,24 @@ impl Buffer {
             .ok_or_else(|| anyhow::anyhow!("No file path"))?;
         let bytes = std::fs::read(&path)?;
         let (encoding, _) = Self::detect_encoding(&bytes);
+        self.reload_from_bytes_with_encoding(bytes, encoding, Some(path))
+    }
+
+    pub fn reload_from_disk_with_encoding(&mut self, encoding: &'static Encoding) -> Result<()> {
+        let path = self
+            .file_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No file path"))?;
+        let bytes = std::fs::read(&path)?;
+        self.reload_from_bytes_with_encoding(bytes, encoding, Some(path))
+    }
+
+    fn reload_from_bytes_with_encoding(
+        &mut self,
+        bytes: Vec<u8>,
+        encoding: &'static Encoding,
+        path: Option<PathBuf>,
+    ) -> Result<()> {
         let (text, _, _) = encoding.decode(&bytes);
         let old_cursor = self.cursor();
         self.rope = Rope::from_str(&text);
@@ -1396,10 +1414,16 @@ impl Buffer {
         self.set_selection_anchor(None);
         self.dirty = false;
         self.encoding = encoding.name();
+        self.line_ending = if text.contains("\r\n") {
+            LineEnding::CrLf
+        } else {
+            LineEnding::Lf
+        };
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.file_mtime = std::fs::metadata(&path)
-            .ok()
+        self.file_mtime = path
+            .as_deref()
+            .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
         *self.layout_cache.borrow_mut() = None;
         Ok(())

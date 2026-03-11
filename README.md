@@ -214,6 +214,7 @@ The status bar shows cursor position, file info, language mode, line count, and 
 
 - **Cursor position** → opens Go to Line
 - **Language** → opens Language Picker (switch syntax highlighting)
+- **Encoding** → opens Encoding Picker (reopen with a selected encoding)
 - **Line ending** → opens LF/CRLF picker
 
 ## Large File Support

@@ -5,10 +5,12 @@
 //! - Double-click with line wrap
 //! - Overlay rendering behavior
 
+use encoding_rs::WINDOWS_1252;
 use notepadx::editor::buffer::LineEnding;
 use notepadx::editor::{Buffer, Editor};
 use notepadx::overlay::find::FindState;
 use notepadx::overlay::{ActiveOverlay, OverlayState};
+use notepadx::renderer::StatusBarSegment;
 use notepadx::session::{StoredLineEnding, WorkspaceState, WorkspaceTabState};
 use notepadx::settings::AppConfig;
 use std::fs::File;
@@ -251,6 +253,31 @@ fn test_overlay_find_replace_focus_toggle() {
     state.insert_str("replacement");
     assert_eq!(state.replace_input, "replacement");
     assert!(state.input.is_empty());
+}
+
+#[test]
+fn test_only_implemented_status_bar_segments_are_actionable() {
+    assert!(StatusBarSegment::CursorPosition.is_actionable());
+    assert!(StatusBarSegment::Language.is_actionable());
+    assert!(StatusBarSegment::Encoding.is_actionable());
+    assert!(StatusBarSegment::LineEnding.is_actionable());
+
+    assert!(!StatusBarSegment::LineCount.is_actionable());
+    assert!(!StatusBarSegment::Version.is_actionable());
+}
+
+#[test]
+fn test_reload_from_disk_with_encoding_uses_selected_codec() {
+    let path = temp_path("encoding-reload");
+    std::fs::write(&path, b"caf\xE9").unwrap();
+
+    let mut buffer = Buffer::from_file_with_config(&path, &AppConfig::default()).unwrap();
+    buffer.reload_from_disk_with_encoding(WINDOWS_1252).unwrap();
+
+    assert_eq!(buffer.rope.to_string(), "café");
+    assert_eq!(buffer.encoding, WINDOWS_1252.name());
+
+    let _ = std::fs::remove_file(path);
 }
 
 // ============================================================================
