@@ -2337,10 +2337,14 @@ impl App {
             Some(idx) => {
                 let name = self.syntax.language_name(idx);
                 match name {
-                    "js" | "ts" => "//",
-                    "py" | "sh" | "yml" | "toml" => "#",
-                    "html" | "xml" => "<!--",
-                    "css" => "/*",
+                    "JavaScript" | "TypeScript" | "Rust" | "Go" | "C" | "C++" | "Java" | "Zig" => {
+                        "//"
+                    }
+                    "Python" | "Bash" | "YAML" | "TOML" | "Ruby" => "#",
+                    "HTML" | "XML" | "Markdown" => "<!--",
+                    "CSS" => "/*",
+                    "Lua" => "--",
+                    "PHP" => "//",
                     _ => "//",
                 }
             }

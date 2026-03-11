@@ -63,6 +63,7 @@ pub fn highlight_color(index: usize, theme: &Theme) -> GlyphonColor {
 struct LangDef {
     extensions: &'static [&'static str],
     name: &'static str,
+    display_name: &'static str,
     language: tree_sitter::Language,
     highlights_query: &'static str,
     injections_query: &'static str,
@@ -76,6 +77,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["js", "mjs", "cjs", "jsx"],
             name: "javascript",
+            display_name: "JavaScript",
             language: tree_sitter_javascript::LANGUAGE.into(),
             highlights_query: tree_sitter_javascript::HIGHLIGHT_QUERY,
             injections_query: tree_sitter_javascript::INJECTIONS_QUERY,
@@ -85,6 +87,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["ts", "tsx"],
             name: "typescript",
+            display_name: "TypeScript",
             language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             highlights_query: tree_sitter_typescript::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -94,6 +97,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["py", "pyi"],
             name: "python",
+            display_name: "Python",
             language: tree_sitter_python::LANGUAGE.into(),
             highlights_query: tree_sitter_python::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -103,6 +107,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["json", "jsonc"],
             name: "json",
+            display_name: "JSON",
             language: tree_sitter_json::LANGUAGE.into(),
             highlights_query: tree_sitter_json::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -112,6 +117,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["html", "htm"],
             name: "html",
+            display_name: "HTML",
             language: tree_sitter_html::LANGUAGE.into(),
             highlights_query: tree_sitter_html::HIGHLIGHTS_QUERY,
             injections_query: tree_sitter_html::INJECTIONS_QUERY,
@@ -121,6 +127,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["css", "scss"],
             name: "css",
+            display_name: "CSS",
             language: tree_sitter_css::LANGUAGE.into(),
             highlights_query: tree_sitter_css::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -130,6 +137,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["toml"],
             name: "toml",
+            display_name: "TOML",
             language: tree_sitter_toml_ng::LANGUAGE.into(),
             highlights_query: tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -139,6 +147,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["sh", "bash", "zsh"],
             name: "bash",
+            display_name: "Bash",
             language: tree_sitter_bash::LANGUAGE.into(),
             highlights_query: tree_sitter_bash::HIGHLIGHT_QUERY,
             injections_query: "",
@@ -148,6 +157,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["yml", "yaml"],
             name: "yaml",
+            display_name: "YAML",
             language: tree_sitter_yaml::LANGUAGE.into(),
             highlights_query: tree_sitter_yaml::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -157,6 +167,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["xml", "svg", "xsl", "xslt"],
             name: "xml",
+            display_name: "XML",
             language: tree_sitter_xml::LANGUAGE_XML.into(),
             highlights_query: tree_sitter_xml::XML_HIGHLIGHT_QUERY,
             injections_query: "",
@@ -166,6 +177,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["rs"],
             name: "rust",
+            display_name: "Rust",
             language: tree_sitter_rust::LANGUAGE.into(),
             highlights_query: tree_sitter_rust::HIGHLIGHTS_QUERY,
             injections_query: tree_sitter_rust::INJECTIONS_QUERY,
@@ -175,6 +187,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["go"],
             name: "go",
+            display_name: "Go",
             language: tree_sitter_go::LANGUAGE.into(),
             highlights_query: tree_sitter_go::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -184,6 +197,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["c", "h"],
             name: "c",
+            display_name: "C",
             language: tree_sitter_c::LANGUAGE.into(),
             highlights_query: tree_sitter_c::HIGHLIGHT_QUERY,
             injections_query: "",
@@ -193,6 +207,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
             name: "cpp",
+            display_name: "C++",
             language: tree_sitter_cpp::LANGUAGE.into(),
             highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
             injections_query: "",
@@ -202,6 +217,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["java"],
             name: "java",
+            display_name: "Java",
             language: tree_sitter_java::LANGUAGE.into(),
             highlights_query: tree_sitter_java::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -211,6 +227,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["rb", "rake", "gemspec"],
             name: "ruby",
+            display_name: "Ruby",
             language: tree_sitter_ruby::LANGUAGE.into(),
             highlights_query: tree_sitter_ruby::HIGHLIGHTS_QUERY,
             injections_query: "",
@@ -220,6 +237,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["php"],
             name: "php",
+            display_name: "PHP",
             language: tree_sitter_php::LANGUAGE_PHP.into(),
             highlights_query: tree_sitter_php::HIGHLIGHTS_QUERY,
             injections_query: tree_sitter_php::INJECTIONS_QUERY,
@@ -229,6 +247,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["lua"],
             name: "lua",
+            display_name: "Lua",
             language: tree_sitter_lua::LANGUAGE.into(),
             highlights_query: tree_sitter_lua::HIGHLIGHTS_QUERY,
             injections_query: tree_sitter_lua::INJECTIONS_QUERY,
@@ -238,6 +257,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["md", "markdown"],
             name: "markdown",
+            display_name: "Markdown",
             language: tree_sitter_md::LANGUAGE.into(),
             highlights_query: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
             injections_query: tree_sitter_md::INJECTION_QUERY_BLOCK,
@@ -247,6 +267,7 @@ fn language_defs() -> Vec<LangDef> {
         LangDef {
             extensions: &["zig"],
             name: "zig",
+            display_name: "Zig",
             language: tree_sitter_zig::LANGUAGE.into(),
             highlights_query: tree_sitter_zig::HIGHLIGHTS_QUERY,
             injections_query: tree_sitter_zig::INJECTIONS_QUERY,
@@ -257,7 +278,7 @@ fn language_defs() -> Vec<LangDef> {
 
 /// The syntax highlighter engine
 pub struct SyntaxHighlighter {
-    configs: Vec<(Vec<String>, HighlightConfiguration)>,
+    configs: Vec<(String, Vec<String>, HighlightConfiguration)>,
 }
 
 impl Default for SyntaxHighlighter {
@@ -287,7 +308,7 @@ impl SyntaxHighlighter {
 
             config.configure(HIGHLIGHT_NAMES);
             let extensions: Vec<String> = def.extensions.iter().map(|s| s.to_string()).collect();
-            configs.push((extensions, config));
+            configs.push((def.display_name.to_string(), extensions, config));
         }
 
         Self { configs }
@@ -296,7 +317,7 @@ impl SyntaxHighlighter {
     /// Detect language from file extension
     pub fn detect_language(&self, filename: &str) -> Option<usize> {
         let ext = filename.rsplit('.').next()?.to_lowercase();
-        for (i, (extensions, _)) in self.configs.iter().enumerate() {
+        for (i, (_, extensions, _)) in self.configs.iter().enumerate() {
             if extensions.iter().any(|e| e == &ext) {
                 return Some(i);
             }
@@ -307,14 +328,9 @@ impl SyntaxHighlighter {
     /// Get the language name for an index
     pub fn language_name(&self, index: usize) -> &str {
         if index < self.configs.len() {
-            // Return the first extension as a stand-in for the name
-            self.configs[index]
-                .0
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("plain")
+            &self.configs[index].0
         } else {
-            "plain"
+            "Plain Text"
         }
     }
 
@@ -331,7 +347,7 @@ impl SyntaxHighlighter {
             return spans;
         }
 
-        let config = &self.configs[lang_index].1;
+        let config = &self.configs[lang_index].2;
         let mut highlighter = Highlighter::new();
 
         let events = match highlighter.highlight(config, source.as_bytes(), None, |_| None) {
@@ -361,5 +377,47 @@ impl SyntaxHighlighter {
         }
 
         spans
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_languages_load() {
+        let mut failures = Vec::new();
+        for def in language_defs() {
+            let result = HighlightConfiguration::new(
+                def.language,
+                def.name,
+                def.highlights_query,
+                def.injections_query,
+                def.locals_query,
+            );
+            if result.is_err() {
+                failures.push(def.display_name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "Failed to load grammars: {:?}",
+            failures
+        );
+    }
+
+    #[test]
+    fn test_language_names_are_display_names() {
+        let syntax = SyntaxHighlighter::new();
+        for i in 0..syntax.language_count() {
+            let name = syntax.language_name(i);
+            // Display names should start with an uppercase letter
+            assert!(
+                name.chars().next().unwrap().is_uppercase(),
+                "Language name '{}' at index {} should be a display name",
+                name,
+                i
+            );
+        }
     }
 }

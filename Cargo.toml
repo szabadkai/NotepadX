@@ -83,8 +83,8 @@ bytemuck = { version = "1.19", features = ["derive"] }
 muda = "0.15"
 
 # Syntax highlighting (tree-sitter)
-tree-sitter = "0.24"
-tree-sitter-highlight = "0.24"
+tree-sitter = "0.25"
+tree-sitter-highlight = "0.25"
 tree-sitter-javascript = { version = "0.23", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-python = { version = "0.23", optional = true }
