@@ -12,7 +12,7 @@ mod syntax;
 mod theme;
 
 use anyhow::Result;
-use editor::Editor;
+use editor::{Buffer, Editor};
 use menu::{AppMenu, MenuAction};
 use overlay::palette::CommandId;
 use overlay::{ActiveOverlay, OverlayState};
@@ -51,6 +51,63 @@ fn status_bar_command(segment: renderer::StatusBarSegment) -> Option<CommandId> 
         renderer::StatusBarSegment::LineEnding => Some(CommandId::ChangeLineEnding),
         renderer::StatusBarSegment::LineCount | renderer::StatusBarSegment::Version => None,
     }
+}
+
+fn normalize_line_endings_for_buffer(text: &str, line_ending: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if line_ending == "\n" {
+        normalized
+    } else {
+        normalized.replace('\n', line_ending)
+    }
+}
+
+fn prepare_editor_paste(buffer: &Buffer, text: &str) -> String {
+    let line_ending = buffer.line_ending.as_str();
+    let normalized = normalize_line_endings_for_buffer(text, line_ending);
+
+    if buffer.is_read_only() || buffer.is_binary || buffer.has_multiple_cursors() {
+        return normalized;
+    }
+
+    if !normalized.contains(line_ending) {
+        return normalized;
+    }
+
+    let cursor = buffer.cursor();
+    let line = buffer.cursor_line();
+    let line_start = buffer.rope.line_to_char(line);
+    let indent_prefix: String = buffer.rope.slice(line_start..cursor).into();
+
+    if indent_prefix
+        .chars()
+        .any(|ch| !ch.is_whitespace() || ch == '\n' || ch == '\r')
+    {
+        return normalized;
+    }
+
+    let parts: Vec<&str> = if line_ending == "\r\n" {
+        normalized.split("\r\n").collect()
+    } else {
+        normalized.split('\n').collect()
+    };
+
+    if parts.len() <= 1 {
+        return normalized;
+    }
+
+    let mut indented = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            indented.push_str(line_ending);
+            if !part.is_empty() {
+                indented.push_str(&indent_prefix);
+            }
+        }
+        indented.push_str(part);
+    }
+
+    indented
 }
 
 /// State for an in-progress tab drag-to-reorder gesture
@@ -99,6 +156,8 @@ struct App {
     click_count: u8,
     // Suppress drag selection after double/triple-click
     suppress_drag: bool,
+    // Anchor char index for an in-progress block selection drag
+    block_drag_anchor: Option<usize>,
     // Tab drag-to-reorder state
     tab_drag: Option<TabDrag>,
 
@@ -112,6 +171,30 @@ struct App {
 }
 
 impl App {
+    fn paste_from_clipboard(&mut self) {
+        let text = self
+            .clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get_text().ok());
+
+        if let Some(text) = text {
+            self.paste_into_editor(&text);
+        }
+    }
+
+    fn paste_into_editor(&mut self, text: &str) {
+        let prepared = {
+            let buffer = self.editor.active();
+            prepare_editor_paste(buffer, text)
+        };
+
+        if self.editor.active().has_multiple_cursors() {
+            self.editor.active_mut().insert_text_multi(&prepared);
+        } else {
+            self.editor.active_mut().insert_text(&prepared);
+        }
+    }
+
     fn can_change_encoding(&self) -> bool {
         let buffer = self.editor.active();
         buffer.file_path.is_some() && !buffer.is_binary && !buffer.is_large_file()
@@ -189,6 +272,7 @@ impl App {
             last_click_pos: (0.0, 0.0),
             click_count: 0,
             suppress_drag: false,
+            block_drag_anchor: None,
             tab_drag: None,
             needs_redraw: true,
             last_large_file_index_version: None,
@@ -660,12 +744,19 @@ impl App {
             let alt = self.modifiers.alt_key();
             let cmd = self.modifiers.super_key();
 
-            if (alt || cmd) && !shift && click_count == 1 {
+            if alt && shift && click_count == 1 && !buffer.wrap_enabled {
+                buffer.clear_extra_cursors();
+                buffer.set_selection_anchor(None);
+                buffer.set_cursor(new_pos);
+                self.block_drag_anchor = Some(new_pos);
+            } else if (alt || cmd) && !shift && click_count == 1 {
                 // Alt+Click or Cmd+Click: add a new cursor at the clicked position
                 buffer.add_cursor(new_pos);
                 // Suppress drag so the newly added cursor isn't disrupted
                 self.suppress_drag = true;
+                self.block_drag_anchor = None;
             } else if shift {
+                self.block_drag_anchor = None;
                 if buffer.selection_anchor().is_none() {
                     buffer.set_selection_anchor(Some(buffer.cursor()));
                 }
@@ -675,6 +766,7 @@ impl App {
                 buffer.clear_extra_cursors();
                 buffer.set_selection_anchor(None);
                 buffer.set_cursor(new_pos);
+                self.block_drag_anchor = None;
             }
 
             // Double-click: select word
@@ -743,12 +835,7 @@ impl App {
                 None
             };
 
-            let buffer = self.editor.active_mut();
-            if buffer.selection_anchor().is_none() {
-                buffer.set_selection_anchor(Some(buffer.cursor()));
-            }
-
-            let new_pos = buffer.char_at_pos(
+            let new_pos = self.editor.active().char_at_pos(
                 x as f32,
                 editor_y as f32,
                 GUTTER_WIDTH + LINE_PADDING_LEFT,
@@ -756,7 +843,17 @@ impl App {
                 char_width,
                 wrap_width,
             );
-            buffer.set_cursor(new_pos);
+
+            let block_anchor = self.block_drag_anchor;
+            let buffer = self.editor.active_mut();
+            if let Some(anchor) = block_anchor {
+                buffer.set_block_selection(anchor, new_pos);
+            } else {
+                if buffer.selection_anchor().is_none() {
+                    buffer.set_selection_anchor(Some(buffer.cursor()));
+                }
+                buffer.set_cursor(new_pos);
+            }
         }
         self.needs_redraw = true;
     }
@@ -1146,11 +1243,7 @@ impl App {
                 }
             }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "v" => {
-                if let Some(clip) = &mut self.clipboard {
-                    if let Ok(text) = clip.get_text() {
-                        self.editor.active_mut().insert_text_multi(&text);
-                    }
-                }
+                self.paste_from_clipboard();
             }
 
             // Undo/Redo
@@ -1747,11 +1840,7 @@ impl App {
                 }
             }
             CommandId::Paste => {
-                if let Some(clip) = &mut self.clipboard {
-                    if let Ok(text) = clip.get_text() {
-                        self.editor.active_mut().insert_text_multi(&text);
-                    }
-                }
+                self.paste_from_clipboard();
             }
             CommandId::DuplicateLine => self.editor.active_mut().duplicate_line(),
             CommandId::ToggleComment => {
@@ -1800,7 +1889,7 @@ impl App {
     }
 
     /// Number of configurable settings rows in the settings panel
-    const SETTINGS_ROW_COUNT: usize = 8;
+    const SETTINGS_ROW_COUNT: usize = 9;
 
     /// Handle keyboard input while the settings overlay is active.
     /// Up/Down moves the cursor, Space/Enter/Left/Right toggles or adjusts values, Esc closes.
@@ -1882,6 +1971,10 @@ impl App {
                     7 => {
                         // Highlight current line toggle
                         self.config.highlight_current_line = !self.config.highlight_current_line;
+                    }
+                    8 => {
+                        // Show whitespace toggle
+                        self.config.show_whitespace = !self.config.show_whitespace;
                     }
                     _ => {}
                 }
@@ -2450,7 +2543,7 @@ impl App {
                             self.overlay.insert_str(&text);
                             self.on_overlay_input_changed();
                         } else if !self.overlay.is_active() {
-                            self.editor.active_mut().insert_text(&text);
+                            self.paste_into_editor(&text);
                         }
                     }
                 }
@@ -2706,6 +2799,7 @@ impl ApplicationHandler for App {
                     } else if !self.is_mouse_down {
                         // Mouse released — always re-enable drag for next click
                         self.suppress_drag = false;
+                        self.block_drag_anchor = None;
 
                         // Resolve tab drag-to-reorder
                         if let Some(drag) = self.tab_drag.take() {

@@ -5,6 +5,7 @@ use glyphon::{
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -74,6 +75,67 @@ fn overlay_text_pass_layers() -> [OverlayTextPassLayer; 2] {
         OverlayTextPassLayer::TabBar,
         OverlayTextPassLayer::OverlayPanel,
     ]
+}
+
+fn render_visible_whitespace(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            ' ' => '.',
+            '\t' => '>',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn truncate_middle(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars == 1 {
+        return "~".to_string();
+    }
+
+    let keep = max_chars - 1;
+    let left = keep / 2;
+    let right = keep - left;
+
+    let mut truncated = String::with_capacity(max_chars);
+    truncated.extend(chars.iter().take(left));
+    truncated.push('~');
+    truncated.extend(chars.iter().skip(chars.len() - right));
+    truncated
+}
+
+fn format_status_path(path: Option<&Path>, max_chars: usize) -> String {
+    let raw = path
+        .map(|value| value.display().to_string())
+        .unwrap_or_else(|| "untitled".to_string());
+    truncate_middle(&raw, max_chars)
+}
+
+fn find_occurrence_ranges(
+    text: &str,
+    needle: &str,
+    excluded_range: Option<(usize, usize)>,
+) -> Vec<(usize, usize)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    text.match_indices(needle)
+        .filter_map(|(start, matched)| {
+            let end = start + matched.len();
+            if excluded_range == Some((start, end)) {
+                None
+            } else {
+                Some((start, end))
+            }
+        })
+        .collect()
 }
 
 /// Persistent text buffers for glyphon rendering
@@ -436,6 +498,12 @@ impl Renderer {
             }
         }
 
+        let rendered_visible_text = if config.show_whitespace {
+            render_visible_whitespace(&visible_text)
+        } else {
+            visible_text.clone()
+        };
+
         let base_attrs = Attrs::new()
             .family(Family::Name("JetBrains Mono"))
             .color(theme.fg.to_glyphon());
@@ -457,8 +525,10 @@ impl Renderer {
                     .cached_spans
                     .iter()
                     .filter_map(|span| {
-                        if span.start < visible_text.len() && span.end <= visible_text.len() {
-                            let text_slice = &visible_text[span.start..span.end];
+                        if span.start < rendered_visible_text.len()
+                            && span.end <= rendered_visible_text.len()
+                        {
+                            let text_slice = &rendered_visible_text[span.start..span.end];
                             let attrs = match span.highlight_index {
                                 Some(idx) => {
                                     base_attrs.color(crate::syntax::highlight_color(idx, theme))
@@ -480,7 +550,7 @@ impl Renderer {
             } else {
                 self.editor_buffer.set_text(
                     &mut self.font_system,
-                    &visible_text,
+                    &rendered_visible_text,
                     base_attrs,
                     Shaping::Advanced,
                 );
@@ -488,7 +558,7 @@ impl Renderer {
         } else {
             self.editor_buffer.set_text(
                 &mut self.font_system,
-                &visible_text,
+                &rendered_visible_text,
                 base_attrs,
                 Shaping::Advanced,
             );
@@ -587,7 +657,19 @@ impl Renderer {
         let seg_lang = lang_name.to_string();
         let seg_encoding = encoding.to_string();
         let seg_line_ending = format!("{}{}{}", line_ending, search_info, edit_load_info);
-        let seg_version = "NotepadX v0.1".to_string();
+        let status_capacity = ((width - 20.0) / STATUS_CHAR_WIDTH).floor().max(0.0) as usize;
+        let fixed_segments = [
+            seg_cursor.chars().count(),
+            seg_lines.chars().count(),
+            seg_lang.chars().count(),
+            seg_encoding.chars().count(),
+            seg_line_ending.chars().count(),
+        ];
+        let fixed_chars = padding.chars().count()
+            + fixed_segments.iter().sum::<usize>()
+            + sep.chars().count() * fixed_segments.len();
+        let path_chars = status_capacity.saturating_sub(fixed_chars).max(12);
+        let seg_path = format_status_path(buffer.file_path.as_deref(), path_chars);
 
         let status_text = format!(
             "{}{}{}{}{}{}{}{}{}{}{}{}",
@@ -602,7 +684,7 @@ impl Renderer {
             sep,
             seg_line_ending,
             sep,
-            seg_version
+            seg_path
         );
 
         // Compute segment x boundaries (logical px, with 10px left offset matching TextArea left)
@@ -617,7 +699,7 @@ impl Renderer {
             (&seg_lang, StatusBarSegment::Language),
             (&seg_encoding, StatusBarSegment::Encoding),
             (&seg_line_ending, StatusBarSegment::LineEnding),
-            (&seg_version, StatusBarSegment::Version),
+            (&seg_path, StatusBarSegment::Version),
         ];
         for (text, seg) in segments_data {
             let w = text.chars().count() as f32 * cw;
@@ -848,6 +930,15 @@ impl Renderer {
                         (
                             "Highlight Line",
                             (if config.highlight_current_line {
+                                " On"
+                            } else {
+                                " Off"
+                            })
+                            .to_string(),
+                        ),
+                        (
+                            "Show Whitespace",
+                            (if config.show_whitespace {
                                 " On"
                             } else {
                                 " Off"
@@ -1228,7 +1319,59 @@ impl Renderer {
             }
         }
 
-        // 5b. Find Match Highlights
+        // 5b. Selection Occurrence Highlights
+        if !matches!(
+            overlay.active,
+            crate::overlay::ActiveOverlay::Find | crate::overlay::ActiveOverlay::FindReplace
+        ) && !buffer.is_large_file()
+        {
+            if let Some(anchor) = buffer.selection_anchor() {
+                let selected_start = buffer.cursor().min(anchor);
+                let selected_end = buffer.cursor().max(anchor);
+                if selected_start < selected_end {
+                    let needle: String = buffer.rope.slice(selected_start..selected_end).into();
+                    let text = buffer.rope.to_string();
+                    let excluded = Some((
+                        buffer.rope.char_to_byte(selected_start),
+                        buffer.rope.char_to_byte(selected_end),
+                    ));
+
+                    for (match_start, match_end) in find_occurrence_ranges(&text, &needle, excluded)
+                    {
+                        let match_start_char = buffer.rope.byte_to_char(match_start);
+                        let match_end_char = buffer.rope.byte_to_char(match_end);
+
+                        for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                            let clamped_start = match_start_char.max(visual_line.start_char);
+                            let clamped_end = match_end_char.min(visual_line.end_char);
+                            if clamped_start >= clamped_end {
+                                continue;
+                            }
+                            let col_start = clamped_start - visual_line.start_char;
+                            let col_end = clamped_end - visual_line.start_char;
+
+                            if col_start < col_end {
+                                base_rects.push(Rect::flat(
+                                    editor_left + col_start as f32 * char_width
+                                        - buffer.scroll_x * s,
+                                    editor_top + i as f32 * line_height - scroll_y_px,
+                                    (col_end - col_start) as f32 * char_width,
+                                    line_height,
+                                    [
+                                        theme.find_match.r,
+                                        theme.find_match.g,
+                                        theme.find_match.b,
+                                        theme.find_match.a,
+                                    ],
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5c. Find Match Highlights
         if overlay.is_active() && !overlay.find.matches.is_empty() {
             // For large files the rope only holds a window; translate file-level
             // byte offsets to window-relative offsets and skip out-of-range matches.
@@ -2500,8 +2643,9 @@ impl ShapeRenderer {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_palette_panel_height, command_palette_visible_items, overlay_text_pass_layers,
-        OverlayTextPassLayer, COMMAND_PALETTE_MAX_VISIBLE_ITEMS, OVERLAY_LINE_HEIGHT,
+        command_palette_panel_height, command_palette_visible_items, find_occurrence_ranges,
+        overlay_text_pass_layers, OverlayTextPassLayer, COMMAND_PALETTE_MAX_VISIBLE_ITEMS,
+        OVERLAY_LINE_HEIGHT,
     };
 
     #[test]
@@ -2527,6 +2671,14 @@ mod tests {
         assert_eq!(
             command_palette_panel_height(COMMAND_PALETTE_MAX_VISIBLE_ITEMS + 5),
             (1 + COMMAND_PALETTE_MAX_VISIBLE_ITEMS) as f32 * OVERLAY_LINE_HEIGHT + 12.0
+        );
+    }
+
+    #[test]
+    fn occurrence_ranges_skip_selected_match() {
+        assert_eq!(
+            find_occurrence_ranges("abc abc abc", "abc", Some((4, 7))),
+            vec![(0, 3), (8, 11)]
         );
     }
 }

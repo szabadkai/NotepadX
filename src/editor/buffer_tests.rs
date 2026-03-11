@@ -484,4 +484,32 @@ mod tests {
         buffer.undo();
         assert_eq!(buffer.rope.to_string(), "hello world\n");
     }
+
+    #[test]
+    fn test_set_block_selection_builds_per_line_ranges() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("abcd\nefgh\nijkl\n");
+
+        buffer.set_block_selection(1, 13);
+
+        assert_eq!(buffer.cursors.len(), 3);
+        assert_eq!(buffer.cursors[0].selection_anchor, Some(1));
+        assert_eq!(buffer.cursors[0].position, 3);
+        assert_eq!(buffer.cursors[1].selection_anchor, Some(6));
+        assert_eq!(buffer.cursors[1].position, 8);
+        assert_eq!(buffer.cursors[2].selection_anchor, Some(11));
+        assert_eq!(buffer.cursors[2].position, 13);
+    }
+
+    #[test]
+    fn test_set_block_selection_clamps_short_lines() {
+        let mut buffer = Buffer::new();
+        buffer.rope = Rope::from_str("abcd\nxy\nijkl\n");
+
+        buffer.set_block_selection(1, 11);
+
+        assert_eq!(buffer.cursors.len(), 3);
+        assert_eq!(buffer.cursors[1].selection_anchor, Some(6));
+        assert_eq!(buffer.cursors[1].position, 7);
+    }
 }

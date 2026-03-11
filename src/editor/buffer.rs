@@ -239,6 +239,37 @@ impl Buffer {
             .collect()
     }
 
+    /// Create a rectangular block selection between two character positions.
+    ///
+    /// Each covered logical line receives one cursor whose anchor and position
+    /// are clamped to that line's content width.
+    pub fn set_block_selection(&mut self, anchor: usize, cursor: usize) {
+        let anchor_line = self.rope.char_to_line(anchor);
+        let cursor_line = self.rope.char_to_line(cursor);
+        let start_line = anchor_line.min(cursor_line);
+        let end_line = anchor_line.max(cursor_line);
+
+        let anchor_col = anchor - self.rope.line_to_char(anchor_line);
+        let cursor_col = cursor - self.rope.line_to_char(cursor_line);
+
+        self.cursors = (start_line..=end_line)
+            .map(|line_idx| {
+                let line_start = self.rope.line_to_char(line_idx);
+                let line_len = Self::line_len_without_ending(self.rope.line(line_idx));
+                let line_anchor = line_start + anchor_col.min(line_len);
+                let line_cursor = line_start + cursor_col.min(line_len);
+
+                Cursor {
+                    position: line_cursor,
+                    selection_anchor: Some(line_anchor),
+                    desired_col: None,
+                }
+            })
+            .collect();
+
+        self.merge_cursors();
+    }
+
     /// Allocate a new undo group ID. All edits pushed with the same group ID
     /// will be undone/redone atomically.
     fn new_undo_group(&mut self) -> u64 {
