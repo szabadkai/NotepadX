@@ -1710,10 +1710,10 @@ impl App {
                 {
                     self.overlay.find.prev_match();
                     self.jump_to_current_match();
-                } else if self.overlay.active == ActiveOverlay::CommandPalette {
-                    if self.overlay.picker_selected > 0 {
-                        self.overlay.picker_selected -= 1;
-                    }
+                } else if self.overlay.active == ActiveOverlay::CommandPalette
+                    && self.overlay.picker_selected > 0
+                {
+                    self.overlay.picker_selected -= 1;
                 }
             }
             // Cmd+G for next match in find

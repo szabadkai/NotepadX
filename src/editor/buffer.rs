@@ -2776,10 +2776,7 @@ impl Buffer {
 
         for line_idx in start_line..=end_line {
             let line_start = self.rope.line_to_char(line_idx) - total_removed;
-            let line_text: String = self
-                .rope
-                .line(line_idx - if total_removed > 0 { 0 } else { 0 })
-                .into();
+            let line_text: String = self.rope.line(line_idx).into();
             let spaces: usize = line_text
                 .chars()
                 .take(tab_size)
