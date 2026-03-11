@@ -27,6 +27,15 @@ pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6; // Monospace character width approx
 pub const OVERLAY_FONT_SIZE: f32 = 14.0;
 pub const OVERLAY_LINE_HEIGHT: f32 = 20.0;
 pub const OVERLAY_CHAR_WIDTH: f32 = OVERLAY_FONT_SIZE * 0.6;
+pub const COMMAND_PALETTE_MAX_VISIBLE_ITEMS: usize = 16;
+
+pub fn command_palette_visible_items(item_count: usize) -> usize {
+    item_count.min(COMMAND_PALETTE_MAX_VISIBLE_ITEMS)
+}
+
+pub fn command_palette_panel_height(item_count: usize) -> f32 {
+    (1 + command_palette_visible_items(item_count)) as f32 * OVERLAY_LINE_HEIGHT + 12.0
+}
 
 /// Status bar character width (12pt font)
 pub const STATUS_CHAR_WIDTH: f32 = 12.0 * 0.6;
@@ -631,7 +640,14 @@ impl Renderer {
                     }
                 }
                 crate::overlay::ActiveOverlay::FindReplace => 52.0,
-                crate::overlay::ActiveOverlay::CommandPalette => 300.0,
+                crate::overlay::ActiveOverlay::CommandPalette => {
+                    let item_count = crate::overlay::palette::filter_commands(
+                        &overlay.input,
+                        &overlay.recent_commands,
+                    )
+                    .len();
+                    command_palette_panel_height(item_count)
+                }
                 crate::overlay::ActiveOverlay::Help => 600.0,
                 crate::overlay::ActiveOverlay::Settings => 360.0,
                 crate::overlay::ActiveOverlay::LanguagePicker => 260.0,
@@ -712,11 +728,30 @@ impl Renderer {
                     format!("Go to Line: {}│{}", before, after)
                 }
                 crate::overlay::ActiveOverlay::CommandPalette => {
-                    let filtered = crate::overlay::palette::filter_commands(&overlay.input);
+                    let filtered = crate::overlay::palette::filter_commands(
+                        &overlay.input,
+                        &overlay.recent_commands,
+                    );
                     let (before, after) = overlay.input.split_at(overlay.cursor_pos);
                     let mut text = format!("> {}│{}\n", before, after);
-                    for cmd in filtered.iter().take(8) {
-                        text.push_str(&format!("  {}  {}\n", cmd.name, cmd.shortcut));
+                    let selected = overlay
+                        .picker_selected
+                        .min(filtered.len().saturating_sub(1));
+                    // Scroll the visible window so the selected item is always on screen
+                    let max_visible = command_palette_visible_items(filtered.len());
+                    let scroll_offset = if selected >= max_visible {
+                        selected - max_visible + 1
+                    } else {
+                        0
+                    };
+                    for (idx, cmd) in filtered
+                        .iter()
+                        .enumerate()
+                        .skip(scroll_offset)
+                        .take(max_visible)
+                    {
+                        let sel = if idx == selected { "▸ " } else { "  " };
+                        text.push_str(&format!("{}{}  {}\n", sel, cmd.name, cmd.shortcut));
                     }
                     text
                 }
@@ -734,9 +769,10 @@ impl Renderer {
                     text.push_str("           Cmd+Arr: Doc Start/End\n");
                     text.push_str("           PgUp/PgDn     | Cmd+[/]: Tab\n\n");
                     text.push_str("Search:    Cmd+F: Find   | Cmd+H: Replace\n");
-                    text.push_str("           Cmd+G: Goto   | Cmd+Shift+P: Palette\n\n");
+                    text.push_str("           Cmd+G: Goto   | Cmd+P: Palette\n\n");
                     text.push_str("Other:     Cmd+K/Shift+K: Theme Cycle\n");
                     text.push_str("           Cmd+,: Settings | Alt+Z: Wrap\n");
+                    text.push_str("           Cmd+Shift+E: Large File Edit Mode\n");
                     text.push_str("           F1: Help | Esc: Close Overlay\n\n");
                     text.push_str("Help:      TAB toggles fields in Replace.\n");
                     text.push_str("           Cmd+Shift+Enter: Replace All.\n");
@@ -1411,7 +1447,14 @@ impl Renderer {
             let overlay_left = (width - overlay_width) / 2.0;
             let overlay_top_panel = editor_top + 4.0 * s;
             let overlay_height = match &overlay.active {
-                crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
+                crate::overlay::ActiveOverlay::CommandPalette => {
+                    let item_count = crate::overlay::palette::filter_commands(
+                        &overlay.input,
+                        &overlay.recent_commands,
+                    )
+                    .len();
+                    command_palette_panel_height(item_count) * s
+                }
                 crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
                 crate::overlay::ActiveOverlay::Find => {
                     if overlay.find.regex_error.is_some() {
@@ -1883,7 +1926,14 @@ impl Renderer {
             let overlay_left = (width - overlay_width) / 2.0;
             let overlay_top_panel = tab_bar_height + 4.0 * s;
             let overlay_height = match &overlay.active {
-                crate::overlay::ActiveOverlay::CommandPalette => 300.0 * s,
+                crate::overlay::ActiveOverlay::CommandPalette => {
+                    let item_count = crate::overlay::palette::filter_commands(
+                        &overlay.input,
+                        &overlay.recent_commands,
+                    )
+                    .len();
+                    command_palette_panel_height(item_count) * s
+                }
                 crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
                 crate::overlay::ActiveOverlay::Find => {
                     if overlay.find.regex_error.is_some() {
@@ -2244,7 +2294,10 @@ impl ShapeRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_text_pass_layers, OverlayTextPassLayer};
+    use super::{
+        command_palette_panel_height, command_palette_visible_items, overlay_text_pass_layers,
+        OverlayTextPassLayer, COMMAND_PALETTE_MAX_VISIBLE_ITEMS, OVERLAY_LINE_HEIGHT,
+    };
 
     #[test]
     fn overlay_pass_keeps_tab_text_before_overlay_text() {
@@ -2254,6 +2307,21 @@ mod tests {
                 OverlayTextPassLayer::TabBar,
                 OverlayTextPassLayer::OverlayPanel,
             ]
+        );
+    }
+
+    #[test]
+    fn command_palette_geometry_stays_consistent() {
+        assert_eq!(command_palette_visible_items(0), 0);
+        assert_eq!(command_palette_visible_items(3), 3);
+        assert_eq!(
+            command_palette_visible_items(COMMAND_PALETTE_MAX_VISIBLE_ITEMS + 5),
+            COMMAND_PALETTE_MAX_VISIBLE_ITEMS
+        );
+        assert_eq!(command_palette_panel_height(0), OVERLAY_LINE_HEIGHT + 12.0);
+        assert_eq!(
+            command_palette_panel_height(COMMAND_PALETTE_MAX_VISIBLE_ITEMS + 5),
+            (1 + COMMAND_PALETTE_MAX_VISIBLE_ITEMS) as f32 * OVERLAY_LINE_HEIGHT + 12.0
         );
     }
 }

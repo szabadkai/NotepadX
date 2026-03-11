@@ -31,6 +31,7 @@ pub enum CommandId {
     DuplicateLine,
     ToggleComment,
     ToggleLineWrap,
+    ToggleLineNumbers,
     Settings,
     ChangeLanguage,
     ChangeLineEnding,
@@ -161,6 +162,11 @@ pub fn all_commands() -> Vec<Command> {
             id: CommandId::ToggleLineWrap,
         },
         Command {
+            name: "Toggle Line Numbers",
+            shortcut: "",
+            id: CommandId::ToggleLineNumbers,
+        },
+        Command {
             name: "Change Language Mode",
             shortcut: "",
             id: CommandId::ChangeLanguage,
@@ -172,24 +178,127 @@ pub fn all_commands() -> Vec<Command> {
         },
         Command {
             name: "Large File: Enable Edit Mode",
-            shortcut: "",
+            shortcut: "Cmd+Shift+E",
             id: CommandId::EnableLargeFileEdit,
         },
     ]
 }
 
-/// Filter commands by fuzzy query
-pub fn filter_commands(query: &str) -> Vec<Command> {
-    if query.is_empty() {
-        return all_commands();
+/// Fuzzy-match score: higher is better, 0 means no match.
+/// Bonuses for consecutive matches, word-boundary hits, and start-of-string.
+fn fuzzy_score(name: &str, query: &str) -> i32 {
+    let name_bytes: Vec<char> = name.to_lowercase().chars().collect();
+    let query_bytes: Vec<char> = query.to_lowercase().chars().collect();
+
+    if query_bytes.is_empty() {
+        return 1; // everything matches empty query
     }
-    let query_lower = query.to_lowercase();
-    all_commands()
+
+    let mut score: i32 = 0;
+    let mut qi = 0; // index into query
+    let mut prev_matched = false;
+    let mut first_match = true;
+
+    for (ni, &nc) in name_bytes.iter().enumerate() {
+        if qi < query_bytes.len() && nc == query_bytes[qi] {
+            score += 1;
+            // Bonus: consecutive match
+            if prev_matched {
+                score += 5;
+            }
+            // Bonus: match at start of string
+            if ni == 0 {
+                score += 10;
+            }
+            // Bonus: match at word boundary (after space, or uppercase in original)
+            if ni > 0 {
+                let prev_char = name.chars().nth(ni - 1).unwrap_or(' ');
+                let curr_char = name.chars().nth(ni).unwrap_or(' ');
+                if prev_char == ' '
+                    || prev_char == '_'
+                    || prev_char == '-'
+                    || (curr_char.is_uppercase() && prev_char.is_lowercase())
+                {
+                    score += 8;
+                }
+            }
+            if first_match {
+                // Bonus: earlier first match is better
+                score += (name_bytes.len() as i32 - ni as i32).max(0);
+                first_match = false;
+            }
+            qi += 1;
+            prev_matched = true;
+        } else {
+            prev_matched = false;
+        }
+    }
+
+    // All query chars must match
+    if qi < query_bytes.len() {
+        return 0;
+    }
+
+    score
+}
+
+/// Filter and rank commands by fuzzy query, with recently-used commands
+/// promoted to the top when query is empty.
+pub fn filter_commands(query: &str, recent: &[CommandId]) -> Vec<Command> {
+    let commands = all_commands();
+
+    if query.is_empty() {
+        // Recently-used first, then the rest in declaration order
+        let mut recent_cmds: Vec<Command> = Vec::new();
+        let mut rest: Vec<Command> = Vec::new();
+        for cmd in commands {
+            if let Some(pos) = recent.iter().position(|r| *r == cmd.id) {
+                recent_cmds.push(cmd);
+                // Tag with position for stable ordering among recent items
+                // (we'll sort after)
+                let _ = pos; // used below
+            } else {
+                rest.push(cmd);
+            }
+        }
+        // Sort recent commands by their recency position (most recent first)
+        recent_cmds.sort_by_key(|cmd| {
+            recent
+                .iter()
+                .position(|r| *r == cmd.id)
+                .unwrap_or(usize::MAX)
+        });
+        recent_cmds.extend(rest);
+        return recent_cmds;
+    }
+
+    // Fuzzy-match and score
+    let mut scored: Vec<(Command, i32)> = commands
         .into_iter()
-        .filter(|cmd| {
-            let name_lower = cmd.name.to_lowercase();
-            // Simple substring match
-            name_lower.contains(&query_lower)
+        .filter_map(|cmd| {
+            let s = fuzzy_score(cmd.name, query);
+            if s > 0 {
+                Some((cmd, s))
+            } else {
+                None
+            }
         })
-        .collect()
+        .collect();
+
+    // Sort by score descending (higher is better), then by recency as tiebreaker
+    scored.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| {
+            let a_recency = recent
+                .iter()
+                .position(|r| *r == a.0.id)
+                .unwrap_or(usize::MAX);
+            let b_recency = recent
+                .iter()
+                .position(|r| *r == b.0.id)
+                .unwrap_or(usize::MAX);
+            a_recency.cmp(&b_recency)
+        })
+    });
+
+    scored.into_iter().map(|(cmd, _)| cmd).collect()
 }

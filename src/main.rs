@@ -788,7 +788,13 @@ impl App {
                     40.0
                 }
             }
-            ActiveOverlay::CommandPalette => 300.0,
+            ActiveOverlay::CommandPalette => renderer::command_palette_panel_height(
+                overlay::palette::filter_commands(
+                    &self.overlay.input,
+                    &self.overlay.recent_commands,
+                )
+                .len(),
+            ),
             ActiveOverlay::Help => 600.0,
             ActiveOverlay::Settings => 360.0,
             ActiveOverlay::LanguagePicker => 260.0,
@@ -928,7 +934,19 @@ impl App {
                 self.needs_redraw = true;
                 return;
             }
-            Key::Character(c) if cmd_or_ctrl && shift && c.as_str() == "p" => {
+            Key::Character(c)
+                if cmd_or_ctrl && shift && (c.as_str() == "e" || c.as_str() == "E") =>
+            {
+                if self.editor.active().is_large_file()
+                    && !self.editor.active().large_file_edit_mode
+                    && self.editor.active().edit_mode_loader.is_none()
+                {
+                    self.editor.active_mut().enable_large_file_edit_mode();
+                    self.needs_redraw = true;
+                    return;
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "p" => {
                 self.overlay.open(ActiveOverlay::CommandPalette);
                 self.needs_redraw = true;
                 return;
@@ -1366,6 +1384,13 @@ impl App {
                 {
                     self.overlay.find.next_match();
                     self.jump_to_current_match();
+                } else if self.overlay.active == ActiveOverlay::CommandPalette {
+                    let recent = self.overlay.recent_commands.clone();
+                    let count =
+                        overlay::palette::filter_commands(&self.overlay.input, &recent).len();
+                    if self.overlay.picker_selected + 1 < count {
+                        self.overlay.picker_selected += 1;
+                    }
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
@@ -1374,6 +1399,10 @@ impl App {
                 {
                     self.overlay.find.prev_match();
                     self.jump_to_current_match();
+                } else if self.overlay.active == ActiveOverlay::CommandPalette {
+                    if self.overlay.picker_selected > 0 {
+                        self.overlay.picker_selected -= 1;
+                    }
                 }
             }
             // Cmd+G for next match in find
@@ -1468,6 +1497,9 @@ impl App {
                     self.jump_to_current_match();
                 }
             }
+            ActiveOverlay::CommandPalette => {
+                self.overlay.picker_selected = 0;
+            }
             _ => {}
         }
     }
@@ -1525,8 +1557,13 @@ impl App {
                 self.overlay.close();
             }
             ActiveOverlay::CommandPalette => {
-                let filtered = overlay::palette::filter_commands(&self.overlay.input);
-                if let Some(cmd) = filtered.first() {
+                let recent = self.overlay.recent_commands.clone();
+                let filtered = overlay::palette::filter_commands(&self.overlay.input, &recent);
+                let idx = self
+                    .overlay
+                    .picker_selected
+                    .min(filtered.len().saturating_sub(1));
+                if let Some(cmd) = filtered.get(idx) {
                     let cmd_id = cmd.id;
                     self.overlay.close();
                     self.execute_command(cmd_id);
@@ -1550,6 +1587,11 @@ impl App {
     }
 
     fn execute_command(&mut self, cmd: CommandId) {
+        // Record in recently-used list (most recent first, capped at 10)
+        self.overlay.recent_commands.retain(|c| *c != cmd);
+        self.overlay.recent_commands.insert(0, cmd);
+        self.overlay.recent_commands.truncate(10);
+
         match cmd {
             CommandId::NewTab => {
                 self.editor.new_tab();
@@ -1615,6 +1657,10 @@ impl App {
                 for buf in &mut self.editor.buffers {
                     buf.wrap_enabled = self.config.line_wrap;
                 }
+                self.config.save();
+            }
+            CommandId::ToggleLineNumbers => {
+                self.config.show_line_numbers = !self.config.show_line_numbers;
                 self.config.save();
             }
             CommandId::Settings => {

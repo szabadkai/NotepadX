@@ -42,6 +42,9 @@ pub struct OverlayState {
 
     // Picker selection index (for LanguagePicker, LineEndingPicker)
     pub picker_selected: usize,
+
+    // Recently-used command IDs for palette ordering (session-scoped)
+    pub recent_commands: Vec<palette::CommandId>,
 }
 
 impl Default for OverlayState {
@@ -64,6 +67,7 @@ impl OverlayState {
             find: find::FindState::new(),
             results_panel: results_panel::ResultsPanel::new(),
             picker_selected: 0,
+            recent_commands: Vec::new(),
         }
     }
 

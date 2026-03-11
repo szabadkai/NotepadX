@@ -242,10 +242,7 @@ impl AppMenu {
             MenuId::new("palette"),
             "Command Palette",
             true,
-            Some(Accelerator::new(
-                Some(Modifiers::SUPER | Modifiers::SHIFT),
-                Code::KeyP,
-            )),
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyP)),
         );
 
         let wrap_item = MenuItem::with_id(
