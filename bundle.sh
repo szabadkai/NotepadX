@@ -1,9 +1,15 @@
 #!/bin/bash
 set -e
 
+FEATURES=""
+if [[ "$1" == "--full" ]]; then
+  FEATURES="--features full-syntax"
+  echo "Building with full syntax support (all 20 languages)..."
+fi
+
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
 echo "Building release v${VERSION}..."
-cargo build --release
+cargo build --release $FEATURES
 
 APP="NotepadX.app"
 rm -rf "$APP"
