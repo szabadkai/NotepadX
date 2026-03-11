@@ -7,24 +7,55 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
     strategy:
       matrix:
         include:
+          # Minimal builds (default features: JS, Python, JSON)
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: notepadx
+            features: ""
+            suffix: "-minimal"
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: notepadx
+            features: ""
+            suffix: "-minimal"
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: notepadx
+            features: ""
+            suffix: "-minimal"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: notepadx.exe
+            features: ""
+            suffix: "-minimal"
+          # Full builds (all 20 languages)
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: notepadx
+            features: "--features full-syntax"
+            suffix: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: notepadx
+            features: "--features full-syntax"
+            suffix: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: notepadx
+            features: "--features full-syntax"
+            suffix: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: notepadx.exe
+            features: "--features full-syntax"
+            suffix: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +63,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.suffix }}
 
       - name: Set version from tag
         shell: bash
@@ -48,7 +81,7 @@ jobs:
           sudo apt-get install -y pkg-config libglib2.0-dev libgtk-3-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxdo-dev
 
       - name: Build
-        run: cargo build --release --features full-syntax --target ${{ matrix.target }}
+        run: cargo build --release ${{ matrix.features }} --target ${{ matrix.target }}
 
       # macOS: create .app bundle
       - name: Create macOS .app bundle
@@ -92,21 +125,21 @@ jobs:
 
       - name: Zip macOS .app
         if: runner.os == 'macOS'
-        run: zip -r NotepadX-${{ matrix.target }}.zip NotepadX.app
+        run: zip -r NotepadX-${{ matrix.target }}${{ matrix.suffix }}.zip NotepadX.app
 
       - name: Upload macOS .app
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: NotepadX-${{ matrix.target }}.app
-          path: NotepadX-${{ matrix.target }}.zip
+          name: NotepadX-${{ matrix.target }}${{ matrix.suffix }}.app
+          path: NotepadX-${{ matrix.target }}${{ matrix.suffix }}.zip
 
       # Linux / Windows: upload raw binary
       - name: Upload binary
         if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: notepadx-${{ matrix.target }}
+          name: notepadx-${{ matrix.target }}${{ matrix.suffix }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
 
   release:
@@ -125,20 +158,35 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          # Move and rename macOS apps
+          # Move and rename macOS apps (full)
           if [ -f artifacts/NotepadX-x86_64-apple-darwin.app/NotepadX-x86_64-apple-darwin.zip ]; then
             mv artifacts/NotepadX-x86_64-apple-darwin.app/NotepadX-x86_64-apple-darwin.zip release-assets/NotepadX-macos-x86_64.zip
           fi
           if [ -f artifacts/NotepadX-aarch64-apple-darwin.app/NotepadX-aarch64-apple-darwin.zip ]; then
             mv artifacts/NotepadX-aarch64-apple-darwin.app/NotepadX-aarch64-apple-darwin.zip release-assets/NotepadX-macos-arm64.zip
           fi
-          # Move Linux binary
+          # Move and rename macOS apps (minimal)
+          if [ -f "artifacts/NotepadX-x86_64-apple-darwin-minimal.app/NotepadX-x86_64-apple-darwin-minimal.zip" ]; then
+            mv "artifacts/NotepadX-x86_64-apple-darwin-minimal.app/NotepadX-x86_64-apple-darwin-minimal.zip" release-assets/NotepadX-macos-x86_64-minimal.zip
+          fi
+          if [ -f "artifacts/NotepadX-aarch64-apple-darwin-minimal.app/NotepadX-aarch64-apple-darwin-minimal.zip" ]; then
+            mv "artifacts/NotepadX-aarch64-apple-darwin-minimal.app/NotepadX-aarch64-apple-darwin-minimal.zip" release-assets/NotepadX-macos-arm64-minimal.zip
+          fi
+          # Move Linux binary (full)
           if [ -f artifacts/notepadx-x86_64-unknown-linux-gnu/notepadx ]; then
             mv artifacts/notepadx-x86_64-unknown-linux-gnu/notepadx release-assets/notepadx-linux-x86_64
           fi
-          # Move Windows binary
+          # Move Linux binary (minimal)
+          if [ -f artifacts/notepadx-x86_64-unknown-linux-gnu-minimal/notepadx ]; then
+            mv artifacts/notepadx-x86_64-unknown-linux-gnu-minimal/notepadx release-assets/notepadx-linux-x86_64-minimal
+          fi
+          # Move Windows binary (full)
           if [ -f artifacts/notepadx-x86_64-pc-windows-msvc/notepadx.exe ]; then
             mv artifacts/notepadx-x86_64-pc-windows-msvc/notepadx.exe release-assets/notepadx-windows-x86_64.exe
+          fi
+          # Move Windows binary (minimal)
+          if [ -f artifacts/notepadx-x86_64-pc-windows-msvc-minimal/notepadx.exe ]; then
+            mv artifacts/notepadx-x86_64-pc-windows-msvc-minimal/notepadx.exe release-assets/notepadx-windows-x86_64-minimal.exe
           fi
           ls -la release-assets/
 
