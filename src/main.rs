@@ -49,7 +49,9 @@ fn status_bar_command(segment: renderer::StatusBarSegment) -> Option<CommandId> 
         renderer::StatusBarSegment::Language => Some(CommandId::ChangeLanguage),
         renderer::StatusBarSegment::Encoding => Some(CommandId::ChangeEncoding),
         renderer::StatusBarSegment::LineEnding => Some(CommandId::ChangeLineEnding),
-        renderer::StatusBarSegment::LineCount | renderer::StatusBarSegment::Version => None,
+        renderer::StatusBarSegment::LineCount
+        | renderer::StatusBarSegment::Activity
+        | renderer::StatusBarSegment::Version => None,
     }
 }
 
@@ -122,6 +124,10 @@ struct TabDrag {
     is_dragging: bool,
 }
 
+struct ScrollbarDrag {
+    grab_offset_y: f32,
+}
+
 struct App {
     // Core state
     editor: Editor,
@@ -160,6 +166,8 @@ struct App {
     block_drag_anchor: Option<usize>,
     // Tab drag-to-reorder state
     tab_drag: Option<TabDrag>,
+    // Scrollbar thumb drag state
+    scrollbar_drag: Option<ScrollbarDrag>,
 
     // Animation
     needs_redraw: bool,
@@ -274,6 +282,7 @@ impl App {
             suppress_drag: false,
             block_drag_anchor: None,
             tab_drag: None,
+            scrollbar_drag: None,
             needs_redraw: true,
             last_large_file_index_version: None,
             pending_find_jump: false,
@@ -711,6 +720,11 @@ impl App {
         }
         // Editor Area
         else if y >= TAB_BAR_HEIGHT as f64 {
+            if self.try_begin_scrollbar_drag(x as f32, y as f32) {
+                self.needs_redraw = true;
+                return;
+            }
+
             let shift = self.modifiers.shift_key();
             let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
             let line_height = self.config.font_size * 1.44;
@@ -796,7 +810,107 @@ impl App {
         self.needs_redraw = true;
     }
 
+    fn editor_wrap_width(&self) -> Option<f32> {
+        if !self.editor.active().wrap_enabled {
+            return None;
+        }
+
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let win_width = self
+            .window
+            .as_ref()
+            .map(|w| w.inner_size().width as f32 / scale)
+            .unwrap_or(1200.0);
+        Some(
+            (win_width
+                - renderer::GUTTER_WIDTH
+                - renderer::LINE_PADDING_LEFT
+                - renderer::SCROLLBAR_WIDTH)
+                .max(100.0),
+        )
+    }
+
+    fn try_begin_scrollbar_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(scrollbar) = self
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.scrollbar_thumb(self.editor.active(), &self.overlay))
+        else {
+            return false;
+        };
+
+        if !scrollbar.contains_track(x, y) {
+            return false;
+        }
+
+        let grab_offset_y = if scrollbar.contains_thumb(x, y) {
+            y - scrollbar.thumb_y
+        } else {
+            scrollbar.thumb_height * 0.5
+        };
+
+        self.scrollbar_drag = Some(ScrollbarDrag { grab_offset_y });
+        self.suppress_drag = true;
+        self.block_drag_anchor = None;
+        self.drag_scrollbar_to(y);
+        true
+    }
+
+    fn drag_scrollbar_to(&mut self, y: f32) {
+        let Some(drag) = self.scrollbar_drag.as_ref() else {
+            return;
+        };
+        let Some(scrollbar) = self
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.scrollbar_thumb(self.editor.active(), &self.overlay))
+        else {
+            return;
+        };
+
+        let travel = (scrollbar.track_height - scrollbar.thumb_height).max(0.0);
+        let thumb_y = (y - drag.grab_offset_y).clamp(scrollbar.track_y, scrollbar.track_y + travel);
+        let ratio = if travel > 0.0 {
+            (thumb_y - scrollbar.track_y) / travel
+        } else {
+            0.0
+        };
+
+        let visible_lines = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.visible_lines_with_panel(&self.overlay))
+            .unwrap_or(1);
+        let char_width = self.config.font_size * 0.6;
+        let wrap_width = self.editor_wrap_width();
+
+        if let Err(err) = self.editor.active_mut().set_vertical_scroll_ratio(
+            ratio,
+            visible_lines,
+            wrap_width,
+            char_width,
+        ) {
+            log::error!("Failed to drag scrollbar: {}", err);
+        }
+        self.needs_redraw = true;
+    }
+
     fn handle_mouse_drag(&mut self) {
+        if self.scrollbar_drag.is_some() {
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor())
+                .unwrap_or(1.0);
+            let y = (self.mouse_pos.1 / scale) as f32;
+            self.drag_scrollbar_to(y);
+            return;
+        }
+
         let (x, y) = self.mouse_pos;
         let scale = self
             .window
@@ -2715,6 +2829,15 @@ impl ApplicationHandler for App {
                         .unwrap_or(600.0);
                     let status_top = (win_h - renderer::STATUS_BAR_HEIGHT) as f64;
                     use renderer::TAB_BAR_HEIGHT;
+                    let over_scrollbar = self.scrollbar_drag.is_some()
+                        || self
+                            .renderer
+                            .as_ref()
+                            .and_then(|renderer| {
+                                renderer.scrollbar_thumb(self.editor.active(), &self.overlay)
+                            })
+                            .map(|scrollbar| scrollbar.contains_track(x as f32, y as f32))
+                            .unwrap_or(false);
 
                     if y >= status_top {
                         let new_seg = self
@@ -2730,6 +2853,14 @@ impl ApplicationHandler for App {
                         if let Some(renderer) = &mut self.renderer {
                             if renderer.hovered_status_segment != new_seg {
                                 renderer.hovered_status_segment = new_seg;
+                                self.needs_redraw = true;
+                            }
+                        }
+                    } else if over_scrollbar {
+                        window.set_cursor(winit::window::CursorIcon::Pointer);
+                        if let Some(renderer) = &mut self.renderer {
+                            if renderer.hovered_status_segment.is_some() {
+                                renderer.hovered_status_segment = None;
                                 self.needs_redraw = true;
                             }
                         }
@@ -2754,7 +2885,10 @@ impl ApplicationHandler for App {
 
                 if self.is_mouse_down && self.overlay.is_active() {
                     self.handle_overlay_drag();
-                } else if self.is_mouse_down && !self.overlay.is_active() && !self.suppress_drag {
+                } else if self.is_mouse_down
+                    && !self.overlay.is_active()
+                    && (self.scrollbar_drag.is_some() || !self.suppress_drag)
+                {
                     self.handle_mouse_drag();
                 }
 
@@ -2800,6 +2934,7 @@ impl ApplicationHandler for App {
                         // Mouse released — always re-enable drag for next click
                         self.suppress_drag = false;
                         self.block_drag_anchor = None;
+                        self.scrollbar_drag = None;
 
                         // Resolve tab drag-to-reorder
                         if let Some(drag) = self.tab_drag.take() {

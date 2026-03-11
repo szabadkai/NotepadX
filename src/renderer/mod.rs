@@ -49,7 +49,36 @@ pub enum StatusBarSegment {
     Language,
     Encoding,
     LineEnding,
+    Activity,
     Version,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarThumb {
+    pub track_x: f32,
+    pub track_y: f32,
+    pub track_width: f32,
+    pub track_height: f32,
+    pub thumb_x: f32,
+    pub thumb_y: f32,
+    pub thumb_width: f32,
+    pub thumb_height: f32,
+}
+
+impl ScrollbarThumb {
+    pub fn contains_track(self, x: f32, y: f32) -> bool {
+        x >= self.track_x
+            && x <= self.track_x + self.track_width
+            && y >= self.track_y
+            && y <= self.track_y + self.track_height
+    }
+
+    pub fn contains_thumb(self, x: f32, y: f32) -> bool {
+        x >= self.thumb_x
+            && x <= self.thumb_x + self.thumb_width
+            && y >= self.thumb_y
+            && y <= self.thumb_y + self.thumb_height
+    }
 }
 
 impl StatusBarSegment {
@@ -62,6 +91,46 @@ impl StatusBarSegment {
                 | StatusBarSegment::LineEnding
         )
     }
+}
+
+struct StatusBarEntry {
+    order: usize,
+    segment: StatusBarSegment,
+    text: String,
+}
+
+fn remaining_status_chars(
+    used_chars: usize,
+    capacity: usize,
+    sep_chars: usize,
+    has_entries: bool,
+) -> usize {
+    let separator_cost = if has_entries { sep_chars } else { 0 };
+    capacity.saturating_sub(used_chars + separator_cost)
+}
+
+fn try_push_status_entry(
+    entries: &mut Vec<StatusBarEntry>,
+    used_chars: &mut usize,
+    capacity: usize,
+    sep_chars: usize,
+    order: usize,
+    segment: StatusBarSegment,
+    text: impl Into<String>,
+) -> bool {
+    let text = text.into();
+    let needed = text.chars().count() + if entries.is_empty() { 0 } else { sep_chars };
+    if *used_chars + needed > capacity {
+        return false;
+    }
+
+    *used_chars += needed;
+    entries.push(StatusBarEntry {
+        order,
+        segment,
+        text,
+    });
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,6 +392,79 @@ impl Renderer {
             }
         }
         None
+    }
+
+    pub fn scrollbar_thumb(
+        &self,
+        buffer: &crate::editor::Buffer,
+        overlay: &crate::overlay::OverlayState,
+    ) -> Option<ScrollbarThumb> {
+        let s = self.scale_factor;
+        let width = self.width as f32;
+        let height = self.height as f32;
+        let tab_bar_height = TAB_BAR_HEIGHT * s;
+        let status_bar_height = STATUS_BAR_HEIGHT * s;
+        let gutter_width = GUTTER_WIDTH * s;
+        let line_padding_left = LINE_PADDING_LEFT * s;
+        let char_width = self.current_font_size * 0.6 * s;
+        let editor_left = gutter_width + line_padding_left;
+        let results_panel_height_px = self.results_panel_height(overlay) * s;
+        let editor_height_px =
+            height - tab_bar_height - status_bar_height - results_panel_height_px;
+        if editor_height_px <= 0.0 {
+            return None;
+        }
+
+        let wrap_width = if buffer.wrap_enabled {
+            Some((width - editor_left - SCROLLBAR_WIDTH * s).max(char_width))
+        } else {
+            None
+        };
+        let visible_lines = self.visible_lines_with_panel(overlay).max(1);
+        let total_lines = if buffer.is_large_file() && !buffer.large_file_edit_mode {
+            buffer
+                .display_line_count()
+                .unwrap_or_else(|| buffer.line_count())
+                .max(1)
+        } else {
+            buffer.visual_line_count(wrap_width, char_width).max(1)
+        };
+
+        let visible_f = visible_lines.min(total_lines).max(1) as f32;
+        let total_lines_f = total_lines.max(1) as f32;
+        let thumb_ratio = (visible_f / total_lines_f).min(1.0);
+        let thumb_h = (editor_height_px * thumb_ratio)
+            .max(20.0 * s)
+            .min(editor_height_px);
+        let scroll_pos = if buffer.is_large_file() && !buffer.large_file_edit_mode {
+            buffer.display_line_number(buffer.scroll_y.floor().max(0.0) as usize) as f32
+                + buffer.scroll_y.fract() as f32
+        } else {
+            buffer.scroll_y as f32
+        };
+        let max_scroll = (total_lines_f - visible_f).max(0.0);
+        let scroll_ratio = if max_scroll > 0.0 {
+            (scroll_pos / max_scroll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let thumb_width = 8.0 * s;
+        let thumb_margin = 2.0 * s;
+        let track_x = width - SCROLLBAR_WIDTH * s;
+        let thumb_x = width - thumb_width - thumb_margin;
+        let thumb_y = tab_bar_height + scroll_ratio * (editor_height_px - thumb_h);
+
+        Some(ScrollbarThumb {
+            track_x,
+            track_y: tab_bar_height,
+            track_width: SCROLLBAR_WIDTH * s,
+            track_height: editor_height_px,
+            thumb_x,
+            thumb_y,
+            thumb_width,
+            thumb_height: thumb_h,
+        })
     }
 
     /// Update all text buffers based on current editor state
@@ -618,18 +760,24 @@ impl Renderer {
             if overlay.find.search_file_size > 0 && scanned > 0 {
                 let pct =
                     (scanned as f64 / overlay.find.search_file_size as f64 * 100.0).min(100.0);
-                format!(
-                    "   ·   Searching {:.0}% ({} matches)",
-                    pct,
-                    overlay.find.matches.len()
-                )
+                Some((
+                    format!(
+                        "Searching {:.0}% ({} matches)",
+                        pct,
+                        overlay.find.matches.len()
+                    ),
+                    format!("Search {:.0}%/{}", pct, overlay.find.matches.len()),
+                ))
             } else if !overlay.find.matches.is_empty() {
-                format!("   ·   Searching… ({} matches)", overlay.find.matches.len())
+                Some((
+                    format!("Searching… ({} matches)", overlay.find.matches.len()),
+                    format!("Search {}", overlay.find.matches.len()),
+                ))
             } else {
-                "   ·   Searching…".to_string()
+                Some(("Searching…".to_string(), "Search…".to_string()))
             }
         } else {
-            String::new()
+            None
         };
 
         let edit_load_info = if let Some((loaded, total)) = buffer.edit_mode_load_progress() {
@@ -637,73 +785,157 @@ impl Renderer {
                 let pct = (loaded as f64 / total as f64 * 100.0).min(100.0);
                 let loaded_mb = loaded as f64 / (1024.0 * 1024.0);
                 let total_mb = total as f64 / (1024.0 * 1024.0);
-                format!(
-                    "   ·   Loading for edit: {:.0}% ({:.0}/{:.0} MB)",
-                    pct, loaded_mb, total_mb
-                )
+                Some((
+                    format!(
+                        "Loading for edit: {:.0}% ({:.0}/{:.0} MB)",
+                        pct, loaded_mb, total_mb
+                    ),
+                    format!("Edit load {:.0}%", pct),
+                ))
             } else {
-                "   ·   Loading for edit…".to_string()
+                Some(("Loading for edit…".to_string(), "Edit load…".to_string()))
             }
         } else {
-            String::new()
+            None
         };
 
         // Build status text and compute segment boundaries for hit testing.
-        // Each segment is separated by "   ·   " (7 chars).
+        // Each segment is separated by "   ·   " (7 chars). Lower-priority segments
+        // are dropped as width shrinks so the status bar stays on a single row.
         let sep = "   ·   ";
         let padding = "  "; // 2-char left padding
         let seg_cursor = format!("Ln {}, Col {}", line, col);
         let seg_lines = format!("{} lines", total_lines);
         let seg_lang = lang_name.to_string();
         let seg_encoding = encoding.to_string();
-        let seg_line_ending = format!("{}{}{}", line_ending, search_info, edit_load_info);
+        let seg_line_ending = line_ending.to_string();
+        let activity_full = [
+            search_info.as_ref().map(|info| info.0.as_str()),
+            edit_load_info.as_ref().map(|info| info.0.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        let activity_compact = [
+            search_info.as_ref().map(|info| info.1.as_str()),
+            edit_load_info.as_ref().map(|info| info.1.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
         let status_capacity = ((width - 20.0) / STATUS_CHAR_WIDTH).floor().max(0.0) as usize;
-        let fixed_segments = [
-            seg_cursor.chars().count(),
-            seg_lines.chars().count(),
-            seg_lang.chars().count(),
-            seg_encoding.chars().count(),
-            seg_line_ending.chars().count(),
-        ];
-        let fixed_chars = padding.chars().count()
-            + fixed_segments.iter().sum::<usize>()
-            + sep.chars().count() * fixed_segments.len();
-        let path_chars = status_capacity.saturating_sub(fixed_chars).max(12);
-        let seg_path = format_status_path(buffer.file_path.as_deref(), path_chars);
+        let sep_chars = sep.chars().count();
+        let mut visible_segments = Vec::new();
+        let mut used_chars = padding.chars().count();
 
+        try_push_status_entry(
+            &mut visible_segments,
+            &mut used_chars,
+            status_capacity,
+            sep_chars,
+            0,
+            StatusBarSegment::CursorPosition,
+            seg_cursor.clone(),
+        );
+        try_push_status_entry(
+            &mut visible_segments,
+            &mut used_chars,
+            status_capacity,
+            sep_chars,
+            2,
+            StatusBarSegment::Language,
+            seg_lang.clone(),
+        );
+        try_push_status_entry(
+            &mut visible_segments,
+            &mut used_chars,
+            status_capacity,
+            sep_chars,
+            4,
+            StatusBarSegment::LineEnding,
+            seg_line_ending.clone(),
+        );
+        try_push_status_entry(
+            &mut visible_segments,
+            &mut used_chars,
+            status_capacity,
+            sep_chars,
+            3,
+            StatusBarSegment::Encoding,
+            seg_encoding.clone(),
+        );
+        try_push_status_entry(
+            &mut visible_segments,
+            &mut used_chars,
+            status_capacity,
+            sep_chars,
+            1,
+            StatusBarSegment::LineCount,
+            seg_lines.clone(),
+        );
+        if !activity_full.is_empty()
+            && !try_push_status_entry(
+                &mut visible_segments,
+                &mut used_chars,
+                status_capacity,
+                sep_chars,
+                5,
+                StatusBarSegment::Activity,
+                activity_full.clone(),
+            )
+        {
+            let _ = try_push_status_entry(
+                &mut visible_segments,
+                &mut used_chars,
+                status_capacity,
+                sep_chars,
+                5,
+                StatusBarSegment::Activity,
+                activity_compact.clone(),
+            );
+        }
+
+        let remaining_path_chars = remaining_status_chars(
+            used_chars,
+            status_capacity,
+            sep_chars,
+            !visible_segments.is_empty(),
+        );
+        if remaining_path_chars >= 12 {
+            let seg_path = format_status_path(buffer.file_path.as_deref(), remaining_path_chars);
+            let _ = try_push_status_entry(
+                &mut visible_segments,
+                &mut used_chars,
+                status_capacity,
+                sep_chars,
+                6,
+                StatusBarSegment::Version,
+                seg_path,
+            );
+        }
+
+        visible_segments.sort_by_key(|entry| entry.order);
         let status_text = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}",
             padding,
-            seg_cursor,
-            sep,
-            seg_lines,
-            sep,
-            seg_lang,
-            sep,
-            seg_encoding,
-            sep,
-            seg_line_ending,
-            sep,
-            seg_path
+            visible_segments
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>()
+                .join(sep)
         );
 
         // Compute segment x boundaries (logical px, with 10px left offset matching TextArea left)
         let cw = STATUS_CHAR_WIDTH;
         let left_offset = 10.0; // matches the `left: 10.0 * s` in TextArea for status bar
-        let sep_chars = sep.chars().count() as f32;
+        let sep_chars = sep_chars as f32;
         let mut x = left_offset + padding.chars().count() as f32 * cw;
         self.status_segments.clear();
-        let segments_data: &[(&str, StatusBarSegment)] = &[
-            (&seg_cursor, StatusBarSegment::CursorPosition),
-            (&seg_lines, StatusBarSegment::LineCount),
-            (&seg_lang, StatusBarSegment::Language),
-            (&seg_encoding, StatusBarSegment::Encoding),
-            (&seg_line_ending, StatusBarSegment::LineEnding),
-            (&seg_path, StatusBarSegment::Version),
-        ];
-        for (text, seg) in segments_data {
-            let w = text.chars().count() as f32 * cw;
-            self.status_segments.push((x, x + w, *seg));
+        for entry in &visible_segments {
+            let w = entry.text.chars().count() as f32 * cw;
+            self.status_segments.push((x, x + w, entry.segment));
             x += w + sep_chars * cw;
         }
 
@@ -1625,20 +1857,7 @@ impl Renderer {
         }
 
         // 7. Scrollbar Thumb
-        {
-            let scrollbar_w = 8.0 * s;
-            let scrollbar_margin = 2.0 * s;
-            let scrollbar_x = width - scrollbar_w - scrollbar_margin;
-            let total_lines_f = buffer.rope.len_lines().max(1) as f32;
-            let visible_f = visible_lines.max(1) as f32;
-            let thumb_ratio = (visible_f / total_lines_f).min(1.0);
-            let thumb_h = (editor_height_px * thumb_ratio).max(20.0 * s);
-            let scroll_ratio = if total_lines_f > visible_f {
-                buffer.scroll_y as f32 / (total_lines_f - visible_f)
-            } else {
-                0.0
-            };
-            let thumb_y = editor_top + scroll_ratio * (editor_height_px - thumb_h);
+        if let Some(scrollbar) = self.scrollbar_thumb(buffer, overlay) {
             let thumb_color = [
                 theme.scrollbar_thumb.r,
                 theme.scrollbar_thumb.g,
@@ -1646,10 +1865,10 @@ impl Renderer {
                 theme.scrollbar_thumb.a,
             ];
             base_rects.push(Rect::rounded(
-                scrollbar_x,
-                thumb_y,
-                scrollbar_w,
-                thumb_h,
+                scrollbar.thumb_x,
+                scrollbar.thumb_y,
+                scrollbar.thumb_width,
+                scrollbar.thumb_height,
                 thumb_color,
                 4.0 * s,
             ));

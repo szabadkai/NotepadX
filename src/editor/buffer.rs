@@ -3382,6 +3382,36 @@ impl Buffer {
         }
     }
 
+    pub fn set_vertical_scroll_ratio(
+        &mut self,
+        ratio: f32,
+        visible_lines: usize,
+        wrap_width: Option<f32>,
+        char_width: f32,
+    ) -> Result<()> {
+        let ratio = ratio.clamp(0.0, 1.0);
+
+        if self.is_large_file() && !self.large_file_edit_mode {
+            let total_lines = self
+                .display_line_count()
+                .unwrap_or_else(|| self.line_count())
+                .max(1);
+            let max_top_line = total_lines.saturating_sub(visible_lines.max(1));
+            let target_line = (max_top_line as f32 * ratio).round() as usize;
+            let window_bytes = self
+                .large_file_window_bytes()
+                .unwrap_or(Self::LARGE_FILE_MIN_WINDOW_BYTES);
+            self.goto_line_zero_based(target_line, window_bytes)?;
+            return Ok(());
+        }
+
+        let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);
+        let target_scroll = max_scroll * ratio as f64;
+        self.scroll_y = target_scroll;
+        self.scroll_y_target = target_scroll;
+        Ok(())
+    }
+
     /// Scroll horizontally
     pub fn scroll_horizontal(&mut self, delta_px: f32) {
         if self.wrap_enabled {
