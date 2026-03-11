@@ -1059,6 +1059,7 @@ impl Buffer {
         self.rope = rope;
         self.line_ending = line_ending;
         self.large_file_edit_mode = true;
+        self.wrap_enabled = false; // wrapping is O(n) per frame on huge files
         self.dirty = false;
         self.undo_stack.clear();
         self.redo_stack.clear();
