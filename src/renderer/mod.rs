@@ -166,15 +166,11 @@ fn try_push_status_entry(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModalOverlayTextPassLayer {
-    TabBar,
     OverlayPanel,
 }
 
-fn modal_overlay_text_pass_layers() -> [ModalOverlayTextPassLayer; 2] {
-    [
-        ModalOverlayTextPassLayer::TabBar,
-        ModalOverlayTextPassLayer::OverlayPanel,
-    ]
+fn modal_overlay_text_pass_layers() -> [ModalOverlayTextPassLayer; 1] {
+    [ModalOverlayTextPassLayer::OverlayPanel]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3447,23 +3443,6 @@ impl Renderer {
                         Vec::with_capacity(modal_overlay_text_pass_layers().len());
                     for text_layer in modal_overlay_text_pass_layers() {
                         match text_layer {
-                            ModalOverlayTextPassLayer::TabBar => {
-                                let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0;
-                                overlay_text_areas.push(TextArea {
-                                    buffer: &self.tab_bar_buffer,
-                                    left: 0.0,
-                                    top: tab_text_top,
-                                    scale: s,
-                                    bounds: TextBounds {
-                                        left: 0,
-                                        top: 0,
-                                        right: width as i32,
-                                        bottom: tab_bar_height as i32,
-                                    },
-                                    default_color: theme.tab_active_fg.to_glyphon(),
-                                    custom_glyphs: &[],
-                                });
-                            }
                             ModalOverlayTextPassLayer::OverlayPanel => {
                                 if let Some(layout) = crate::overlay::find_overlay_layout(
                                     &overlay.active,
@@ -3969,13 +3948,10 @@ mod tests {
     };
 
     #[test]
-    fn overlay_pass_keeps_tab_text_before_overlay_text() {
+    fn overlay_pass_renders_only_overlay_text_layer() {
         assert_eq!(
             modal_overlay_text_pass_layers(),
-            [
-                ModalOverlayTextPassLayer::TabBar,
-                ModalOverlayTextPassLayer::OverlayPanel,
-            ]
+            [ModalOverlayTextPassLayer::OverlayPanel]
         );
     }
 
