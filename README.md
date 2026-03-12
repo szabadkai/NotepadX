@@ -177,13 +177,13 @@ NotepadX ships with **20 built-in themes**:
 - Palenight
 - Andromeda
 - Panda
-- Outrun
+- Solarized Light
 - Horizon
 - LaserWave
-- SweetPop
+- GitHub Light
 - Radical
 - Firefly Pro
-- Hopscotch
+- Catppuccin Latte
 
 ## Session & Workspace
 
