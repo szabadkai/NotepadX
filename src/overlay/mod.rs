@@ -6,6 +6,242 @@ pub mod results_panel;
 #[cfg(test)]
 mod tests;
 
+pub const FIND_OVERLAY_CONTENT_PADDING_X: f32 = 14.0;
+pub const FIND_OVERLAY_ROW_PADDING_Y: f32 = 7.0;
+pub const FIND_OVERLAY_ROW_GAP: f32 = 10.0;
+pub const FIND_OVERLAY_LABEL_WIDTH: f32 = 74.0;
+pub const FIND_OVERLAY_FIELD_GAP: f32 = 10.0;
+pub const FIND_OVERLAY_INPUT_PADDING_X: f32 = 10.0;
+pub const FIND_OVERLAY_COUNT_WIDTH: f32 = 124.0;
+pub const FIND_OVERLAY_COUNT_GAP: f32 = 10.0;
+pub const FIND_OVERLAY_TOGGLE_GAP: f32 = 8.0;
+pub const FIND_OVERLAY_TOGGLE_HEIGHT: f32 = 22.0;
+pub const FIND_OVERLAY_TOGGLE_CASE_WIDTH: f32 = 38.0;
+pub const FIND_OVERLAY_TOGGLE_WORD_WIDTH: f32 = 32.0;
+pub const FIND_OVERLAY_TOGGLE_REGEX_WIDTH: f32 = 44.0;
+pub const FIND_OVERLAY_COUNT_TEXT_INSET: f32 = 10.0;
+pub const FIND_OVERLAY_REPLACE_ALL_WIDTH: f32 = 42.0;
+pub const FIND_OVERLAY_REPLACE_ALL_GAP: f32 = 6.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl OverlayRect {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x
+            && x <= self.x + self.width
+            && y >= self.y
+            && y <= self.y + self.height
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindToggleKind {
+    CaseSensitive,
+    WholeWord,
+    Regex,
+}
+
+impl FindToggleKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::CaseSensitive => "Aa",
+            Self::WholeWord => "W",
+            Self::Regex => ".*",
+        }
+    }
+
+    fn width(&self) -> f32 {
+        match self {
+            Self::CaseSensitive => FIND_OVERLAY_TOGGLE_CASE_WIDTH,
+            Self::WholeWord => FIND_OVERLAY_TOGGLE_WORD_WIDTH,
+            Self::Regex => FIND_OVERLAY_TOGGLE_REGEX_WIDTH,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FindToggleLayout {
+    pub kind: FindToggleKind,
+    pub rect: OverlayRect,
+    pub text_x: f32,
+    pub text_y: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FindOverlayLayout {
+    pub row_text_y: f32,
+    pub find_label_x: f32,
+    pub find_field: OverlayRect,
+    pub find_text_x: f32,
+    pub count_rect: OverlayRect,
+    pub count_text_x: f32,
+    pub replace_label_x: Option<f32>,
+    pub replace_label_y: Option<f32>,
+    pub replace_field: Option<OverlayRect>,
+    pub replace_text_x: Option<f32>,
+    pub replace_text_y: Option<f32>,
+    pub replace_all_btn: Option<OverlayRect>,
+    pub error_text_x: f32,
+    pub error_text_y: f32,
+    pub toggles: [FindToggleLayout; 3],
+}
+
+impl FindOverlayLayout {
+    pub fn toggle(&self, kind: FindToggleKind) -> FindToggleLayout {
+        self.toggles
+            .iter()
+            .copied()
+            .find(|toggle| toggle.kind == kind)
+            .expect("find overlay layout missing toggle")
+    }
+}
+
+pub fn find_overlay_layout(
+    active: &ActiveOverlay,
+    panel_left: f32,
+    panel_top: f32,
+    panel_width: f32,
+    scale: f32,
+    char_width: f32,
+    line_height: f32,
+) -> Option<FindOverlayLayout> {
+    if !matches!(active, ActiveOverlay::Find | ActiveOverlay::FindReplace) {
+        return None;
+    }
+
+    let content_left = panel_left + FIND_OVERLAY_CONTENT_PADDING_X * scale;
+    let content_right = panel_left + panel_width - FIND_OVERLAY_CONTENT_PADDING_X * scale;
+    let label_w = FIND_OVERLAY_LABEL_WIDTH * scale;
+    let field_gap = FIND_OVERLAY_FIELD_GAP * scale;
+    let input_padding = FIND_OVERLAY_INPUT_PADDING_X * scale;
+    let toggle_gap = FIND_OVERLAY_TOGGLE_GAP * scale;
+    let toggle_h = FIND_OVERLAY_TOGGLE_HEIGHT * scale;
+    let toggle_total_w = (FIND_OVERLAY_TOGGLE_CASE_WIDTH
+        + FIND_OVERLAY_TOGGLE_WORD_WIDTH
+        + FIND_OVERLAY_TOGGLE_REGEX_WIDTH)
+        * scale
+        + 2.0 * toggle_gap;
+    let count_w = FIND_OVERLAY_COUNT_WIDTH * scale;
+    let count_gap = FIND_OVERLAY_COUNT_GAP * scale;
+    let field_x = content_left + label_w + field_gap;
+    let toggles_left = content_right - toggle_total_w;
+    let count_x = toggles_left - count_gap - count_w;
+    let field_right = count_x - count_gap;
+    let field_h = line_height + 6.0 * scale;
+    let find_field = OverlayRect {
+        x: field_x,
+        y: panel_top + FIND_OVERLAY_ROW_PADDING_Y * scale,
+        width: (field_right - field_x).max(80.0 * scale),
+        height: field_h,
+    };
+    // row_text_y: 2px below field top — used as the y origin for labels, count chip, and toggle pills
+    let row_text_y = find_field.y + 2.0 * scale;
+    let count_rect = OverlayRect {
+        x: count_x,
+        y: row_text_y,
+        width: count_w,
+        height: toggle_h,
+    };
+    let make_toggle = |kind: FindToggleKind, x: f32| -> FindToggleLayout {
+        let label_width = kind.label().chars().count() as f32 * char_width;
+        FindToggleLayout {
+            kind,
+            rect: OverlayRect {
+                x,
+                y: row_text_y,
+                width: kind.width() * scale,
+                height: toggle_h,
+            },
+            text_x: x + ((kind.width() * scale) - label_width) / 2.0,
+            text_y: row_text_y + 1.0 * scale,
+        }
+    };
+    let case_x = toggles_left;
+    let word_x = case_x + FIND_OVERLAY_TOGGLE_CASE_WIDTH * scale + toggle_gap;
+    let regex_x = word_x + FIND_OVERLAY_TOGGLE_WORD_WIDTH * scale + toggle_gap;
+    let toggles = [
+        make_toggle(FindToggleKind::CaseSensitive, case_x),
+        make_toggle(FindToggleKind::WholeWord, word_x),
+        make_toggle(FindToggleKind::Regex, regex_x),
+    ];
+
+    if *active == ActiveOverlay::FindReplace {
+        let btn_w = FIND_OVERLAY_REPLACE_ALL_WIDTH * scale;
+        let btn_gap = FIND_OVERLAY_REPLACE_ALL_GAP * scale;
+        let replace_all_x = content_right - btn_w;
+        let replace_row_y = find_field.y + field_h + FIND_OVERLAY_ROW_GAP * scale;
+        let replace_field = OverlayRect {
+            x: field_x,
+            y: replace_row_y,
+            width: (replace_all_x - btn_gap - field_x).max(80.0 * scale),
+            height: field_h,
+        };
+        let replace_all_btn = OverlayRect {
+            x: replace_all_x,
+            y: replace_row_y,
+            width: btn_w,
+            height: field_h,
+        };
+        let replace_text_y = replace_field.y + 2.0 * scale;
+        Some(FindOverlayLayout {
+            row_text_y,
+            find_label_x: content_left,
+            find_field,
+            find_text_x: find_field.x + input_padding,
+            count_rect,
+            count_text_x: count_rect.x + FIND_OVERLAY_COUNT_TEXT_INSET * scale,
+            replace_label_x: Some(content_left),
+            replace_label_y: Some(replace_text_y),
+            replace_field: Some(replace_field),
+            replace_text_x: Some(replace_field.x + input_padding),
+            replace_text_y: Some(replace_text_y),
+            replace_all_btn: Some(replace_all_btn),
+            error_text_x: content_left,
+            error_text_y: replace_field.y + field_h + 2.0 * scale,
+            toggles,
+        })
+    } else {
+        Some(FindOverlayLayout {
+            row_text_y,
+            find_label_x: content_left,
+            find_field,
+            find_text_x: find_field.x + input_padding,
+            count_rect,
+            count_text_x: count_rect.x + FIND_OVERLAY_COUNT_TEXT_INSET * scale,
+            replace_label_x: None,
+            replace_label_y: None,
+            replace_field: None,
+            replace_text_x: None,
+            replace_text_y: None,
+            replace_all_btn: None,
+            error_text_x: content_left,
+            error_text_y: row_text_y + line_height,
+            toggles,
+        })
+    }
+}
+
+pub fn overlay_panel_width(active: &ActiveOverlay, window_width: f32, scale: f32) -> f32 {
+    let (fraction, min_width, max_width) = if matches!(active, ActiveOverlay::Help | ActiveOverlay::Settings) {
+        (0.8, 400.0, 900.0)
+    } else if matches!(active, ActiveOverlay::Find | ActiveOverlay::FindReplace) {
+        (0.50, 380.0, 600.0)
+    } else {
+        (0.5, 300.0, 600.0)
+    };
+    let preferred = (window_width * fraction)
+        .max(min_width * scale)
+        .min(max_width * scale);
+    let available = (window_width - 24.0 * scale).max(220.0 * scale);
+    preferred.min(available)
+}
+
 /// Which overlay is currently active
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ActiveOverlay {

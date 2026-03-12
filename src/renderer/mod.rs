@@ -220,19 +220,7 @@ fn modal_overlay_geometry(
         return None;
     }
 
-    let is_wide = matches!(
-        overlay.active,
-        crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
-    );
-    let overlay_width = if is_wide {
-        (width * 0.8)
-            .max(400.0 * scale_factor)
-            .min(900.0 * scale_factor)
-    } else {
-        (width * 0.5)
-            .max(300.0 * scale_factor)
-            .min(600.0 * scale_factor)
-    };
+    let overlay_width = crate::overlay::overlay_panel_width(&overlay.active, width, scale_factor);
     let overlay_left = (width - overlay_width) / 2.0;
     let overlay_top = editor_top + 4.0 * scale_factor;
     let overlay_height = match &overlay.active {
@@ -242,7 +230,7 @@ fn modal_overlay_geometry(
                     .len();
             command_palette_panel_height(item_count) * scale_factor
         }
-        crate::overlay::ActiveOverlay::FindReplace => 60.0 * scale_factor,
+        crate::overlay::ActiveOverlay::FindReplace => 76.0 * scale_factor,
         crate::overlay::ActiveOverlay::Find => {
             if overlay.find.regex_error.is_some() {
                 60.0 * scale_factor
@@ -456,6 +444,31 @@ fn find_occurrence_ranges(
         .collect()
 }
 
+fn new_overlay_text_buffer(font_system: &mut FontSystem) -> GlyphonBuffer {
+    let mut buffer = GlyphonBuffer::new(
+        font_system,
+        Metrics::new(OVERLAY_FONT_SIZE, OVERLAY_LINE_HEIGHT),
+    );
+    buffer.set_size(font_system, Some(900.0), Some(600.0));
+    buffer.set_text(
+        font_system,
+        "",
+        Attrs::new().family(Family::Name("JetBrains Mono")),
+        Shaping::Advanced,
+    );
+    buffer
+}
+
+fn set_overlay_text_buffer(font_system: &mut FontSystem, buffer: &mut GlyphonBuffer, text: &str) {
+    buffer.set_text(
+        font_system,
+        text,
+        Attrs::new().family(Family::Name("JetBrains Mono")),
+        Shaping::Advanced,
+    );
+    buffer.shape_until_scroll(font_system, false);
+}
+
 /// Persistent text buffers for glyphon rendering
 pub struct Renderer {
     pub font_system: FontSystem,
@@ -479,6 +492,16 @@ pub struct Renderer {
     pub status_buffer: GlyphonBuffer,
     pub cursor_buffer: GlyphonBuffer,
     pub overlay_buffer: GlyphonBuffer,
+    pub overlay_find_label_buffer: GlyphonBuffer,
+    pub overlay_find_input_buffer: GlyphonBuffer,
+    pub overlay_replace_label_buffer: GlyphonBuffer,
+    pub overlay_replace_input_buffer: GlyphonBuffer,
+    pub overlay_count_buffer: GlyphonBuffer,
+    pub overlay_error_buffer: GlyphonBuffer,
+    pub overlay_case_toggle_buffer: GlyphonBuffer,
+    pub overlay_word_toggle_buffer: GlyphonBuffer,
+    pub overlay_regex_toggle_buffer: GlyphonBuffer,
+    pub overlay_replace_all_btn_buffer: GlyphonBuffer,
     pub results_panel_buffer: GlyphonBuffer,
 
     // Syntax highlight cache
@@ -547,18 +570,17 @@ impl Renderer {
         let status_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(12.0, 15.0));
         let cursor_buffer =
             GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        let mut overlay_buffer = GlyphonBuffer::new(
-            &mut font_system,
-            Metrics::new(OVERLAY_FONT_SIZE, OVERLAY_LINE_HEIGHT),
-        );
-        // Pre-allocate overlay buffer with a large fixed size to avoid resize issues
-        overlay_buffer.set_size(&mut font_system, Some(900.0), Some(600.0));
-        overlay_buffer.set_text(
-            &mut font_system,
-            "",
-            Attrs::new().family(Family::Name("JetBrains Mono")),
-            Shaping::Advanced,
-        );
+        let overlay_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_find_label_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_find_input_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_replace_label_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_replace_input_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_count_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_error_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_case_toggle_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_word_toggle_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_regex_toggle_buffer = new_overlay_text_buffer(&mut font_system);
+        let overlay_replace_all_btn_buffer = new_overlay_text_buffer(&mut font_system);
 
         let mut results_panel_buffer = GlyphonBuffer::new(
             &mut font_system,
@@ -602,6 +624,16 @@ impl Renderer {
             status_buffer,
             cursor_buffer,
             overlay_buffer,
+            overlay_find_label_buffer,
+            overlay_find_input_buffer,
+            overlay_replace_label_buffer,
+            overlay_replace_input_buffer,
+            overlay_count_buffer,
+            overlay_error_buffer,
+            overlay_case_toggle_buffer,
+            overlay_word_toggle_buffer,
+            overlay_regex_toggle_buffer,
+            overlay_replace_all_btn_buffer,
             results_panel_buffer,
             cached_text_hash: 0,
             cached_spans: Vec::new(),
@@ -1251,15 +1283,7 @@ impl Renderer {
 
         // --- Overlay Panel ---
         if overlay.is_active() {
-            let is_wide = matches!(
-                overlay.active,
-                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
-            );
-            let overlay_width = if is_wide {
-                (width * 0.8).clamp(400.0, 900.0)
-            } else {
-                (width * 0.5).clamp(300.0, 600.0)
-            };
+            let overlay_width = crate::overlay::overlay_panel_width(&overlay.active, width, 1.0);
             let _overlay_h = match &overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
                     if overlay.find.regex_error.is_some() {
@@ -1292,67 +1316,141 @@ impl Renderer {
 
             let overlay_text = match &overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
-                    let count = overlay.find.match_count_label();
                     let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    let flags = format!(
-                        "[{}Aa] [{}W] [{}.*]",
-                        if overlay.find.case_sensitive {
-                            "x"
-                        } else {
-                            " "
-                        },
-                        if overlay.find.whole_word { "x" } else { " " },
-                        if overlay.find.use_regex { "x" } else { " " }
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_find_label_buffer,
+                        "Find:",
                     );
-                    if let Some(err) = &overlay.find.regex_error {
-                        format!(
-                            "Find: {}│{}  {}  {}\n! Regex: {}",
-                            before, after, count, flags, err
-                        )
-                    } else {
-                        format!("Find: {}│{}  {}  {}", before, after, count, flags)
-                    }
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_find_input_buffer,
+                        &format!("{}│{}", before, after),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_count_buffer,
+                        &overlay.find.match_count_label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_case_toggle_buffer,
+                        crate::overlay::FindToggleKind::CaseSensitive.label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_word_toggle_buffer,
+                        crate::overlay::FindToggleKind::WholeWord.label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_regex_toggle_buffer,
+                        crate::overlay::FindToggleKind::Regex.label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_replace_label_buffer,
+                        "",
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_replace_input_buffer,
+                        "",
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_replace_all_btn_buffer,
+                        "",
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_error_buffer,
+                        &overlay
+                            .find
+                            .regex_error
+                            .as_ref()
+                            .map(|err| format!("! Regex: {}", err))
+                            .unwrap_or_default(),
+                    );
+                    String::new()
                 }
                 crate::overlay::ActiveOverlay::FindReplace => {
-                    let count = overlay.find.match_count_label();
-                    let flags = format!(
-                        "[{}Aa] [{}W] [{}.*]",
-                        if overlay.find.case_sensitive {
-                            "x"
-                        } else {
-                            " "
-                        },
-                        if overlay.find.whole_word { "x" } else { " " },
-                        if overlay.find.use_regex { "x" } else { " " }
-                    );
-                    if !overlay.focus_replace {
-                        let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                        if let Some(err) = &overlay.find.regex_error {
-                            format!(
-                                "Find:    {}│{}  {}  {}\nReplace: {}\n! Regex: {}",
-                                before, after, count, flags, overlay.replace_input, err
-                            )
-                        } else {
-                            format!(
-                                "Find:    {}│{}  {}  {}\nReplace: {}",
-                                before, after, count, flags, overlay.replace_input
-                            )
-                        }
+                    let (find_before, find_after) = if overlay.focus_replace {
+                        (overlay.input.as_str(), "")
                     } else {
-                        let (before, after) =
-                            overlay.replace_input.split_at(overlay.replace_cursor_pos);
-                        if let Some(err) = &overlay.find.regex_error {
-                            format!(
-                                "Find:    {}  {}  {}\nReplace: {}│{}\n! Regex: {}",
-                                overlay.input, count, flags, before, after, err
-                            )
-                        } else {
-                            format!(
-                                "Find:    {}  {}  {}\nReplace: {}│{}",
-                                overlay.input, count, flags, before, after
-                            )
-                        }
-                    }
+                        overlay.input.split_at(overlay.cursor_pos)
+                    };
+                    let (replace_before, replace_after) = if overlay.focus_replace {
+                        overlay.replace_input.split_at(overlay.replace_cursor_pos)
+                    } else {
+                        (overlay.replace_input.as_str(), "")
+                    };
+                    let find_display = if overlay.focus_replace {
+                        find_before.to_string()
+                    } else {
+                        format!("{}│{}", find_before, find_after)
+                    };
+                    let replace_display = if overlay.focus_replace {
+                        format!("{}│{}", replace_before, replace_after)
+                    } else {
+                        replace_before.to_string()
+                    };
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_find_label_buffer,
+                        "Find:",
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_replace_label_buffer,
+                        "Replace:",
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_find_input_buffer,
+                        &find_display,
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_replace_input_buffer,
+                        &replace_display,
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_count_buffer,
+                        &overlay.find.match_count_label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_case_toggle_buffer,
+                        crate::overlay::FindToggleKind::CaseSensitive.label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_word_toggle_buffer,
+                        crate::overlay::FindToggleKind::WholeWord.label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_regex_toggle_buffer,
+                        crate::overlay::FindToggleKind::Regex.label(),
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_replace_all_btn_buffer,
+                        "All",
+                    );
+                    set_overlay_text_buffer(
+                        &mut self.font_system,
+                        &mut self.overlay_error_buffer,
+                        &overlay
+                            .find
+                            .regex_error
+                            .as_ref()
+                            .map(|err| format!("! Regex: {}", err))
+                            .unwrap_or_default(),
+                    );
+                    String::new()
                 }
                 crate::overlay::ActiveOverlay::GotoLine => {
                     let (before, after) = overlay.input.split_at(overlay.cursor_pos);
@@ -1612,16 +1710,7 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::None => String::new(),
             };
 
-            self.overlay_buffer.set_text(
-                &mut self.font_system,
-                &overlay_text,
-                Attrs::new()
-                    .family(Family::Name("JetBrains Mono"))
-                    .color(theme.fg.to_glyphon()),
-                Shaping::Advanced,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
+            set_overlay_text_buffer(&mut self.font_system, &mut self.overlay_buffer, &overlay_text);
         }
 
         // --- Results Panel ---
@@ -2290,47 +2379,63 @@ impl Renderer {
                 0.35,
             ];
             let input_focus = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 0.9];
+            let chip_border = [
+                theme.gutter_fg.r,
+                theme.gutter_fg.g,
+                theme.gutter_fg.b,
+                0.42,
+            ];
+            let chip_fill = [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, 0.95];
+            let find_layout = crate::overlay::find_overlay_layout(
+                &overlay.active,
+                overlay_left,
+                overlay_top_panel,
+                overlay_width,
+                s,
+                overlay_char_width,
+                overlay_line_height,
+            );
 
             match overlay.active {
                 crate::overlay::ActiveOverlay::Find => {
-                    let pill_h = 18.0 * s;
-                    let pill_gap = 6.0 * s;
-                    let pill_regex_w = 40.0 * s;
-                    let pill_word_w = 28.0 * s;
-                    let pill_case_w = 36.0 * s;
-                    let right = overlay_left + overlay_width - 8.0 * s;
-                    let y = overlay_top_panel + 6.0 * s;
-                    let regex_x = right - pill_regex_w;
-                    let word_x = regex_x - pill_gap - pill_word_w;
-                    let case_x = word_x - pill_gap - pill_case_w;
-                    let field_x = overlay_left + 8.0 * s + 5.0 * overlay_char_width;
-                    let field_y = overlay_top_panel + 4.0 * s;
-                    let field_w = (case_x - 6.0 * s - field_x).max(80.0 * s);
-                    let field_h = overlay_line_height + 4.0 * s;
+                    let layout = find_layout.expect("find overlay layout missing");
                     overlay_rects.push(Rect::rounded(
-                        field_x,
-                        field_y,
-                        field_w,
-                        field_h,
+                        layout.find_field.x,
+                        layout.find_field.y,
+                        layout.find_field.width,
+                        layout.find_field.height,
                         input_focus,
                         4.0 * s,
                     ));
                     overlay_rects.push(Rect::rounded(
-                        field_x + 1.0 * s,
-                        field_y + 1.0 * s,
-                        field_w - 2.0 * s,
-                        field_h - 2.0 * s,
+                        layout.find_field.x + 1.0 * s,
+                        layout.find_field.y + 1.0 * s,
+                        layout.find_field.width - 2.0 * s,
+                        layout.find_field.height - 2.0 * s,
                         input_bg,
+                        3.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        layout.count_rect.x,
+                        layout.count_rect.y,
+                        layout.count_rect.width,
+                        layout.count_rect.height,
+                        chip_border,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        layout.count_rect.x + 1.0 * s,
+                        layout.count_rect.y + 1.0 * s,
+                        layout.count_rect.width - 2.0 * s,
+                        layout.count_rect.height - 2.0 * s,
+                        chip_fill,
                         3.0 * s,
                     ));
 
                     if let Some((start, end)) = overlay.find_selection_char_range() {
                         overlay_rects.push(Rect::flat(
-                            overlay_left
-                                + 8.0 * s
-                                + 6.0 * overlay_char_width
-                                + start as f32 * overlay_char_width,
-                            overlay_top_panel + 6.0 * s,
+                            layout.find_text_x + start as f32 * overlay_char_width,
+                            layout.row_text_y,
                             (end - start) as f32 * overlay_char_width,
                             overlay_line_height,
                             selection_color,
@@ -2340,73 +2445,52 @@ impl Renderer {
                         theme.selection.r,
                         theme.selection.g,
                         theme.selection.b,
-                        0.45,
-                    ];
-                    let inactive = [
-                        theme.tab_bar_bg.r,
-                        theme.tab_bar_bg.g,
-                        theme.tab_bar_bg.b,
-                        1.0,
+                        0.72,
                     ];
                     let case_color = if overlay.find.case_sensitive {
                         active
                     } else {
-                        inactive
+                        chip_border
                     };
                     let word_color = if overlay.find.whole_word {
                         active
                     } else {
-                        inactive
+                        chip_border
                     };
                     let regex_color = if overlay.find.use_regex {
                         active
                     } else {
-                        inactive
+                        chip_border
                     };
-                    overlay_rects.push(Rect::rounded(
-                        case_x,
-                        y,
-                        pill_case_w,
-                        pill_h,
-                        case_color,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        word_x,
-                        y,
-                        pill_word_w,
-                        pill_h,
-                        word_color,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        regex_x,
-                        y,
-                        pill_regex_w,
-                        pill_h,
-                        regex_color,
-                        4.0 * s,
-                    ));
+                    for toggle in layout.toggles {
+                        let color = match toggle.kind {
+                            crate::overlay::FindToggleKind::CaseSensitive => case_color,
+                            crate::overlay::FindToggleKind::WholeWord => word_color,
+                            crate::overlay::FindToggleKind::Regex => regex_color,
+                        };
+                        overlay_rects.push(Rect::rounded(
+                            toggle.rect.x,
+                            toggle.rect.y,
+                            toggle.rect.width,
+                            toggle.rect.height,
+                            color,
+                            4.0 * s,
+                        ));
+                        overlay_rects.push(Rect::rounded(
+                            toggle.rect.x + 1.0 * s,
+                            toggle.rect.y + 1.0 * s,
+                            toggle.rect.width - 2.0 * s,
+                            toggle.rect.height - 2.0 * s,
+                            if color == active { active } else { chip_fill },
+                            3.0 * s,
+                        ));
+                    }
                 }
                 crate::overlay::ActiveOverlay::FindReplace => {
-                    let pill_h = 18.0 * s;
-                    let pill_gap = 6.0 * s;
-                    let pill_regex_w = 40.0 * s;
-                    let pill_word_w = 28.0 * s;
-                    let pill_case_w = 36.0 * s;
-                    let right = overlay_left + overlay_width - 8.0 * s;
-                    let y = overlay_top_panel + 6.0 * s;
-                    let regex_x = right - pill_regex_w;
-                    let word_x = regex_x - pill_gap - pill_word_w;
-                    let case_x = word_x - pill_gap - pill_case_w;
-                    let find_field_x = overlay_left + 8.0 * s + 8.0 * overlay_char_width;
-                    let find_field_y = overlay_top_panel + 4.0 * s;
-                    let find_field_w = (case_x - 6.0 * s - find_field_x).max(80.0 * s);
-                    let replace_field_x = overlay_left + 8.0 * s + 8.0 * overlay_char_width;
-                    let replace_field_y = overlay_top_panel + 4.0 * s + overlay_line_height;
-                    let replace_field_w =
-                        (overlay_left + overlay_width - 8.0 * s - replace_field_x).max(80.0 * s);
-                    let field_h = overlay_line_height + 4.0 * s;
+                    let layout = find_layout.expect("find replace overlay layout missing");
+                    let replace_field = layout
+                        .replace_field
+                        .expect("find replace layout missing replace field");
                     let find_ring = if overlay.focus_replace {
                         input_border
                     } else {
@@ -2418,45 +2502,77 @@ impl Renderer {
                         input_border
                     };
                     overlay_rects.push(Rect::rounded(
-                        find_field_x,
-                        find_field_y,
-                        find_field_w,
-                        field_h,
+                        layout.find_field.x,
+                        layout.find_field.y,
+                        layout.find_field.width,
+                        layout.find_field.height,
                         find_ring,
                         4.0 * s,
                     ));
                     overlay_rects.push(Rect::rounded(
-                        find_field_x + 1.0 * s,
-                        find_field_y + 1.0 * s,
-                        find_field_w - 2.0 * s,
-                        field_h - 2.0 * s,
+                        layout.find_field.x + 1.0 * s,
+                        layout.find_field.y + 1.0 * s,
+                        layout.find_field.width - 2.0 * s,
+                        layout.find_field.height - 2.0 * s,
                         input_bg,
                         3.0 * s,
                     ));
                     overlay_rects.push(Rect::rounded(
-                        replace_field_x,
-                        replace_field_y,
-                        replace_field_w,
-                        field_h,
+                        replace_field.x,
+                        replace_field.y,
+                        replace_field.width,
+                        replace_field.height,
                         replace_ring,
                         4.0 * s,
                     ));
                     overlay_rects.push(Rect::rounded(
-                        replace_field_x + 1.0 * s,
-                        replace_field_y + 1.0 * s,
-                        replace_field_w - 2.0 * s,
-                        field_h - 2.0 * s,
+                        replace_field.x + 1.0 * s,
+                        replace_field.y + 1.0 * s,
+                        replace_field.width - 2.0 * s,
+                        replace_field.height - 2.0 * s,
                         input_bg,
+                        3.0 * s,
+                    ));
+                    // "All" button — chip border/fill style
+                    if let Some(btn) = layout.replace_all_btn {
+                        overlay_rects.push(Rect::rounded(
+                            btn.x,
+                            btn.y,
+                            btn.width,
+                            btn.height,
+                            chip_border,
+                            4.0 * s,
+                        ));
+                        overlay_rects.push(Rect::rounded(
+                            btn.x + 1.0 * s,
+                            btn.y + 1.0 * s,
+                            btn.width - 2.0 * s,
+                            btn.height - 2.0 * s,
+                            chip_fill,
+                            3.0 * s,
+                        ));
+                    }
+                    overlay_rects.push(Rect::rounded(
+                        layout.count_rect.x,
+                        layout.count_rect.y,
+                        layout.count_rect.width,
+                        layout.count_rect.height,
+                        chip_border,
+                        4.0 * s,
+                    ));
+                    overlay_rects.push(Rect::rounded(
+                        layout.count_rect.x + 1.0 * s,
+                        layout.count_rect.y + 1.0 * s,
+                        layout.count_rect.width - 2.0 * s,
+                        layout.count_rect.height - 2.0 * s,
+                        chip_fill,
                         3.0 * s,
                     ));
 
                     if let Some((start, end)) = overlay.find_selection_char_range() {
                         overlay_rects.push(Rect::flat(
-                            overlay_left
-                                + 8.0 * s
-                                + 9.0 * overlay_char_width
-                                + start as f32 * overlay_char_width,
-                            overlay_top_panel + 6.0 * s,
+                            layout.find_text_x + start as f32 * overlay_char_width,
+                            layout.row_text_y,
                             (end - start) as f32 * overlay_char_width,
                             overlay_line_height,
                             selection_color,
@@ -2464,12 +2580,15 @@ impl Renderer {
                     }
 
                     if let Some((start, end)) = overlay.replace_selection_char_range() {
+                        let replace_text_x = layout
+                            .replace_text_x
+                            .expect("find replace layout missing replace text x");
+                        let replace_text_y = layout
+                            .replace_text_y
+                            .expect("find replace layout missing replace text y");
                         overlay_rects.push(Rect::flat(
-                            overlay_left
-                                + 8.0 * s
-                                + 9.0 * overlay_char_width
-                                + start as f32 * overlay_char_width,
-                            overlay_top_panel + 6.0 * s + overlay_line_height,
+                            replace_text_x + start as f32 * overlay_char_width,
+                            replace_text_y,
                             (end - start) as f32 * overlay_char_width,
                             overlay_line_height,
                             selection_color,
@@ -2479,53 +2598,46 @@ impl Renderer {
                         theme.selection.r,
                         theme.selection.g,
                         theme.selection.b,
-                        0.45,
-                    ];
-                    let inactive = [
-                        theme.tab_bar_bg.r,
-                        theme.tab_bar_bg.g,
-                        theme.tab_bar_bg.b,
-                        1.0,
+                        0.72,
                     ];
                     let case_color = if overlay.find.case_sensitive {
                         active
                     } else {
-                        inactive
+                        chip_border
                     };
                     let word_color = if overlay.find.whole_word {
                         active
                     } else {
-                        inactive
+                        chip_border
                     };
                     let regex_color = if overlay.find.use_regex {
                         active
                     } else {
-                        inactive
+                        chip_border
                     };
-                    overlay_rects.push(Rect::rounded(
-                        case_x,
-                        y,
-                        pill_case_w,
-                        pill_h,
-                        case_color,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        word_x,
-                        y,
-                        pill_word_w,
-                        pill_h,
-                        word_color,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        regex_x,
-                        y,
-                        pill_regex_w,
-                        pill_h,
-                        regex_color,
-                        4.0 * s,
-                    ));
+                    for toggle in layout.toggles {
+                        let color = match toggle.kind {
+                            crate::overlay::FindToggleKind::CaseSensitive => case_color,
+                            crate::overlay::FindToggleKind::WholeWord => word_color,
+                            crate::overlay::FindToggleKind::Regex => regex_color,
+                        };
+                        overlay_rects.push(Rect::rounded(
+                            toggle.rect.x,
+                            toggle.rect.y,
+                            toggle.rect.width,
+                            toggle.rect.height,
+                            color,
+                            4.0 * s,
+                        ));
+                        overlay_rects.push(Rect::rounded(
+                            toggle.rect.x + 1.0 * s,
+                            toggle.rect.y + 1.0 * s,
+                            toggle.rect.width - 2.0 * s,
+                            toggle.rect.height - 2.0 * s,
+                            if color == active { active } else { chip_fill },
+                            3.0 * s,
+                        ));
+                    }
                 }
                 crate::overlay::ActiveOverlay::Settings => {
                     // Selected row highlight
@@ -3006,21 +3118,194 @@ impl Renderer {
                                 });
                             }
                             ModalOverlayTextPassLayer::OverlayPanel => {
-                                overlay_text_areas.push(TextArea {
-                                    buffer: &self.overlay_buffer,
-                                    left: modal_overlay.left + 8.0 * s,
-                                    top: modal_overlay.top + 6.0 * s,
-                                    scale: s,
-                                    bounds: TextBounds {
-                                        left: (modal_overlay.left + 8.0 * s) as i32,
-                                        top: (modal_overlay.top + 6.0 * s) as i32,
-                                        right: (modal_overlay.left + modal_overlay.width - 8.0 * s)
-                                            as i32,
-                                        bottom: (modal_overlay.top + modal_overlay.height) as i32,
-                                    },
-                                    default_color: theme.fg.to_glyphon(),
-                                    custom_glyphs: &[],
-                                });
+                                if let Some(layout) = crate::overlay::find_overlay_layout(
+                                    &overlay.active,
+                                    modal_overlay.left,
+                                    modal_overlay.top,
+                                    modal_overlay.width,
+                                    s,
+                                    OVERLAY_CHAR_WIDTH * s,
+                                    OVERLAY_LINE_HEIGHT * s,
+                                ) {
+                                    overlay_text_areas.push(TextArea {
+                                        buffer: &self.overlay_find_label_buffer,
+                                        left: layout.find_label_x,
+                                        top: layout.row_text_y,
+                                        scale: s,
+                                        bounds: TextBounds {
+                                            left: layout.find_label_x as i32,
+                                            top: layout.row_text_y as i32,
+                                            right: layout.find_field.x as i32,
+                                            bottom: (layout.row_text_y + OVERLAY_LINE_HEIGHT * s)
+                                                as i32,
+                                        },
+                                        default_color: theme.fg.to_glyphon(),
+                                        custom_glyphs: &[],
+                                    });
+                                    overlay_text_areas.push(TextArea {
+                                        buffer: &self.overlay_find_input_buffer,
+                                        left: layout.find_text_x,
+                                        top: layout.row_text_y,
+                                        scale: s,
+                                        bounds: TextBounds {
+                                            left: layout.find_text_x as i32,
+                                            top: layout.find_field.y as i32,
+                                            right: (layout.find_field.x + layout.find_field.width
+                                                - crate::overlay::FIND_OVERLAY_INPUT_PADDING_X * s)
+                                                as i32,
+                                            bottom: (layout.find_field.y + layout.find_field.height)
+                                                as i32,
+                                        },
+                                        default_color: theme.fg.to_glyphon(),
+                                        custom_glyphs: &[],
+                                    });
+                                    overlay_text_areas.push(TextArea {
+                                        buffer: &self.overlay_count_buffer,
+                                        left: layout.count_text_x,
+                                        top: layout.row_text_y,
+                                        scale: s,
+                                        bounds: TextBounds {
+                                            left: layout.count_rect.x as i32,
+                                            top: layout.count_rect.y as i32,
+                                            right: (layout.count_rect.x + layout.count_rect.width)
+                                                as i32,
+                                            bottom:
+                                                (layout.count_rect.y + layout.count_rect.height)
+                                                    as i32,
+                                        },
+                                        default_color: theme.fg.to_glyphon(),
+                                        custom_glyphs: &[],
+                                    });
+                                    if let (Some(replace_label_x), Some(replace_label_y)) =
+                                        (layout.replace_label_x, layout.replace_label_y)
+                                    {
+                                        overlay_text_areas.push(TextArea {
+                                            buffer: &self.overlay_replace_label_buffer,
+                                            left: replace_label_x,
+                                            top: replace_label_y,
+                                            scale: s,
+                                            bounds: TextBounds {
+                                                left: replace_label_x as i32,
+                                                top: replace_label_y as i32,
+                                                right: layout
+                                                    .replace_field
+                                                    .expect("replace field missing")
+                                                    .x as i32,
+                                                bottom: (replace_label_y + OVERLAY_LINE_HEIGHT * s)
+                                                    as i32,
+                                            },
+                                            default_color: theme.fg.to_glyphon(),
+                                            custom_glyphs: &[],
+                                        });
+                                    }
+                                    if let (Some(replace_field), Some(replace_text_x), Some(replace_text_y)) = (
+                                        layout.replace_field,
+                                        layout.replace_text_x,
+                                        layout.replace_text_y,
+                                    ) {
+                                        overlay_text_areas.push(TextArea {
+                                            buffer: &self.overlay_replace_input_buffer,
+                                            left: replace_text_x,
+                                            top: replace_text_y,
+                                            scale: s,
+                                            bounds: TextBounds {
+                                                left: replace_text_x as i32,
+                                                top: replace_field.y as i32,
+                                                right: (replace_field.x + replace_field.width
+                                                    - crate::overlay::FIND_OVERLAY_INPUT_PADDING_X
+                                                        * s) as i32,
+                                                bottom: (replace_field.y + replace_field.height)
+                                                    as i32,
+                                            },
+                                            default_color: theme.fg.to_glyphon(),
+                                            custom_glyphs: &[],
+                                        });
+                                        // "All" button label — horizontally centred in the button rect
+                                        if let Some(btn) = layout.replace_all_btn {
+                                            let btn_label_w = 3.0 * OVERLAY_CHAR_WIDTH * s; // "All" = 3 chars
+                                            let btn_text_x = btn.x + (btn.width - btn_label_w) / 2.0;
+                                            let btn_text_y = btn.y + 2.0 * s;
+                                            overlay_text_areas.push(TextArea {
+                                                buffer: &self.overlay_replace_all_btn_buffer,
+                                                left: btn_text_x,
+                                                top: btn_text_y,
+                                                scale: s,
+                                                bounds: TextBounds {
+                                                    left: btn.x as i32,
+                                                    top: btn.y as i32,
+                                                    right: (btn.x + btn.width) as i32,
+                                                    bottom: (btn.y + btn.height) as i32,
+                                                },
+                                                default_color: theme.fg.to_glyphon(),
+                                                custom_glyphs: &[],
+                                            });
+                                        }
+                                    }
+                                    for (toggle, buffer) in [
+                                        (
+                                            layout.toggle(crate::overlay::FindToggleKind::CaseSensitive),
+                                            &self.overlay_case_toggle_buffer,
+                                        ),
+                                        (
+                                            layout.toggle(crate::overlay::FindToggleKind::WholeWord),
+                                            &self.overlay_word_toggle_buffer,
+                                        ),
+                                        (
+                                            layout.toggle(crate::overlay::FindToggleKind::Regex),
+                                            &self.overlay_regex_toggle_buffer,
+                                        ),
+                                    ] {
+                                        overlay_text_areas.push(TextArea {
+                                            buffer,
+                                            left: toggle.text_x,
+                                            top: toggle.text_y,
+                                            scale: s,
+                                            bounds: TextBounds {
+                                                left: toggle.rect.x as i32,
+                                                top: toggle.rect.y as i32,
+                                                right: (toggle.rect.x + toggle.rect.width) as i32,
+                                                bottom: (toggle.rect.y + toggle.rect.height) as i32,
+                                            },
+                                            default_color: theme.fg.to_glyphon(),
+                                            custom_glyphs: &[],
+                                        });
+                                    }
+                                    if overlay.find.regex_error.is_some() {
+                                        overlay_text_areas.push(TextArea {
+                                            buffer: &self.overlay_error_buffer,
+                                            left: layout.error_text_x,
+                                            top: layout.error_text_y,
+                                            scale: s,
+                                            bounds: TextBounds {
+                                                left: layout.error_text_x as i32,
+                                                top: layout.error_text_y as i32,
+                                                right: (modal_overlay.left + modal_overlay.width
+                                                    - crate::overlay::FIND_OVERLAY_CONTENT_PADDING_X
+                                                        * s) as i32,
+                                                bottom: (layout.error_text_y + OVERLAY_LINE_HEIGHT * s)
+                                                    as i32,
+                                            },
+                                            default_color: theme.fg.to_glyphon(),
+                                            custom_glyphs: &[],
+                                        });
+                                    }
+                                } else {
+                                    overlay_text_areas.push(TextArea {
+                                        buffer: &self.overlay_buffer,
+                                        left: modal_overlay.left + 8.0 * s,
+                                        top: modal_overlay.top + 6.0 * s,
+                                        scale: s,
+                                        bounds: TextBounds {
+                                            left: (modal_overlay.left + 8.0 * s) as i32,
+                                            top: (modal_overlay.top + 6.0 * s) as i32,
+                                            right: (modal_overlay.left + modal_overlay.width - 8.0 * s)
+                                                as i32,
+                                            bottom: (modal_overlay.top + modal_overlay.height) as i32,
+                                        },
+                                        default_color: theme.fg.to_glyphon(),
+                                        custom_glyphs: &[],
+                                    });
+                                }
                             }
                         }
                     }

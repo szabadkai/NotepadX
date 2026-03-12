@@ -1060,24 +1060,30 @@ impl App {
             .as_ref()
             .map(|r| r.width as f32 / r.scale_factor.max(1.0))
             .unwrap_or(800.0);
-        let is_wide = matches!(
-            self.overlay.active,
-            ActiveOverlay::Help | ActiveOverlay::Settings
-        );
-        let overlay_width = if is_wide {
-            (win_w * 0.8).clamp(400.0, 900.0)
-        } else {
-            (win_w * 0.5).clamp(300.0, 600.0)
-        };
-        let overlay_left = (win_w - overlay_width) / 2.0;
-        let text_left = overlay_left + 8.0;
+        let overlay_width = overlay::overlay_panel_width(&self.overlay.active, win_w, 1.0);
         let char_w = renderer::OVERLAY_CHAR_WIDTH;
-        let prefix_chars = match self.overlay.active {
-            ActiveOverlay::Find => 6.0,
-            ActiveOverlay::FindReplace => 9.0,
-            _ => 0.0,
+        let overlay_left = (win_w - overlay_width) / 2.0;
+        let layout = overlay::find_overlay_layout(
+            &self.overlay.active,
+            overlay_left,
+            renderer::TAB_BAR_HEIGHT + 4.0,
+            overlay_width,
+            1.0,
+            char_w,
+            renderer::OVERLAY_LINE_HEIGHT,
+        );
+        let field = match (layout, focus_replace) {
+            (Some(layout), true) => layout.replace_field.unwrap_or(layout.find_field),
+            (Some(layout), false) => layout.find_field,
+            (None, _) => {
+                return if focus_replace {
+                    self.overlay.replace_input.len()
+                } else {
+                    self.overlay.input.len()
+                };
+            }
         };
-        let rel_x = (x - text_left - prefix_chars * char_w).max(0.0);
+        let rel_x = (x - (field.x + overlay::FIND_OVERLAY_INPUT_PADDING_X)).max(0.0);
         let char_idx = (rel_x / char_w).round() as usize;
 
         if focus_replace {
@@ -1138,19 +1144,11 @@ impl App {
             .map(|r| r.width as f32 / r.scale_factor.max(1.0))
             .unwrap_or(800.0);
 
-        let is_wide = matches!(
-            self.overlay.active,
-            ActiveOverlay::Help | ActiveOverlay::Settings
-        );
-        let overlay_width = if is_wide {
-            (win_w * 0.8).clamp(400.0, 900.0)
-        } else {
-            (win_w * 0.5).clamp(300.0, 600.0)
-        };
+        let overlay_width = overlay::overlay_panel_width(&self.overlay.active, win_w, 1.0);
         let overlay_left = (win_w - overlay_width) / 2.0;
         let overlay_top = TAB_BAR_HEIGHT + 4.0;
         let overlay_height = match &self.overlay.active {
-            ActiveOverlay::FindReplace => 60.0,
+            ActiveOverlay::FindReplace => 76.0,
             ActiveOverlay::Find => {
                 if self.overlay.find.regex_error.is_some() {
                     60.0
@@ -1187,46 +1185,75 @@ impl App {
         // Text inside the overlay starts at overlay_left + 8px horizontal, overlay_top + 6px vertical
         let text_top = overlay_top + 6.0;
         let line_height = renderer::OVERLAY_LINE_HEIGHT;
+        let layout = overlay::find_overlay_layout(
+            &self.overlay.active,
+            overlay_left,
+            overlay_top,
+            overlay_width,
+            1.0,
+            renderer::OVERLAY_CHAR_WIDTH,
+            line_height,
+        );
 
         // Toggle pills on the first row for Find / FindReplace
         if matches!(
             self.overlay.active,
             ActiveOverlay::Find | ActiveOverlay::FindReplace
         ) {
-            let pill_gap = 6.0;
-            let pill_h = 18.0;
-            let pill_regex_w = 40.0;
-            let pill_word_w = 28.0;
-            let pill_case_w = 36.0;
-            let pill_y = text_top;
-            let right = overlay_left + overlay_width - 8.0;
-
-            let regex_x = right - pill_regex_w;
-            let word_x = regex_x - pill_gap - pill_word_w;
-            let case_x = word_x - pill_gap - pill_case_w;
-
-            let in_row = y >= pill_y && y <= pill_y + pill_h;
-            if in_row {
-                if x >= case_x && x <= case_x + pill_case_w {
+            if let Some(layout) = layout {
+                if layout
+                    .toggle(overlay::FindToggleKind::CaseSensitive)
+                    .rect
+                    .contains(x, y)
+                {
                     self.overlay.find.case_sensitive = !self.overlay.find.case_sensitive;
                     self.refresh_find_results();
                     self.jump_to_current_match();
                     self.needs_redraw = true;
                     return;
                 }
-                if x >= word_x && x <= word_x + pill_word_w {
+                if layout
+                    .toggle(overlay::FindToggleKind::WholeWord)
+                    .rect
+                    .contains(x, y)
+                {
                     self.overlay.find.whole_word = !self.overlay.find.whole_word;
                     self.refresh_find_results();
                     self.jump_to_current_match();
                     self.needs_redraw = true;
                     return;
                 }
-                if x >= regex_x && x <= regex_x + pill_regex_w {
+                if layout
+                    .toggle(overlay::FindToggleKind::Regex)
+                    .rect
+                    .contains(x, y)
+                {
                     self.overlay.find.use_regex = !self.overlay.find.use_regex;
                     self.refresh_find_results();
                     self.jump_to_current_match();
                     self.needs_redraw = true;
                     return;
+                }
+                // "All" button — only present in FindReplace mode
+                if let Some(btn) = layout.replace_all_btn {
+                    if btn.contains(x, y) {
+                        let replacement = self.overlay.replace_input.clone();
+                        let mut new_rope = self.editor.active().rope.clone();
+                        let replaced = self.overlay.find.replace_all(&mut new_rope, &replacement);
+                        if !replaced.is_empty() {
+                            let new_text = new_rope.to_string();
+                            let first_byte = replaced.first().map(|(_, b)| *b);
+                            let buffer = self.editor.active_mut();
+                            buffer.replace_all_text_snapshot(&new_text);
+                            if let Some(start) = first_byte {
+                                let char_idx = buffer.rope.byte_to_char(start);
+                                buffer.set_cursor(char_idx);
+                            }
+                            self.refresh_find_results();
+                        }
+                        self.needs_redraw = true;
+                        return;
+                    }
                 }
             }
         }

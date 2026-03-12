@@ -296,6 +296,60 @@ mod cases {
         assert!(!state.focus_replace);
     }
 
+    #[test]
+    fn test_find_overlay_layout_is_static_across_text_changes() {
+        let mut short = OverlayState::new();
+        short.open(ActiveOverlay::Find);
+        short.input = "a".to_string();
+        short.find.total_matches = Some(1);
+
+        let mut long = OverlayState::new();
+        long.open(ActiveOverlay::Find);
+        long.input = "a much longer search query".to_string();
+        long.find.total_matches = Some(999);
+
+        let short_layout = find_overlay_layout(&short.active, 100.0, 36.0, 480.0, 1.0, 8.4, 20.0)
+            .expect("find layout");
+        let long_layout = find_overlay_layout(&long.active, 100.0, 36.0, 480.0, 1.0, 8.4, 20.0)
+            .expect("find layout");
+
+        assert_eq!(short_layout.find_label_x, long_layout.find_label_x);
+        assert_eq!(short_layout.find_field, long_layout.find_field);
+        assert_eq!(short_layout.count_rect, long_layout.count_rect);
+        assert_eq!(short_layout.toggles, long_layout.toggles);
+    }
+
+    #[test]
+    fn test_find_replace_layout_keeps_first_row_controls_aligned() {
+        let find_layout = find_overlay_layout(&ActiveOverlay::Find, 80.0, 36.0, 520.0, 1.0, 8.4, 20.0)
+            .expect("find layout");
+        let replace_layout =
+            find_overlay_layout(&ActiveOverlay::FindReplace, 80.0, 36.0, 520.0, 1.0, 8.4, 20.0)
+                .expect("find replace layout");
+
+        assert_eq!(find_layout.find_label_x, replace_layout.find_label_x);
+        assert_eq!(find_layout.find_field, replace_layout.find_field);
+        assert_eq!(find_layout.count_rect, replace_layout.count_rect);
+        assert_eq!(find_layout.toggles, replace_layout.toggles);
+
+        let replace_field = replace_layout.replace_field.expect("replace field");
+        assert_eq!(replace_field.x, replace_layout.find_field.x);
+        assert!(replace_field.width >= replace_layout.find_field.width);
+    }
+
+    #[test]
+    fn test_find_overlay_toggle_labels_remain_inside_toggle_bounds() {
+        let layout = find_overlay_layout(&ActiveOverlay::Find, 64.0, 36.0, 500.0, 1.0, 8.4, 20.0)
+            .expect("find layout");
+
+        for toggle in layout.toggles {
+            assert!(toggle.text_x >= toggle.rect.x);
+            assert!(toggle.text_x <= toggle.rect.x + toggle.rect.width);
+            assert!(toggle.text_y >= layout.row_text_y);
+            assert!(toggle.text_y <= toggle.rect.y + 2.0);
+        }
+    }
+
     // =========================================================================
     // ActiveOverlay Enum Tests
     // =========================================================================
