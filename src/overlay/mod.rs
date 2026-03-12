@@ -33,10 +33,7 @@ pub struct OverlayRect {
 
 impl OverlayRect {
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x
-            && x <= self.x + self.width
-            && y >= self.y
-            && y <= self.y + self.height
+        x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
     }
 }
 
@@ -228,13 +225,14 @@ pub fn find_overlay_layout(
 }
 
 pub fn overlay_panel_width(active: &ActiveOverlay, window_width: f32, scale: f32) -> f32 {
-    let (fraction, min_width, max_width) = if matches!(active, ActiveOverlay::Help | ActiveOverlay::Settings) {
-        (0.8, 400.0, 900.0)
-    } else if matches!(active, ActiveOverlay::Find | ActiveOverlay::FindReplace) {
-        (0.50, 380.0, 600.0)
-    } else {
-        (0.5, 300.0, 600.0)
-    };
+    let (fraction, min_width, max_width) =
+        if matches!(active, ActiveOverlay::Help | ActiveOverlay::Settings) {
+            (0.8, 400.0, 900.0)
+        } else if matches!(active, ActiveOverlay::Find | ActiveOverlay::FindReplace) {
+            (0.50, 380.0, 600.0)
+        } else {
+            (0.5, 300.0, 600.0)
+        };
     let preferred = (window_width * fraction)
         .max(min_width * scale)
         .min(max_width * scale);

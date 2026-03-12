@@ -729,7 +729,8 @@ impl App {
             let right_arr_x = win_w_log - renderer::ALL_TABS_BTN_WIDTH - renderer::TAB_ARROW_WIDTH;
             if tab_overflow && click_x >= right_arr_x && tab_scroll < tab_scroll_max - 0.5 {
                 if let Some(r) = &mut self.renderer {
-                    r.tab_scroll_offset = (tab_scroll + renderer::TAB_SCROLL_STEP).min(tab_scroll_max);
+                    r.tab_scroll_offset =
+                        (tab_scroll + renderer::TAB_SCROLL_STEP).min(tab_scroll_max);
                 }
                 self.needs_redraw = true;
                 return;
@@ -806,6 +807,7 @@ impl App {
                         self.snackbar_tip = None;
                         self.config.show_tips = false;
                         self.config.save();
+                        self.suppress_drag = true;
                         self.needs_redraw = true;
                         return;
                     }
@@ -815,6 +817,7 @@ impl App {
                 if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
                     if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
                         self.snackbar_tip = None;
+                        self.suppress_drag = true;
                         self.needs_redraw = true;
                         return;
                     }
@@ -827,12 +830,14 @@ impl App {
                         self.snackbar_tip = Some(TIPS[idx].to_string());
                         self.config.next_tip_index = (idx + 1) % TIPS.len();
                         self.config.save();
+                        self.suppress_drag = true;
                         self.needs_redraw = true;
                         return;
                     }
                 }
             }
-            // Click on card but not on a button — consume it
+            // Click on card but not on a button — consume it and suppress drag
+            self.suppress_drag = true;
         }
         // Status Bar
         else if y >= status_top {
@@ -1862,8 +1867,13 @@ impl App {
                     }
                 } else if self.overlay.active == ActiveOverlay::AllTabs {
                     let query = self.overlay.input.to_lowercase();
-                    let count = self.editor.buffers.iter()
-                        .filter(|b| query.is_empty() || b.display_name().to_lowercase().contains(&query))
+                    let count = self
+                        .editor
+                        .buffers
+                        .iter()
+                        .filter(|b| {
+                            query.is_empty() || b.display_name().to_lowercase().contains(&query)
+                        })
                         .count();
                     if self.overlay.picker_selected + 1 < count {
                         self.overlay.picker_selected += 1;
@@ -1876,11 +1886,8 @@ impl App {
                 {
                     self.overlay.find.prev_match();
                     self.jump_to_current_match();
-                } else if self.overlay.active == ActiveOverlay::CommandPalette
-                    && self.overlay.picker_selected > 0
-                {
-                    self.overlay.picker_selected -= 1;
-                } else if self.overlay.active == ActiveOverlay::AllTabs
+                } else if (self.overlay.active == ActiveOverlay::CommandPalette
+                    || self.overlay.active == ActiveOverlay::AllTabs)
                     && self.overlay.picker_selected > 0
                 {
                     self.overlay.picker_selected -= 1;

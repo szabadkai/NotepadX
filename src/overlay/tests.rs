@@ -321,11 +321,19 @@ mod cases {
 
     #[test]
     fn test_find_replace_layout_keeps_first_row_controls_aligned() {
-        let find_layout = find_overlay_layout(&ActiveOverlay::Find, 80.0, 36.0, 520.0, 1.0, 8.4, 20.0)
-            .expect("find layout");
-        let replace_layout =
-            find_overlay_layout(&ActiveOverlay::FindReplace, 80.0, 36.0, 520.0, 1.0, 8.4, 20.0)
-                .expect("find replace layout");
+        let find_layout =
+            find_overlay_layout(&ActiveOverlay::Find, 80.0, 36.0, 520.0, 1.0, 8.4, 20.0)
+                .expect("find layout");
+        let replace_layout = find_overlay_layout(
+            &ActiveOverlay::FindReplace,
+            80.0,
+            36.0,
+            520.0,
+            1.0,
+            8.4,
+            20.0,
+        )
+        .expect("find replace layout");
 
         assert_eq!(find_layout.find_label_x, replace_layout.find_label_x);
         assert_eq!(find_layout.find_field, replace_layout.find_field);

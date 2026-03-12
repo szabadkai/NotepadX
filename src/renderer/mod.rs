@@ -28,8 +28,8 @@ pub const TAB_PADDING_H: f32 = 16.0; // horizontal padding per side inside each 
 pub const TAB_MAX_LABEL_CHARS: usize = 30; // max visible characters before ellipsis
 pub const TAB_MIN_LABEL_CHARS: usize = 10; // floor so tabs stay legible even when crowded
 pub const ALL_TABS_BTN_WIDTH: f32 = 32.0; // ⌄ all-tabs button at right edge of tab bar
-pub const TAB_ARROW_WIDTH: f32 = 24.0;    // width of ‹/› scroll arrow buttons
-pub const TAB_SCROLL_STEP: f32 = 150.0;   // pixels scrolled per arrow click or wheel line
+pub const TAB_ARROW_WIDTH: f32 = 24.0; // width of ‹/› scroll arrow buttons
+pub const TAB_SCROLL_STEP: f32 = 150.0; // pixels scrolled per arrow click or wheel line
 pub const STATUS_BAR_HEIGHT: f32 = 28.0;
 pub const SCROLLBAR_WIDTH: f32 = 10.0;
 pub const RESULTS_PANEL_ROW_HEIGHT: f32 = 20.0;
@@ -511,9 +511,9 @@ pub struct Renderer {
     // Persistent glyphon buffers
     pub tab_bar_buffer: GlyphonBuffer,
     pub tab_positions: Vec<(f32, f32)>, // (x, width) for each tab in scaled pixels
-    pub tab_scroll_offset: f32,          // current horizontal scroll of the tab strip (logical px)
-    pub tab_scroll_max: f32,             // maximum scroll value (0 when no overflow)
-    pub tab_overflow: bool,              // true when tabs don't fit and scrolling is active
+    pub tab_scroll_offset: f32,         // current horizontal scroll of the tab strip (logical px)
+    pub tab_scroll_max: f32,            // maximum scroll value (0 when no overflow)
+    pub tab_overflow: bool,             // true when tabs don't fit and scrolling is active
     pub tab_arrow_left_buffer: GlyphonBuffer,
     pub tab_arrow_right_buffer: GlyphonBuffer,
     pub tab_all_btn_buffer: GlyphonBuffer,
@@ -901,11 +901,11 @@ impl Renderer {
         let tab_count = editor.buffers.len();
 
         let tab_area_width = width - ALL_TABS_BTN_WIDTH;
-        let total_gap_px  = tab_gap * tab_count.saturating_sub(1) as f32;
+        let total_gap_px = tab_gap * tab_count.saturating_sub(1) as f32;
         let per_tab_budget = (tab_area_width - total_gap_px) / tab_count.max(1) as f32;
-        let dyn_max_label_chars = (((per_tab_budget - tab_pad * 2.0) / tab_char_w).floor() as usize)
-            .max(TAB_MIN_LABEL_CHARS)
-            .min(TAB_MAX_LABEL_CHARS);
+        let dyn_max_label_chars = (((per_tab_budget - tab_pad * 2.0) / tab_char_w).floor()
+            as usize)
+            .clamp(TAB_MIN_LABEL_CHARS, TAB_MAX_LABEL_CHARS);
 
         for (i, buf) in editor.buffers.iter().enumerate() {
             let name = buf.display_name();
@@ -932,8 +932,8 @@ impl Renderer {
             // stays flush against the tab's right edge (matching the click target).
             let pad_chars = (tab_pad / tab_char_w).round() as usize;
             let right_pad_chars = if show_close { 1 } else { pad_chars };
-            let tw = label_chars as f32 * tab_char_w
-                + (pad_chars + right_pad_chars) as f32 * tab_char_w;
+            let tw =
+                label_chars as f32 * tab_char_w + (pad_chars + right_pad_chars) as f32 * tab_char_w;
 
             let is_active = i == editor.active_buffer;
             let tab_fg = if is_active {
@@ -974,7 +974,7 @@ impl Renderer {
 
         // Compute tab bar overflow / scroll state
         let tab_content_width = tab_x; // total width of all tab text (logical px)
-        // tab_area_width already computed above before the loop
+                                       // tab_area_width already computed above before the loop
         self.tab_overflow = tab_content_width > tab_area_width;
         self.tab_scroll_max = if self.tab_overflow {
             (tab_content_width - tab_area_width).max(0.0)
@@ -987,15 +987,34 @@ impl Renderer {
         // Update control button text buffers
         let active_col = theme.tab_active_fg.to_glyphon();
         let inactive_col = theme.tab_inactive_fg.to_glyphon();
-        let left_col = if self.tab_scroll_offset > 0.5 { active_col } else { inactive_col };
+        let left_col = if self.tab_scroll_offset > 0.5 {
+            active_col
+        } else {
+            inactive_col
+        };
         let right_col = if self.tab_overflow && self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
             active_col
         } else {
             inactive_col
         };
-        set_tab_control_buffer(&mut self.font_system, &mut self.tab_arrow_left_buffer, "\u{2039}", left_col);
-        set_tab_control_buffer(&mut self.font_system, &mut self.tab_arrow_right_buffer, "\u{203a}", right_col);
-        set_tab_control_buffer(&mut self.font_system, &mut self.tab_all_btn_buffer, "\u{2304}", active_col);
+        set_tab_control_buffer(
+            &mut self.font_system,
+            &mut self.tab_arrow_left_buffer,
+            "\u{2039}",
+            left_col,
+        );
+        set_tab_control_buffer(
+            &mut self.font_system,
+            &mut self.tab_arrow_right_buffer,
+            "\u{203a}",
+            right_col,
+        );
+        set_tab_control_buffer(
+            &mut self.font_system,
+            &mut self.tab_all_btn_buffer,
+            "\u{2304}",
+            active_col,
+        );
 
         // --- Gutter (line numbers) ---
         let gutter_w = self.effective_gutter_width;
@@ -1852,16 +1871,22 @@ impl Renderer {
                         let idx = scroll_offset + row_idx;
                         let is_active = *buf_idx == editor.active_buffer;
                         // ● marks the active tab; ○ marks dirty but inactive
-                        let status = if is_active { "● " } else if *dirty { "○ " } else { "  " };
+                        let status = if is_active {
+                            "● "
+                        } else if *dirty {
+                            "○ "
+                        } else {
+                            "  "
+                        };
                         let sel = if idx == selected { "▸ " } else { "  " };
-                        let display_name: std::borrow::Cow<str> =
-                            if name.chars().count() > MAX_NAME_CHARS {
-                                let truncated: String =
-                                    name.chars().take(MAX_NAME_CHARS - 1).collect();
-                                format!("{}…", truncated).into()
-                            } else {
-                                name.as_str().into()
-                            };
+                        let display_name: std::borrow::Cow<str> = if name.chars().count()
+                            > MAX_NAME_CHARS
+                        {
+                            let truncated: String = name.chars().take(MAX_NAME_CHARS - 1).collect();
+                            format!("{}…", truncated).into()
+                        } else {
+                            name.as_str().into()
+                        };
                         text.push_str(&format!("{}{}{}\n", sel, status, display_name));
                     }
                     text
@@ -1869,7 +1894,11 @@ impl Renderer {
                 crate::overlay::ActiveOverlay::None => String::new(),
             };
 
-            set_overlay_text_buffer(&mut self.font_system, &mut self.overlay_buffer, &overlay_text);
+            set_overlay_text_buffer(
+                &mut self.font_system,
+                &mut self.overlay_buffer,
+                &overlay_text,
+            );
         }
 
         // --- Results Panel ---
@@ -1939,6 +1968,7 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_layer<'a>(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -2150,8 +2180,18 @@ impl Renderer {
 
         // 2b. Tab bar control buttons (arrows + ⌄ all-tabs) — drawn on top of tab backgrounds
         if self.tab_overflow {
-            let btn_bg = [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, theme.tab_bar_bg.a];
-            let sep_col = [theme.tab_inactive_fg.r, theme.tab_inactive_fg.g, theme.tab_inactive_fg.b, 0.35];
+            let btn_bg = [
+                theme.tab_bar_bg.r,
+                theme.tab_bar_bg.g,
+                theme.tab_bar_bg.b,
+                theme.tab_bar_bg.a,
+            ];
+            let sep_col = [
+                theme.tab_inactive_fg.r,
+                theme.tab_inactive_fg.g,
+                theme.tab_inactive_fg.b,
+                0.35,
+            ];
             // ⌄ All-tabs button background
             base_rects.push(Rect::flat(
                 width - ALL_TABS_BTN_WIDTH * s,
@@ -2170,7 +2210,13 @@ impl Renderer {
             ));
             // ‹ left arrow (shown when scrolled right)
             if self.tab_scroll_offset > 0.5 {
-                base_rects.push(Rect::flat(0.0, 0.0, TAB_ARROW_WIDTH * s, tab_bar_height, btn_bg));
+                base_rects.push(Rect::flat(
+                    0.0,
+                    0.0,
+                    TAB_ARROW_WIDTH * s,
+                    tab_bar_height,
+                    btn_bg,
+                ));
             }
             // › right arrow (shown when more tabs are off-screen to the right)
             if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
@@ -2610,7 +2656,12 @@ impl Renderer {
                 theme.gutter_fg.b,
                 0.42,
             ];
-            let chip_fill = [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, 0.95];
+            let chip_fill = [
+                theme.tab_bar_bg.r,
+                theme.tab_bar_bg.g,
+                theme.tab_bar_bg.b,
+                0.95,
+            ];
             let find_layout = crate::overlay::find_overlay_layout(
                 &overlay.active,
                 overlay_left,
@@ -3012,8 +3063,8 @@ impl Renderer {
 
         // Tab bar text - single buffer with padding-based alignment
         let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0; // vertically center (line_height 16)
-        // Tab text is clipped to the strip between any visible arrow buttons,
-        // so labels never bleed into the ‹ / › / ⌄ zones.
+                                                              // Tab text is clipped to the strip between any visible arrow buttons,
+                                                              // so labels never bleed into the ‹ / › / ⌄ zones.
         let tab_text_clip_left = if self.tab_overflow && self.tab_scroll_offset > 0.5 {
             (TAB_ARROW_WIDTH * s) as i32
         } else {
@@ -3465,9 +3516,8 @@ impl Renderer {
                                             top: layout.count_rect.y as i32,
                                             right: (layout.count_rect.x + layout.count_rect.width)
                                                 as i32,
-                                            bottom:
-                                                (layout.count_rect.y + layout.count_rect.height)
-                                                    as i32,
+                                            bottom: (layout.count_rect.y + layout.count_rect.height)
+                                                as i32,
                                         },
                                         default_color: theme.fg.to_glyphon(),
                                         custom_glyphs: &[],
@@ -3486,7 +3536,8 @@ impl Renderer {
                                                 right: layout
                                                     .replace_field
                                                     .expect("replace field missing")
-                                                    .x as i32,
+                                                    .x
+                                                    as i32,
                                                 bottom: (replace_label_y + OVERLAY_LINE_HEIGHT * s)
                                                     as i32,
                                             },
@@ -3494,7 +3545,11 @@ impl Renderer {
                                             custom_glyphs: &[],
                                         });
                                     }
-                                    if let (Some(replace_field), Some(replace_text_x), Some(replace_text_y)) = (
+                                    if let (
+                                        Some(replace_field),
+                                        Some(replace_text_x),
+                                        Some(replace_text_y),
+                                    ) = (
                                         layout.replace_field,
                                         layout.replace_text_x,
                                         layout.replace_text_y,
@@ -3509,7 +3564,8 @@ impl Renderer {
                                                 top: replace_field.y as i32,
                                                 right: (replace_field.x + replace_field.width
                                                     - crate::overlay::FIND_OVERLAY_INPUT_PADDING_X
-                                                        * s) as i32,
+                                                        * s)
+                                                    as i32,
                                                 bottom: (replace_field.y + replace_field.height)
                                                     as i32,
                                             },
@@ -3519,7 +3575,8 @@ impl Renderer {
                                         // "All" button label — horizontally centred in the button rect
                                         if let Some(btn) = layout.replace_all_btn {
                                             let btn_label_w = 3.0 * OVERLAY_CHAR_WIDTH * s; // "All" = 3 chars
-                                            let btn_text_x = btn.x + (btn.width - btn_label_w) / 2.0;
+                                            let btn_text_x =
+                                                btn.x + (btn.width - btn_label_w) / 2.0;
                                             let btn_text_y = btn.y + 2.0 * s;
                                             overlay_text_areas.push(TextArea {
                                                 buffer: &self.overlay_replace_all_btn_buffer,
@@ -3539,11 +3596,14 @@ impl Renderer {
                                     }
                                     for (toggle, buffer) in [
                                         (
-                                            layout.toggle(crate::overlay::FindToggleKind::CaseSensitive),
+                                            layout.toggle(
+                                                crate::overlay::FindToggleKind::CaseSensitive,
+                                            ),
                                             &self.overlay_case_toggle_buffer,
                                         ),
                                         (
-                                            layout.toggle(crate::overlay::FindToggleKind::WholeWord),
+                                            layout
+                                                .toggle(crate::overlay::FindToggleKind::WholeWord),
                                             &self.overlay_word_toggle_buffer,
                                         ),
                                         (
@@ -3577,8 +3637,10 @@ impl Renderer {
                                                 top: layout.error_text_y as i32,
                                                 right: (modal_overlay.left + modal_overlay.width
                                                     - crate::overlay::FIND_OVERLAY_CONTENT_PADDING_X
-                                                        * s) as i32,
-                                                bottom: (layout.error_text_y + OVERLAY_LINE_HEIGHT * s)
+                                                        * s)
+                                                    as i32,
+                                                bottom: (layout.error_text_y
+                                                    + OVERLAY_LINE_HEIGHT * s)
                                                     as i32,
                                             },
                                             default_color: theme.fg.to_glyphon(),
@@ -3594,9 +3656,11 @@ impl Renderer {
                                         bounds: TextBounds {
                                             left: (modal_overlay.left + 8.0 * s) as i32,
                                             top: (modal_overlay.top + 6.0 * s) as i32,
-                                            right: (modal_overlay.left + modal_overlay.width - 8.0 * s)
+                                            right: (modal_overlay.left + modal_overlay.width
+                                                - 8.0 * s)
                                                 as i32,
-                                            bottom: (modal_overlay.top + modal_overlay.height) as i32,
+                                            bottom: (modal_overlay.top + modal_overlay.height)
+                                                as i32,
                                         },
                                         default_color: theme.fg.to_glyphon(),
                                         custom_glyphs: &[],
