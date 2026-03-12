@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.3.0). Must already exist.'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -66,11 +72,21 @@ jobs:
         with:
           key: ${{ matrix.suffix }}
 
-      - name: Set version from tag
+      - name: Checkout tag
+        if: github.event_name == 'workflow_dispatch'
+        run: git checkout "${{ inputs.tag }}"
+
+      - name: Resolve tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
           sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
           rm -f Cargo.toml.bak
 
@@ -150,6 +166,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -196,4 +221,5 @@ jobs:
           files: release-assets/*
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+          tag_name: ${{ env.TAG }}
+          prerelease: ${{ contains(env.TAG, '-alpha') || contains(env.TAG, '-beta') || contains(env.TAG, '-rc') }}
