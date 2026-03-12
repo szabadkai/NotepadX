@@ -739,8 +739,19 @@ impl App {
                 }
             }
         }
-        // Snackbar (tip-of-the-day)
-        else if self.snackbar_tip.is_some() && !self.overlay.is_active() {
+        // Snackbar (tip-of-the-day) — intercept clicks on the floating card so
+        // they never reach the editor or status bar underneath.
+        else if self.snackbar_tip.is_some()
+            && !self.overlay.is_active()
+            && self.renderer.as_ref().is_some_and(|r| {
+                let s = r.scale_factor;
+                let px = x as f32 * s;
+                let py = y as f32 * s;
+                r.snackbar_bounds.is_some_and(|(sx, sy, sw, sh)| {
+                    px >= sx && px <= sx + sw && py >= sy && py <= sy + sh
+                })
+            })
+        {
             if let Some(renderer) = &self.renderer {
                 let s = renderer.scale_factor;
                 let px = x as f32 * s;
@@ -765,12 +776,20 @@ impl App {
                         return;
                     }
                 }
+
+                // Check [>] Next tip button
+                if let Some((nx, ny, nw, nh)) = renderer.snackbar_next_tip_bounds {
+                    if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
+                        let idx = self.config.next_tip_index % TIPS.len();
+                        self.snackbar_tip = Some(TIPS[idx].to_string());
+                        self.config.next_tip_index = (idx + 1) % TIPS.len();
+                        self.config.save();
+                        self.needs_redraw = true;
+                        return;
+                    }
+                }
             }
-            // Fall through to status bar / editor area handling below
-            if y >= status_top {
-                self.suppress_drag = true;
-                self.handle_status_bar_click(x as f32);
-            }
+            // Click on card but not on a button — consume it
         }
         // Status Bar
         else if y >= status_top {
@@ -2930,6 +2949,14 @@ impl ApplicationHandler for App {
                                 {
                                     if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
                                         Some(renderer::SnackbarButton::DontShowAgain)
+                                    } else if let Some((nx, ny, nw, nh)) =
+                                        renderer.snackbar_next_tip_bounds
+                                    {
+                                        if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
+                                            Some(renderer::SnackbarButton::NextTip)
+                                        } else {
+                                            None
+                                        }
                                     } else {
                                         None
                                     }

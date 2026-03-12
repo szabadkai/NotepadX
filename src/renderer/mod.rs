@@ -64,6 +64,7 @@ pub const STATUS_CHAR_WIDTH: f32 = 12.0 * 0.6;
 pub enum SnackbarButton {
     Dismiss,
     DontShowAgain,
+    NextTip,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,6 +285,8 @@ pub struct Renderer {
     pub snackbar_dismiss_bounds: Option<(f32, f32, f32, f32)>,
     /// Snackbar "Don't show again" link bounds in physical pixels
     pub snackbar_dismiss_forever_bounds: Option<(f32, f32, f32, f32)>,
+    /// Snackbar ">" next-tip button bounds in physical pixels
+    pub snackbar_next_tip_bounds: Option<(f32, f32, f32, f32)>,
     /// Currently hovered snackbar button (set from main.rs)
     pub hovered_snackbar_button: Option<SnackbarButton>,
 }
@@ -388,6 +391,7 @@ impl Renderer {
             snackbar_bounds: None,
             snackbar_dismiss_bounds: None,
             snackbar_dismiss_forever_bounds: None,
+            snackbar_next_tip_bounds: None,
             hovered_snackbar_button: None,
         }
     }
@@ -1448,11 +1452,11 @@ impl Renderer {
         // --- Snackbar (tip-of-the-day) ---
         if let Some(tip) = snackbar_tip {
             let snackbar_text = format!(
-                "\u{1f4a1} {}\n\n  [\u{00d7}] Dismiss    Don't show again",
+                "\u{1f4a1} {}\n\n  [\u{00d7}] Dismiss    Don't show again    [>]",
                 tip
             );
             self.snackbar_buffer
-                .set_size(&mut self.font_system, Some(330.0), Some(120.0));
+                .set_size(&mut self.font_system, Some(400.0), Some(120.0));
             self.snackbar_buffer.set_text(
                 &mut self.font_system,
                 &snackbar_text,
@@ -2566,7 +2570,7 @@ impl Renderer {
 
         // Snackbar (tip-of-the-day)
         if snackbar_tip.is_some() && !overlay.is_active() {
-            let snack_w = 360.0 * s;
+            let snack_w = 420.0 * s;
             let snack_h = 90.0 * s;
             let snack_margin = 12.0 * s;
             let snack_x = width - snack_w - snack_margin;
@@ -2584,9 +2588,16 @@ impl Renderer {
             // "Don't show again" link bounds — anchored to bottom of card
             let link_x = snack_x + 8.0 * s + 17.0 * OVERLAY_CHAR_WIDTH * s;
             let link_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 6.0 * s;
-            let link_w = 15.0 * OVERLAY_CHAR_WIDTH * s;
+            let link_w = 16.0 * OVERLAY_CHAR_WIDTH * s;
             let link_h = OVERLAY_LINE_HEIGHT * s;
             self.snackbar_dismiss_forever_bounds = Some((link_x, link_y, link_w, link_h));
+
+            // "[>]" next-tip button bounds — anchored to bottom-right of card
+            let next_x = link_x + link_w + 4.0 * OVERLAY_CHAR_WIDTH * s;
+            let next_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 6.0 * s;
+            let next_w = 3.0 * OVERLAY_CHAR_WIDTH * s;
+            let next_h = OVERLAY_LINE_HEIGHT * s;
+            self.snackbar_next_tip_bounds = Some((next_x, next_y, next_w, next_h));
 
             // Background with shadow
             base_rects.push(Rect::rounded_shadow(
@@ -2622,6 +2633,7 @@ impl Renderer {
                     SnackbarButton::DontShowAgain => {
                         self.snackbar_dismiss_forever_bounds.unwrap_or_default()
                     }
+                    SnackbarButton::NextTip => self.snackbar_next_tip_bounds.unwrap_or_default(),
                 };
                 base_rects.push(Rect::rounded(
                     hx - 4.0 * s,
@@ -2671,6 +2683,7 @@ impl Renderer {
             self.snackbar_bounds = None;
             self.snackbar_dismiss_bounds = None;
             self.snackbar_dismiss_forever_bounds = None;
+            self.snackbar_next_tip_bounds = None;
         }
 
         // Prepare base text areas
