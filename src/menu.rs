@@ -211,7 +211,10 @@ impl AppMenu {
             MenuId::new("find_replace"),
             "Find and Replace...",
             true,
-            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyH)),
+            Some(Accelerator::new(
+                Some(Modifiers::SUPER | Modifiers::ALT),
+                Code::KeyF,
+            )),
         );
 
         let _ = edit_menu.append(&undo_item);

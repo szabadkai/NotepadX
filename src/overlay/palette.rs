@@ -112,7 +112,7 @@ pub fn all_commands() -> Vec<Command> {
         },
         Command {
             name: "Find and Replace",
-            shortcut: "Cmd+H",
+            shortcut: "Cmd+Opt+F",
             id: CommandId::FindReplace,
         },
         Command {

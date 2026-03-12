@@ -120,7 +120,7 @@ On macOS use Cmd, on Linux/Windows use Ctrl for equivalent shortcuts.
 | Cmd+Shift+D | Duplicate line |
 | Cmd+/ | Toggle comment |
 | Cmd+F | Find |
-| Cmd+H | Find & Replace |
+| Cmd+Opt+F | Find & Replace |
 | Cmd+G | Go to line |
 | Cmd+Shift+E | Enable large-file edit mode |
 | Cmd+Shift+P | Command palette |

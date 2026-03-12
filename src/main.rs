@@ -131,7 +131,7 @@ struct ScrollbarDrag {
 /// Tips shown in the startup snackbar, one per launch.
 const TIPS: &[&str] = &[
     "Cmd+Shift+P opens the Command Palette \u{2014} search any action.",
-    "Cmd+F to find, Cmd+H to find & replace.",
+    "Cmd+F to find, Cmd+Opt+F to find & replace.",
     "Cmd+G jumps to a specific line number.",
     "Cmd+D selects the next occurrence of the current word.",
     "Alt+Up/Down moves the current line up or down.",
@@ -1287,7 +1287,7 @@ impl App {
                 self.needs_redraw = true;
                 return;
             }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "h" => {
+            Key::Character(c) if cmd_or_ctrl && self.modifiers.alt_key() && c.as_str() == "f" => {
                 self.overlay.open(ActiveOverlay::FindReplace);
                 self.needs_redraw = true;
                 return;

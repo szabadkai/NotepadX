@@ -1193,7 +1193,7 @@ impl Renderer {
                         "           Tab/Shift+Tab: Indent (sel)",
                     ];
                     let right_col: &[&str] = &[
-                        "Search:    Cmd+F: Find   | Cmd+H: Replace",
+                        "Search:    Cmd+F: Find   | Cmd+Opt+F: Replace",
                         "           Cmd+G: Goto   | Cmd+Shift+P: Palette",
                         "",
                         "Tabs:      Drag to reorder tabs.",
