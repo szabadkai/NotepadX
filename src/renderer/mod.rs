@@ -39,6 +39,8 @@ pub const OVERLAY_LINE_HEIGHT: f32 = 20.0;
 pub const OVERLAY_CHAR_WIDTH: f32 = OVERLAY_FONT_SIZE * 0.6;
 pub const COMMAND_PALETTE_MAX_VISIBLE_ITEMS: usize = 16;
 pub const PICKER_MAX_VISIBLE_ITEMS: usize = 12;
+pub const SNACKBAR_TIP_WIDTH: usize = 44;
+pub const SNACKBAR_TIP_LINES: usize = 2;
 
 pub fn command_palette_visible_items(item_count: usize) -> usize {
     item_count.min(COMMAND_PALETTE_MAX_VISIBLE_ITEMS)
@@ -159,16 +161,238 @@ fn try_push_status_entry(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OverlayTextPassLayer {
+enum ModalOverlayTextPassLayer {
     TabBar,
     OverlayPanel,
 }
 
-fn overlay_text_pass_layers() -> [OverlayTextPassLayer; 2] {
+fn modal_overlay_text_pass_layers() -> [ModalOverlayTextPassLayer; 2] {
     [
-        OverlayTextPassLayer::TabBar,
-        OverlayTextPassLayer::OverlayPanel,
+        ModalOverlayTextPassLayer::TabBar,
+        ModalOverlayTextPassLayer::OverlayPanel,
     ]
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompositedLayer {
+    ResultsPanel,
+    Snackbar,
+    ModalOverlay,
+}
+
+fn composited_layers(
+    results_panel_visible: bool,
+    snackbar_visible: bool,
+    modal_overlay_active: bool,
+) -> Vec<CompositedLayer> {
+    let mut layers = Vec::with_capacity(3);
+    if results_panel_visible {
+        layers.push(CompositedLayer::ResultsPanel);
+    }
+    if snackbar_visible {
+        layers.push(CompositedLayer::Snackbar);
+    }
+    if modal_overlay_active {
+        layers.push(CompositedLayer::ModalOverlay);
+    }
+    layers
+}
+
+fn snackbar_visible(snackbar_tip: Option<&str>, modal_overlay_active: bool) -> bool {
+    snackbar_tip.is_some() && !modal_overlay_active
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ModalOverlayGeometry {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+fn modal_overlay_geometry(
+    width: f32,
+    editor_top: f32,
+    scale_factor: f32,
+    overlay: &crate::overlay::OverlayState,
+) -> Option<ModalOverlayGeometry> {
+    if !overlay.is_active() {
+        return None;
+    }
+
+    let is_wide = matches!(
+        overlay.active,
+        crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
+    );
+    let overlay_width = if is_wide {
+        (width * 0.8)
+            .max(400.0 * scale_factor)
+            .min(900.0 * scale_factor)
+    } else {
+        (width * 0.5)
+            .max(300.0 * scale_factor)
+            .min(600.0 * scale_factor)
+    };
+    let overlay_left = (width - overlay_width) / 2.0;
+    let overlay_top = editor_top + 4.0 * scale_factor;
+    let overlay_height = match &overlay.active {
+        crate::overlay::ActiveOverlay::CommandPalette => {
+            let item_count =
+                crate::overlay::palette::filter_commands(&overlay.input, &overlay.recent_commands)
+                    .len();
+            command_palette_panel_height(item_count) * scale_factor
+        }
+        crate::overlay::ActiveOverlay::FindReplace => 60.0 * scale_factor,
+        crate::overlay::ActiveOverlay::Find => {
+            if overlay.find.regex_error.is_some() {
+                60.0 * scale_factor
+            } else {
+                40.0 * scale_factor
+            }
+        }
+        crate::overlay::ActiveOverlay::Help => 400.0 * scale_factor,
+        crate::overlay::ActiveOverlay::Settings => 360.0 * scale_factor,
+        crate::overlay::ActiveOverlay::LanguagePicker => {
+            picker_panel_height(PICKER_MAX_VISIBLE_ITEMS) * scale_factor
+        }
+        crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * scale_factor,
+        crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * scale_factor,
+        _ => 40.0 * scale_factor,
+    };
+
+    Some(ModalOverlayGeometry {
+        left: overlay_left,
+        top: overlay_top,
+        width: overlay_width,
+        height: overlay_height,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SnackbarGeometry {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    dismiss_bounds: (f32, f32, f32, f32),
+    dismiss_forever_bounds: (f32, f32, f32, f32),
+    next_tip_bounds: (f32, f32, f32, f32),
+    separator_y: f32,
+}
+
+fn snackbar_geometry(width: f32, status_top: f32, scale_factor: f32) -> SnackbarGeometry {
+    let snackbar_width = 420.0 * scale_factor;
+    let snackbar_height = 90.0 * scale_factor;
+    let snackbar_margin = 12.0 * scale_factor;
+    let x = width - snackbar_width - snackbar_margin;
+    let y = status_top - snackbar_height - snackbar_margin;
+
+    let dismiss_x = x + 8.0 * scale_factor + 2.0 * OVERLAY_CHAR_WIDTH * scale_factor;
+    let dismiss_y = y + snackbar_height - OVERLAY_LINE_HEIGHT * scale_factor - 6.0 * scale_factor;
+    let dismiss_w = 11.0 * OVERLAY_CHAR_WIDTH * scale_factor;
+    let dismiss_h = OVERLAY_LINE_HEIGHT * scale_factor;
+
+    let dismiss_forever_x = x + 8.0 * scale_factor + 17.0 * OVERLAY_CHAR_WIDTH * scale_factor;
+    let dismiss_forever_y = dismiss_y;
+    let dismiss_forever_w = 16.0 * OVERLAY_CHAR_WIDTH * scale_factor;
+    let dismiss_forever_h = OVERLAY_LINE_HEIGHT * scale_factor;
+
+    let next_x = dismiss_forever_x + dismiss_forever_w + 4.0 * OVERLAY_CHAR_WIDTH * scale_factor;
+    let next_y = dismiss_y;
+    let next_w = 3.0 * OVERLAY_CHAR_WIDTH * scale_factor;
+    let next_h = OVERLAY_LINE_HEIGHT * scale_factor;
+
+    let separator_y =
+        y + snackbar_height - OVERLAY_LINE_HEIGHT * scale_factor - 18.0 * scale_factor;
+
+    SnackbarGeometry {
+        x,
+        y,
+        width: snackbar_width,
+        height: snackbar_height,
+        dismiss_bounds: (dismiss_x, dismiss_y, dismiss_w, dismiss_h),
+        dismiss_forever_bounds: (
+            dismiss_forever_x,
+            dismiss_forever_y,
+            dismiss_forever_w,
+            dismiss_forever_h,
+        ),
+        next_tip_bounds: (next_x, next_y, next_w, next_h),
+        separator_y,
+    }
+}
+
+fn pad_right(text: &str, width: usize) -> String {
+    let char_len = text.chars().count();
+    let mut padded = String::from(text);
+    padded.push_str(&" ".repeat(width.saturating_sub(char_len)));
+    padded
+}
+
+fn truncate_with_ellipsis(text: &str, width: usize) -> String {
+    match width {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let truncated: String = text.chars().take(width - 1).collect();
+            let prefix = pad_right(&truncated, width - 1);
+            format!("{}…", prefix)
+        }
+    }
+}
+
+fn fixed_tip_lines(tip: &str, width: usize, line_count: usize) -> Vec<String> {
+    let mut words = tip.split_whitespace().peekable();
+    let mut lines = Vec::with_capacity(line_count);
+
+    for line_idx in 0..line_count {
+        if words.peek().is_none() {
+            lines.push(" ".repeat(width));
+            continue;
+        }
+
+        let mut line = String::new();
+        while let Some(word) = words.peek().copied() {
+            let word_len = word.chars().count();
+            let candidate_len = if line.is_empty() {
+                word_len
+            } else {
+                line.chars().count() + 1 + word_len
+            };
+
+            if candidate_len <= width {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                words.next();
+                continue;
+            }
+
+            if line.is_empty() {
+                line = truncate_with_ellipsis(word, width);
+                words.next();
+            }
+            break;
+        }
+
+        let is_last_line = line_idx + 1 == line_count;
+        if is_last_line && words.peek().is_some() {
+            lines.push(truncate_with_ellipsis(line.trim_end(), width));
+        } else {
+            lines.push(pad_right(line.trim_end(), width));
+        }
+    }
+
+    lines
+}
+
+fn format_snackbar_tip(tip: &str) -> String {
+    let lines = fixed_tip_lines(tip, SNACKBAR_TIP_WIDTH, SNACKBAR_TIP_LINES);
+    format!(
+        "\u{1f4a1} {}\n{}\n\n  [\u{00d7}] Dismiss    Don't show again    [>]",
+        lines[0], lines[1]
+    )
 }
 
 fn render_visible_whitespace(text: &str) -> String {
@@ -1451,10 +1675,7 @@ impl Renderer {
 
         // --- Snackbar (tip-of-the-day) ---
         if let Some(tip) = snackbar_tip {
-            let snackbar_text = format!(
-                "\u{1f4a1} {}\n\n  [\u{00d7}] Dismiss    Don't show again    [>]",
-                tip
-            );
+            let snackbar_text = format_snackbar_tip(tip);
             self.snackbar_buffer
                 .set_size(&mut self.font_system, Some(400.0), Some(120.0));
             self.snackbar_buffer.set_text(
@@ -1468,6 +1689,72 @@ impl Renderer {
             self.snackbar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         }
+    }
+
+    fn render_layer<'a>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        text_renderer: &mut TextRenderer,
+        font_system: &mut FontSystem,
+        atlas: &mut TextAtlas,
+        viewport: &Viewport,
+        swash_cache: &mut SwashCache,
+        shape_renderer: &ShapeRenderer,
+        target_width: u32,
+        target_height: u32,
+        rects: &[Rect],
+        text_areas: Vec<TextArea<'a>>,
+        load_op: wgpu::LoadOp<wgpu::Color>,
+        encoder_label: &'static str,
+        pass_label: &'static str,
+        prepare_error_label: &'static str,
+        render_error_label: &'static str,
+    ) {
+        let has_text = !text_areas.is_empty();
+        if has_text {
+            text_renderer
+                .prepare(
+                    device,
+                    queue,
+                    font_system,
+                    atlas,
+                    viewport,
+                    text_areas,
+                    swash_cache,
+                )
+                .unwrap_or_else(|e| log::error!("{}: {e}", prepare_error_label));
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some(encoder_label),
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(pass_label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: load_op,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        if !rects.is_empty() {
+            shape_renderer.render(device, queue, &mut pass, rects, target_width, target_height);
+        }
+        if has_text {
+            text_renderer
+                .render(atlas, viewport, &mut pass)
+                .unwrap_or_else(|e| log::error!("{}: {e}", render_error_label));
+        }
+
+        drop(pass);
+        queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Render everything to the screen
@@ -1513,6 +1800,8 @@ impl Renderer {
         let visible_visual_lines =
             buffer.visual_lines(scroll_line, visible_lines + 2, wrap_width, char_width);
         let scroll_y_px = scroll_line_offset * line_height;
+        let snackbar_visible = snackbar_visible(snackbar_tip, overlay.is_active());
+        let modal_overlay = modal_overlay_geometry(width, editor_top, s, overlay);
 
         // Collect UI rectangles
         let mut base_rects = Vec::new();
@@ -1853,71 +2142,7 @@ impl Renderer {
             }
         }
 
-        // 6b. Results Panel Background
-        if overlay.results_panel.visible && results_panel_height_px > 0.0 {
-            let panel_top = editor_top + editor_height_px;
-            // Panel background
-            base_rects.push(Rect::flat(
-                0.0,
-                panel_top,
-                width,
-                results_panel_height_px,
-                [
-                    theme.tab_bar_bg.r,
-                    theme.tab_bar_bg.g,
-                    theme.tab_bar_bg.b,
-                    1.0,
-                ],
-            ));
-            // Header bar
-            let header_h = RESULTS_PANEL_HEADER_HEIGHT * s;
-            base_rects.push(Rect::flat(
-                0.0,
-                panel_top,
-                width,
-                header_h,
-                [
-                    theme.status_bar_bg.r,
-                    theme.status_bar_bg.g,
-                    theme.status_bar_bg.b,
-                    1.0,
-                ],
-            ));
-            // Top border
-            base_rects.push(Rect::flat(
-                0.0,
-                panel_top,
-                width,
-                1.0 * s,
-                [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5],
-            ));
-
-            // Selected result highlight
-            let panel = &overlay.results_panel;
-            if panel.selected >= panel.scroll_offset {
-                let row_in_view = panel.selected - panel.scroll_offset;
-                // Account for context lines above this result
-                let mut visual_row = 0usize;
-                for i in panel.scroll_offset..panel.selected.min(panel.results.len()) {
-                    let r = &panel.results[i];
-                    visual_row += r.context_before.len() + 1 + r.context_after.len();
-                }
-                let sel_y = panel_top + header_h + visual_row as f32 * RESULTS_PANEL_ROW_HEIGHT * s;
-                let sel_h = RESULTS_PANEL_ROW_HEIGHT * s;
-                if sel_y + sel_h < panel_top + results_panel_height_px {
-                    base_rects.push(Rect::flat(
-                        0.0,
-                        sel_y,
-                        width,
-                        sel_h,
-                        [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
-                    ));
-                }
-                let _ = row_in_view; // suppress warning
-            }
-        }
-
-        // 6c. Match tick marks on scrollbar gutter (right edge)
+        // 6b. Match tick marks on scrollbar gutter (right edge)
         if !overlay.find.matches.is_empty() {
             let scrollbar_x = width - SCROLLBAR_WIDTH * s;
             if let Some(lf) = buffer.large_file.as_ref() {
@@ -2005,45 +2230,12 @@ impl Renderer {
             ));
         }
 
-        // 5. Overlay Panel Backgrounds
-        if overlay.is_active() {
-            let is_wide = matches!(
-                overlay.active,
-                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
-            );
-            let overlay_width = if is_wide {
-                (width * 0.8).max(400.0 * s).min(900.0 * s)
-            } else {
-                (width * 0.5).max(300.0 * s).min(600.0 * s)
-            };
-            let overlay_left = (width - overlay_width) / 2.0;
-            let overlay_top_panel = editor_top + 4.0 * s;
-            let overlay_height = match &overlay.active {
-                crate::overlay::ActiveOverlay::CommandPalette => {
-                    let item_count = crate::overlay::palette::filter_commands(
-                        &overlay.input,
-                        &overlay.recent_commands,
-                    )
-                    .len();
-                    command_palette_panel_height(item_count) * s
-                }
-                crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
-                crate::overlay::ActiveOverlay::Find => {
-                    if overlay.find.regex_error.is_some() {
-                        60.0 * s
-                    } else {
-                        40.0 * s
-                    }
-                }
-                crate::overlay::ActiveOverlay::Help => 400.0 * s,
-                crate::overlay::ActiveOverlay::Settings => 360.0 * s,
-                crate::overlay::ActiveOverlay::LanguagePicker => {
-                    picker_panel_height(PICKER_MAX_VISIBLE_ITEMS) * s
-                }
-                crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * s,
-                crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
-                _ => 40.0 * s,
-            };
+        // 5. Modal Overlay Backgrounds
+        if let Some(modal_overlay) = modal_overlay {
+            let overlay_left = modal_overlay.left;
+            let overlay_top_panel = modal_overlay.top;
+            let overlay_width = modal_overlay.width;
+            let overlay_height = modal_overlay.height;
 
             // Scrim — dim the editor content behind the overlay
             overlay_rects.push(Rect::flat(
@@ -2549,314 +2741,312 @@ impl Renderer {
 
         // Cursor I-beam is rendered as a rect only; no text overlay needed
 
-        // Results panel text
-        if overlay.results_panel.visible && results_panel_height_px > 0.0 {
-            let panel_top = tab_bar_height + editor_height;
-            base_text_areas.push(TextArea {
-                buffer: &self.results_panel_buffer,
-                left: 8.0 * s,
-                top: panel_top + 4.0 * s,
-                scale: s,
-                bounds: TextBounds {
-                    left: 0,
-                    top: panel_top as i32,
-                    right: width as i32,
-                    bottom: (panel_top + results_panel_height_px) as i32,
-                },
-                default_color: theme.fg.to_glyphon(),
-                custom_glyphs: &[],
-            });
-        }
-
-        // Snackbar (tip-of-the-day)
-        if snackbar_tip.is_some() && !overlay.is_active() {
-            let snack_w = 420.0 * s;
-            let snack_h = 90.0 * s;
-            let snack_margin = 12.0 * s;
-            let snack_x = width - snack_w - snack_margin;
-            let snack_y = status_top - snack_h - snack_margin;
-
-            self.snackbar_bounds = Some((snack_x, snack_y, snack_w, snack_h));
-
-            // "[×] Dismiss" button bounds — anchored to bottom of card
-            let dismiss_x = snack_x + 8.0 * s + 2.0 * OVERLAY_CHAR_WIDTH * s;
-            let dismiss_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 6.0 * s;
-            let dismiss_w = 11.0 * OVERLAY_CHAR_WIDTH * s;
-            let dismiss_h = OVERLAY_LINE_HEIGHT * s;
-            self.snackbar_dismiss_bounds = Some((dismiss_x, dismiss_y, dismiss_w, dismiss_h));
-
-            // "Don't show again" link bounds — anchored to bottom of card
-            let link_x = snack_x + 8.0 * s + 17.0 * OVERLAY_CHAR_WIDTH * s;
-            let link_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 6.0 * s;
-            let link_w = 16.0 * OVERLAY_CHAR_WIDTH * s;
-            let link_h = OVERLAY_LINE_HEIGHT * s;
-            self.snackbar_dismiss_forever_bounds = Some((link_x, link_y, link_w, link_h));
-
-            // "[>]" next-tip button bounds — anchored to bottom-right of card
-            let next_x = link_x + link_w + 4.0 * OVERLAY_CHAR_WIDTH * s;
-            let next_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 6.0 * s;
-            let next_w = 3.0 * OVERLAY_CHAR_WIDTH * s;
-            let next_h = OVERLAY_LINE_HEIGHT * s;
-            self.snackbar_next_tip_bounds = Some((next_x, next_y, next_w, next_h));
-
-            // Background with shadow
-            base_rects.push(Rect::rounded_shadow(
-                snack_x,
-                snack_y,
-                snack_w,
-                snack_h,
-                [
-                    theme.tab_bar_bg.r,
-                    theme.tab_bar_bg.g,
-                    theme.tab_bar_bg.b,
-                    0.97,
-                ],
-                8.0 * s,
-                10.0 * s,
-                [0.0, 0.0, 0.0, 0.35],
-            ));
-
-            // Accent top border
-            base_rects.push(Rect::rounded(
-                snack_x,
-                snack_y,
-                snack_w,
-                2.0 * s,
-                [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
-                8.0 * s,
-            ));
-
-            // Hover highlight on snackbar buttons
-            if let Some(hovered) = self.hovered_snackbar_button {
-                let (hx, hy, hw, hh) = match hovered {
-                    SnackbarButton::Dismiss => self.snackbar_dismiss_bounds.unwrap_or_default(),
-                    SnackbarButton::DontShowAgain => {
-                        self.snackbar_dismiss_forever_bounds.unwrap_or_default()
-                    }
-                    SnackbarButton::NextTip => self.snackbar_next_tip_bounds.unwrap_or_default(),
-                };
-                base_rects.push(Rect::rounded(
-                    hx - 4.0 * s,
-                    hy,
-                    hw + 8.0 * s,
-                    hh,
-                    [
-                        theme.selection.r,
-                        theme.selection.g,
-                        theme.selection.b,
-                        0.25,
-                    ],
-                    4.0 * s,
-                ));
-            }
-
-            // Separator line between tip and dismiss controls
-            let sep_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 18.0 * s;
-            base_rects.push(Rect::flat(
-                snack_x + 12.0 * s,
-                sep_y,
-                snack_w - 24.0 * s,
-                1.0 * s,
-                [
-                    theme.gutter_fg.r,
-                    theme.gutter_fg.g,
-                    theme.gutter_fg.b,
-                    0.25,
-                ],
-            ));
-
-            base_text_areas.push(TextArea {
-                buffer: &self.snackbar_buffer,
-                left: snack_x + 8.0 * s,
-                top: snack_y + 6.0 * s,
-                scale: s,
-                bounds: TextBounds {
-                    left: snack_x as i32,
-                    top: snack_y as i32,
-                    right: (snack_x + snack_w) as i32,
-                    bottom: (snack_y + snack_h) as i32,
-                },
-                default_color: theme.fg.to_glyphon(),
-                custom_glyphs: &[],
-            });
-        } else {
+        if !snackbar_visible {
             self.snackbar_bounds = None;
             self.snackbar_dismiss_bounds = None;
             self.snackbar_dismiss_forever_bounds = None;
             self.snackbar_next_tip_bounds = None;
         }
 
-        // Prepare base text areas
-        self.text_renderer
-            .prepare(
-                device,
-                queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                base_text_areas,
-                &mut self.swash_cache,
-            )
-            .unwrap_or_else(|e| log::error!("Failed to prepare base text rendering: {e}"));
+        Self::render_layer(
+            device,
+            queue,
+            view,
+            &mut self.text_renderer,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            &mut self.swash_cache,
+            &self.shape_renderer,
+            self.width,
+            self.height,
+            &base_rects,
+            base_text_areas,
+            wgpu::LoadOp::Clear(theme.bg.to_wgpu()),
+            "NotepadX Base Encoder",
+            "NotepadX Base Pass",
+            "Failed to prepare base text rendering",
+            "Failed to render base text",
+        );
 
-        // --- Pass 1: Base Layer (Clear + Shapes + Text) ---
-        {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("NotepadX Base Encoder"),
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("NotepadX Base Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(theme.bg.to_wgpu()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+        for layer in composited_layers(
+            overlay.results_panel.visible && results_panel_height_px > 0.0,
+            snackbar_visible,
+            overlay.is_active(),
+        ) {
+            match layer {
+                CompositedLayer::ResultsPanel => {
+                    let panel_top = editor_top + editor_height_px;
+                    let header_h = RESULTS_PANEL_HEADER_HEIGHT * s;
+                    let mut results_rects = vec![
+                        Rect::flat(
+                            0.0,
+                            panel_top,
+                            width,
+                            results_panel_height_px,
+                            [
+                                theme.tab_bar_bg.r,
+                                theme.tab_bar_bg.g,
+                                theme.tab_bar_bg.b,
+                                1.0,
+                            ],
+                        ),
+                        Rect::flat(
+                            0.0,
+                            panel_top,
+                            width,
+                            header_h,
+                            [
+                                theme.status_bar_bg.r,
+                                theme.status_bar_bg.g,
+                                theme.status_bar_bg.b,
+                                1.0,
+                            ],
+                        ),
+                        Rect::flat(
+                            0.0,
+                            panel_top,
+                            width,
+                            1.0 * s,
+                            [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5],
+                        ),
+                    ];
 
-            self.shape_renderer.render(
-                device,
-                queue,
-                &mut pass,
-                &base_rects,
-                self.width,
-                self.height,
-            );
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .unwrap_or_else(|e| log::error!("Failed to render base text: {e}"));
-            drop(pass);
-            queue.submit(std::iter::once(encoder.finish()));
-        }
+                    let panel = &overlay.results_panel;
+                    if panel.selected >= panel.scroll_offset {
+                        let mut visual_row = 0usize;
+                        for i in panel.scroll_offset..panel.selected.min(panel.results.len()) {
+                            let result = &panel.results[i];
+                            visual_row +=
+                                result.context_before.len() + 1 + result.context_after.len();
+                        }
+                        let selected_y =
+                            panel_top + header_h + visual_row as f32 * RESULTS_PANEL_ROW_HEIGHT * s;
+                        let selected_h = RESULTS_PANEL_ROW_HEIGHT * s;
+                        if selected_y + selected_h < panel_top + results_panel_height_px {
+                            results_rects.push(Rect::flat(
+                                0.0,
+                                selected_y,
+                                width,
+                                selected_h,
+                                [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
+                            ));
+                        }
+                    }
 
-        // --- Pass 2: Overlay Layer (Load + Shapes + Text) ---
-        if overlay.is_active() {
-            // Build and prepare overlay text area separately
-            let is_wide = matches!(
-                overlay.active,
-                crate::overlay::ActiveOverlay::Help | crate::overlay::ActiveOverlay::Settings
-            );
-            let overlay_width = if is_wide {
-                (width * 0.8).max(400.0 * s).min(900.0 * s)
-            } else {
-                (width * 0.5).max(300.0 * s).min(600.0 * s)
-            };
-            let overlay_left = (width - overlay_width) / 2.0;
-            let overlay_top_panel = tab_bar_height + 4.0 * s;
-            let overlay_height = match &overlay.active {
-                crate::overlay::ActiveOverlay::CommandPalette => {
-                    let item_count = crate::overlay::palette::filter_commands(
-                        &overlay.input,
-                        &overlay.recent_commands,
-                    )
-                    .len();
-                    command_palette_panel_height(item_count) * s
+                    let results_text = vec![TextArea {
+                        buffer: &self.results_panel_buffer,
+                        left: 8.0 * s,
+                        top: panel_top + 4.0 * s,
+                        scale: s,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: panel_top as i32,
+                            right: width as i32,
+                            bottom: (panel_top + results_panel_height_px) as i32,
+                        },
+                        default_color: theme.fg.to_glyphon(),
+                        custom_glyphs: &[],
+                    }];
+
+                    Self::render_layer(
+                        device,
+                        queue,
+                        view,
+                        &mut self.text_renderer,
+                        &mut self.font_system,
+                        &mut self.atlas,
+                        &self.viewport,
+                        &mut self.swash_cache,
+                        &self.shape_renderer,
+                        self.width,
+                        self.height,
+                        &results_rects,
+                        results_text,
+                        wgpu::LoadOp::Load,
+                        "NotepadX Results Panel Encoder",
+                        "NotepadX Results Panel Pass",
+                        "Failed to prepare results panel text rendering",
+                        "Failed to render results panel text",
+                    );
                 }
-                crate::overlay::ActiveOverlay::FindReplace => 60.0 * s,
-                crate::overlay::ActiveOverlay::Find => {
-                    if overlay.find.regex_error.is_some() {
-                        60.0 * s
-                    } else {
-                        40.0 * s
+                CompositedLayer::Snackbar => {
+                    let snackbar = snackbar_geometry(width, status_top, s);
+
+                    self.snackbar_bounds =
+                        Some((snackbar.x, snackbar.y, snackbar.width, snackbar.height));
+                    self.snackbar_dismiss_bounds = Some(snackbar.dismiss_bounds);
+                    self.snackbar_dismiss_forever_bounds = Some(snackbar.dismiss_forever_bounds);
+                    self.snackbar_next_tip_bounds = Some(snackbar.next_tip_bounds);
+
+                    let mut snackbar_rects = vec![
+                        Rect::rounded_shadow(
+                            snackbar.x,
+                            snackbar.y,
+                            snackbar.width,
+                            snackbar.height,
+                            [
+                                theme.tab_bar_bg.r,
+                                theme.tab_bar_bg.g,
+                                theme.tab_bar_bg.b,
+                                0.97,
+                            ],
+                            8.0 * s,
+                            10.0 * s,
+                            [0.0, 0.0, 0.0, 0.35],
+                        ),
+                        Rect::rounded(
+                            snackbar.x,
+                            snackbar.y,
+                            snackbar.width,
+                            2.0 * s,
+                            [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
+                            8.0 * s,
+                        ),
+                    ];
+
+                    if let Some(hovered) = self.hovered_snackbar_button {
+                        let (hover_x, hover_y, hover_w, hover_h) = match hovered {
+                            SnackbarButton::Dismiss => {
+                                self.snackbar_dismiss_bounds.unwrap_or_default()
+                            }
+                            SnackbarButton::DontShowAgain => {
+                                self.snackbar_dismiss_forever_bounds.unwrap_or_default()
+                            }
+                            SnackbarButton::NextTip => {
+                                self.snackbar_next_tip_bounds.unwrap_or_default()
+                            }
+                        };
+                        snackbar_rects.push(Rect::rounded(
+                            hover_x - 4.0 * s,
+                            hover_y,
+                            hover_w + 8.0 * s,
+                            hover_h,
+                            [
+                                theme.selection.r,
+                                theme.selection.g,
+                                theme.selection.b,
+                                0.25,
+                            ],
+                            4.0 * s,
+                        ));
                     }
+
+                    snackbar_rects.push(Rect::flat(
+                        snackbar.x + 12.0 * s,
+                        snackbar.separator_y,
+                        snackbar.width - 24.0 * s,
+                        1.0 * s,
+                        [
+                            theme.gutter_fg.r,
+                            theme.gutter_fg.g,
+                            theme.gutter_fg.b,
+                            0.25,
+                        ],
+                    ));
+
+                    let snackbar_text = vec![TextArea {
+                        buffer: &self.snackbar_buffer,
+                        left: snackbar.x + 8.0 * s,
+                        top: snackbar.y + 6.0 * s,
+                        scale: s,
+                        bounds: TextBounds {
+                            left: snackbar.x as i32,
+                            top: snackbar.y as i32,
+                            right: (snackbar.x + snackbar.width) as i32,
+                            bottom: (snackbar.y + snackbar.height) as i32,
+                        },
+                        default_color: theme.fg.to_glyphon(),
+                        custom_glyphs: &[],
+                    }];
+
+                    Self::render_layer(
+                        device,
+                        queue,
+                        view,
+                        &mut self.text_renderer,
+                        &mut self.font_system,
+                        &mut self.atlas,
+                        &self.viewport,
+                        &mut self.swash_cache,
+                        &self.shape_renderer,
+                        self.width,
+                        self.height,
+                        &snackbar_rects,
+                        snackbar_text,
+                        wgpu::LoadOp::Load,
+                        "NotepadX Snackbar Encoder",
+                        "NotepadX Snackbar Pass",
+                        "Failed to prepare snackbar text rendering",
+                        "Failed to render snackbar text",
+                    );
                 }
-                crate::overlay::ActiveOverlay::Help => 400.0 * s,
-                crate::overlay::ActiveOverlay::Settings => 360.0 * s,
-                crate::overlay::ActiveOverlay::LanguagePicker => {
-                    picker_panel_height(PICKER_MAX_VISIBLE_ITEMS) * s
-                }
-                crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * s,
-                crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * s,
-                _ => 40.0 * s,
-            };
-            let mut overlay_text_areas = Vec::with_capacity(overlay_text_pass_layers().len());
-            for layer in overlay_text_pass_layers() {
-                match layer {
-                    OverlayTextPassLayer::TabBar => {
-                        let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0;
-                        overlay_text_areas.push(TextArea {
-                            buffer: &self.tab_bar_buffer,
-                            left: 0.0,
-                            top: tab_text_top,
-                            scale: s,
-                            bounds: TextBounds {
-                                left: 0,
-                                top: 0,
-                                right: width as i32,
-                                bottom: tab_bar_height as i32,
-                            },
-                            default_color: theme.tab_active_fg.to_glyphon(),
-                            custom_glyphs: &[],
-                        });
+                CompositedLayer::ModalOverlay => {
+                    let modal_overlay =
+                        modal_overlay.expect("modal overlay layer requires geometry");
+                    let mut overlay_text_areas =
+                        Vec::with_capacity(modal_overlay_text_pass_layers().len());
+                    for text_layer in modal_overlay_text_pass_layers() {
+                        match text_layer {
+                            ModalOverlayTextPassLayer::TabBar => {
+                                let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0;
+                                overlay_text_areas.push(TextArea {
+                                    buffer: &self.tab_bar_buffer,
+                                    left: 0.0,
+                                    top: tab_text_top,
+                                    scale: s,
+                                    bounds: TextBounds {
+                                        left: 0,
+                                        top: 0,
+                                        right: width as i32,
+                                        bottom: tab_bar_height as i32,
+                                    },
+                                    default_color: theme.tab_active_fg.to_glyphon(),
+                                    custom_glyphs: &[],
+                                });
+                            }
+                            ModalOverlayTextPassLayer::OverlayPanel => {
+                                overlay_text_areas.push(TextArea {
+                                    buffer: &self.overlay_buffer,
+                                    left: modal_overlay.left + 8.0 * s,
+                                    top: modal_overlay.top + 6.0 * s,
+                                    scale: s,
+                                    bounds: TextBounds {
+                                        left: (modal_overlay.left + 8.0 * s) as i32,
+                                        top: (modal_overlay.top + 6.0 * s) as i32,
+                                        right: (modal_overlay.left + modal_overlay.width - 8.0 * s)
+                                            as i32,
+                                        bottom: (modal_overlay.top + modal_overlay.height) as i32,
+                                    },
+                                    default_color: theme.fg.to_glyphon(),
+                                    custom_glyphs: &[],
+                                });
+                            }
+                        }
                     }
-                    OverlayTextPassLayer::OverlayPanel => {
-                        overlay_text_areas.push(TextArea {
-                            buffer: &self.overlay_buffer,
-                            left: overlay_left + 8.0 * s,
-                            top: overlay_top_panel + 6.0 * s,
-                            scale: s,
-                            bounds: TextBounds {
-                                left: (overlay_left + 8.0 * s) as i32,
-                                top: (overlay_top_panel + 6.0 * s) as i32,
-                                right: (overlay_left + overlay_width - 8.0 * s) as i32,
-                                bottom: (overlay_top_panel + overlay_height) as i32,
-                            },
-                            default_color: theme.fg.to_glyphon(),
-                            custom_glyphs: &[],
-                        });
-                    }
+
+                    Self::render_layer(
+                        device,
+                        queue,
+                        view,
+                        &mut self.text_renderer,
+                        &mut self.font_system,
+                        &mut self.atlas,
+                        &self.viewport,
+                        &mut self.swash_cache,
+                        &self.shape_renderer,
+                        self.width,
+                        self.height,
+                        &overlay_rects,
+                        overlay_text_areas,
+                        wgpu::LoadOp::Load,
+                        "NotepadX Overlay Encoder",
+                        "NotepadX Overlay Pass",
+                        "Failed to prepare overlay text rendering",
+                        "Failed to render overlay text",
+                    );
                 }
             }
-
-            // Prepare overlay text separately
-            self.text_renderer
-                .prepare(
-                    device,
-                    queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    overlay_text_areas,
-                    &mut self.swash_cache,
-                )
-                .unwrap_or_else(|e| log::error!("Failed to prepare overlay text rendering: {e}"));
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("NotepadX Overlay Encoder"),
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("NotepadX Overlay Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            self.shape_renderer.render(
-                device,
-                queue,
-                &mut pass,
-                &overlay_rects,
-                self.width,
-                self.height,
-            );
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .unwrap_or_else(|e| log::error!("Failed to render overlay text: {e}"));
-            drop(pass);
-            queue.submit(std::iter::once(encoder.finish()));
         }
 
         // Trim atlas to free unused glyph space
@@ -3126,20 +3316,45 @@ impl ShapeRenderer {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_palette_panel_height, command_palette_visible_items, find_occurrence_ranges,
-        overlay_text_pass_layers, OverlayTextPassLayer, COMMAND_PALETTE_MAX_VISIBLE_ITEMS,
-        OVERLAY_LINE_HEIGHT,
+        command_palette_panel_height, command_palette_visible_items, composited_layers,
+        find_occurrence_ranges, fixed_tip_lines, format_snackbar_tip,
+        modal_overlay_text_pass_layers, snackbar_geometry, snackbar_visible, CompositedLayer,
+        ModalOverlayTextPassLayer, COMMAND_PALETTE_MAX_VISIBLE_ITEMS, OVERLAY_LINE_HEIGHT,
+        SNACKBAR_TIP_LINES, SNACKBAR_TIP_WIDTH,
     };
 
     #[test]
     fn overlay_pass_keeps_tab_text_before_overlay_text() {
         assert_eq!(
-            overlay_text_pass_layers(),
+            modal_overlay_text_pass_layers(),
             [
-                OverlayTextPassLayer::TabBar,
-                OverlayTextPassLayer::OverlayPanel,
+                ModalOverlayTextPassLayer::TabBar,
+                ModalOverlayTextPassLayer::OverlayPanel,
             ]
         );
+    }
+
+    #[test]
+    fn composited_layers_render_in_expected_order() {
+        assert_eq!(
+            composited_layers(true, true, true),
+            vec![
+                CompositedLayer::ResultsPanel,
+                CompositedLayer::Snackbar,
+                CompositedLayer::ModalOverlay,
+            ]
+        );
+        assert_eq!(
+            composited_layers(false, true, false),
+            vec![CompositedLayer::Snackbar]
+        );
+    }
+
+    #[test]
+    fn snackbar_visibility_is_suppressed_by_modal_overlay() {
+        assert!(snackbar_visible(Some("tip"), false));
+        assert!(!snackbar_visible(Some("tip"), true));
+        assert!(!snackbar_visible(None, false));
     }
 
     #[test]
@@ -3163,5 +3378,54 @@ mod tests {
             find_occurrence_ranges("abc abc abc", "abc", Some((4, 7))),
             vec![(0, 3), (8, 11)]
         );
+    }
+
+    #[test]
+    fn fixed_tip_lines_are_padded_to_constant_width() {
+        let lines = fixed_tip_lines("Short tip", SNACKBAR_TIP_WIDTH, SNACKBAR_TIP_LINES);
+        assert_eq!(lines.len(), SNACKBAR_TIP_LINES);
+        assert!(lines
+            .iter()
+            .all(|line| line.chars().count() == SNACKBAR_TIP_WIDTH));
+    }
+
+    #[test]
+    fn fixed_tip_lines_truncate_long_content_with_ellipsis() {
+        let lines = fixed_tip_lines(
+            "This tip is intentionally much longer than the fixed snackbar width so the final line needs truncation before it is rendered.",
+            SNACKBAR_TIP_WIDTH,
+            SNACKBAR_TIP_LINES,
+        );
+
+        assert_eq!(
+            lines[SNACKBAR_TIP_LINES - 1].chars().count(),
+            SNACKBAR_TIP_WIDTH
+        );
+        assert!(lines[SNACKBAR_TIP_LINES - 1].contains('…'));
+    }
+
+    #[test]
+    fn snackbar_tip_format_preserves_two_fixed_body_lines() {
+        let formatted = format_snackbar_tip("Cmd+F opens Find.");
+        let mut lines = formatted.lines();
+        let first = lines.next().unwrap();
+        let second = lines.next().unwrap();
+
+        assert_eq!(first.chars().count(), SNACKBAR_TIP_WIDTH + 2);
+        assert_eq!(second.chars().count(), SNACKBAR_TIP_WIDTH);
+    }
+
+    #[test]
+    fn snackbar_geometry_uses_stable_card_and_button_bounds() {
+        let geometry = snackbar_geometry(1600.0, 900.0, 1.0);
+
+        assert_eq!((geometry.width, geometry.height), (420.0, 90.0));
+        assert_eq!(geometry.dismiss_bounds.2, 11.0 * super::OVERLAY_CHAR_WIDTH);
+        assert_eq!(
+            geometry.dismiss_forever_bounds.2,
+            16.0 * super::OVERLAY_CHAR_WIDTH
+        );
+        assert_eq!(geometry.next_tip_bounds.2, 3.0 * super::OVERLAY_CHAR_WIDTH);
+        assert!(geometry.separator_y > geometry.y);
     }
 }
