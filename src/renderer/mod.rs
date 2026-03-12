@@ -926,7 +926,14 @@ impl Renderer {
             };
             let label = format!("{dirty_marker}{truncated_name}{close_marker}");
             let label_chars = label.chars().count();
-            let tw = label_chars as f32 * tab_char_w + tab_pad * 2.0;
+
+            // Pad with spaces to fill ~tab_pad worth of space on each side.
+            // When a close button is present, use minimal right padding so the ×
+            // stays flush against the tab's right edge (matching the click target).
+            let pad_chars = (tab_pad / tab_char_w).round() as usize;
+            let right_pad_chars = if show_close { 1 } else { pad_chars };
+            let tw = label_chars as f32 * tab_char_w
+                + (pad_chars + right_pad_chars) as f32 * tab_char_w;
 
             let is_active = i == editor.active_buffer;
             let tab_fg = if is_active {
@@ -936,10 +943,9 @@ impl Renderer {
             };
             let attrs = base_tab_attrs.color(tab_fg.to_glyphon());
 
-            // Pad with spaces to fill ~tab_pad worth of space on each side
-            let pad_chars = (tab_pad / tab_char_w).round() as usize;
-            let pad: String = " ".repeat(pad_chars);
-            let full_label = format!("{pad}{label}{pad}");
+            let left_pad: String = " ".repeat(pad_chars);
+            let right_pad: String = " ".repeat(right_pad_chars);
+            let full_label = format!("{left_pad}{label}{right_pad}");
             tab_spans.push((full_label, attrs));
 
             self.tab_positions.push((tab_x, tw));

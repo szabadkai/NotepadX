@@ -744,8 +744,8 @@ impl App {
             let content_x = click_x + tab_scroll; // convert screen → buffer space
             for (i, (tx, tw)) in tab_positions.iter().enumerate() {
                 if content_x >= *tx && content_x < tx + tw {
-                    // Check if click is on the close button (last ~24px of tab, larger target)
-                    let close_x = tx + tw - 24.0;
+                    // Check if click is on the close button (× sits near the right edge)
+                    let close_x = tx + tw - 20.0;
                     if content_x >= close_x && self.editor.buffers.len() > 1 {
                         // Check for unsaved changes before closing
                         let can_close = if self.editor.buffers[i].dirty {
