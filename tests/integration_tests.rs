@@ -301,6 +301,8 @@ fn test_config_serialization_all_fields() {
         large_file_search_results_limit: 500,
         large_file_search_scan_limit_mb: 32,
         recent_files: Vec::new(),
+        show_tips: true,
+        next_tip_index: 0,
     };
 
     let json = serde_json::to_string(&config).expect("Should serialize");

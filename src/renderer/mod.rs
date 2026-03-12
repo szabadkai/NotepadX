@@ -61,6 +61,12 @@ pub const STATUS_CHAR_WIDTH: f32 = 12.0 * 0.6;
 
 /// Identifiers for clickable status bar segments
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnackbarButton {
+    Dismiss,
+    DontShowAgain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusBarSegment {
     CursorPosition,
     LineCount,
@@ -269,6 +275,17 @@ pub struct Renderer {
 
     /// Effective gutter width (0 when line numbers are hidden)
     pub effective_gutter_width: f32,
+
+    // Snackbar (tip-of-the-day)
+    pub snackbar_buffer: GlyphonBuffer,
+    /// Snackbar bounding box in physical pixels: (x, y, w, h) — used for hit-testing
+    pub snackbar_bounds: Option<(f32, f32, f32, f32)>,
+    /// Snackbar "[×] Dismiss" button bounds in physical pixels
+    pub snackbar_dismiss_bounds: Option<(f32, f32, f32, f32)>,
+    /// Snackbar "Don't show again" link bounds in physical pixels
+    pub snackbar_dismiss_forever_bounds: Option<(f32, f32, f32, f32)>,
+    /// Currently hovered snackbar button (set from main.rs)
+    pub hovered_snackbar_button: Option<SnackbarButton>,
 }
 
 impl Renderer {
@@ -328,6 +345,18 @@ impl Renderer {
             Shaping::Advanced,
         );
 
+        let mut snackbar_buffer = GlyphonBuffer::new(
+            &mut font_system,
+            Metrics::new(OVERLAY_FONT_SIZE, OVERLAY_LINE_HEIGHT),
+        );
+        snackbar_buffer.set_size(&mut font_system, Some(330.0), Some(120.0));
+        snackbar_buffer.set_text(
+            &mut font_system,
+            "",
+            Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+        );
+
         Self {
             font_system,
             swash_cache,
@@ -355,6 +384,11 @@ impl Renderer {
             hovered_status_segment: None,
             tab_drag_indicator_x: None,
             effective_gutter_width: GUTTER_WIDTH,
+            snackbar_buffer,
+            snackbar_bounds: None,
+            snackbar_dismiss_bounds: None,
+            snackbar_dismiss_forever_bounds: None,
+            hovered_snackbar_button: None,
         }
     }
 
@@ -490,6 +524,7 @@ impl Renderer {
     }
 
     /// Update all text buffers based on current editor state
+    #[allow(clippy::too_many_arguments)]
     pub fn update_buffers(
         &mut self,
         editor: &crate::editor::Editor,
@@ -498,6 +533,7 @@ impl Renderer {
         overlay: &crate::overlay::OverlayState,
         config: &crate::settings::AppConfig,
         settings_cursor: usize,
+        snackbar_tip: Option<&str>,
     ) {
         // Calculate metrics based on config font size
         let font_size = config.font_size;
@@ -1013,7 +1049,7 @@ impl Renderer {
                     .len();
                     command_palette_panel_height(item_count)
                 }
-                crate::overlay::ActiveOverlay::Help => 600.0,
+                crate::overlay::ActiveOverlay::Help => 400.0,
                 crate::overlay::ActiveOverlay::Settings => 360.0,
                 crate::overlay::ActiveOverlay::LanguagePicker => {
                     picker_panel_height(PICKER_MAX_VISIBLE_ITEMS)
@@ -1138,31 +1174,54 @@ impl Renderer {
                 }
                 crate::overlay::ActiveOverlay::Help => {
                     let mut text = String::from("--- NotepadX Keyboard Shortcuts ---\n\n");
-                    text.push_str("File:      Cmd+N: New    | Cmd+O: Open\n");
-                    text.push_str("           Cmd+S: Save   | Cmd+W: Close\n\n");
-                    text.push_str("Edit:      Cmd+Z: Undo   | Cmd+Y: Redo\n");
-                    text.push_str("           Cmd+C: Copy   | Cmd+X: Cut\n");
-                    text.push_str("           Cmd+V: Paste  | Cmd+A: Sel All\n");
-                    text.push_str("           Cmd+/: Commnt | Cmd+Shift+D: Dupl\n");
-                    text.push_str("           Cmd+D: Sel Next Occurrence\n\n");
-                    text.push_str("Nav:       Arrows: Move  | Alt+Arr: Word\n");
-                    text.push_str("           Shift+Arr: Sel| Home/End\n");
-                    text.push_str("           Cmd+Arr: Doc Start/End\n");
-                    text.push_str("           PgUp/PgDn     | Cmd+[/]: Tab\n\n");
-                    text.push_str("Lines:     Alt+Up/Dn: Move Line\n");
-                    text.push_str("           Tab/Shift+Tab: Indent (sel)\n\n");
-                    text.push_str("Search:    Cmd+F: Find   | Cmd+H: Replace\n");
-                    text.push_str("           Cmd+G: Goto   | Cmd+Shift+P: Palette\n\n");
-                    text.push_str("Tabs:      Drag to reorder tabs.\n\n");
-                    text.push_str("Other:     Cmd+K/Shift+K: Theme Cycle\n");
-                    text.push_str("           Cmd+,: Settings | Alt+Z: Wrap\n");
-                    text.push_str("           Cmd+Shift+E: Large File Edit Mode\n");
-                    text.push_str("           F1: Help | Esc: Close Overlay\n\n");
-                    text.push_str("Help:      TAB toggles fields in Replace.\n");
-                    text.push_str("           Cmd+Shift+Enter: Replace All.\n");
-                    text.push_str("           Cmd+Opt+C/W/R: Case/Word/Regex.\n");
-                    text.push_str("           Click [Aa] [W] [.*] to toggle.\n");
-                    text.push_str("           ENTER/Arrows for search results.");
+                    let left_col: &[&str] = &[
+                        "File:      Cmd+N: New    | Cmd+O: Open",
+                        "           Cmd+S: Save   | Cmd+W: Close",
+                        "",
+                        "Edit:      Cmd+Z: Undo   | Cmd+Y: Redo",
+                        "           Cmd+C: Copy   | Cmd+X: Cut",
+                        "           Cmd+V: Paste  | Cmd+A: Sel All",
+                        "           Cmd+/: Commnt | Cmd+Shift+D: Dupl",
+                        "           Cmd+D: Sel Next Occurrence",
+                        "",
+                        "Nav:       Arrows: Move  | Alt+Arr: Word",
+                        "           Shift+Arr: Sel| Home/End",
+                        "           Cmd+Arr: Doc Start/End",
+                        "           PgUp/PgDn     | Cmd+[/]: Tab",
+                        "",
+                        "Lines:     Alt+Up/Dn: Move Line",
+                        "           Tab/Shift+Tab: Indent (sel)",
+                    ];
+                    let right_col: &[&str] = &[
+                        "Search:    Cmd+F: Find   | Cmd+H: Replace",
+                        "           Cmd+G: Goto   | Cmd+Shift+P: Palette",
+                        "",
+                        "Tabs:      Drag to reorder tabs.",
+                        "",
+                        "Other:     Cmd+K/Shift+K: Theme Cycle",
+                        "           Cmd+,: Settings | Alt+Z: Wrap",
+                        "           Cmd+Shift+E: Large File Edit Mode",
+                        "           F1: Help | Esc: Close Overlay",
+                        "",
+                        "Help:      TAB toggles fields in Replace.",
+                        "           Cmd+Shift+Enter: Replace All.",
+                        "           Cmd+Opt+C/W/R: Case/Word/Regex.",
+                        "           Click [Aa] [W] [.*] to toggle.",
+                        "           ENTER/Arrows for search results.",
+                        "",
+                    ];
+                    let rows = left_col.len().max(right_col.len());
+                    for i in 0..rows {
+                        let l = left_col.get(i).copied().unwrap_or("");
+                        let r = right_col.get(i).copied().unwrap_or("");
+                        if r.is_empty() {
+                            text.push_str(l);
+                        } else {
+                            text.push_str(&format!("{:<50}{}", l, r));
+                        }
+                        text.push('\n');
+                    }
+                    text.pop(); // remove trailing newline
                     text
                 }
                 crate::overlay::ActiveOverlay::Settings => {
@@ -1385,6 +1444,26 @@ impl Renderer {
             self.results_panel_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         }
+
+        // --- Snackbar (tip-of-the-day) ---
+        if let Some(tip) = snackbar_tip {
+            let snackbar_text = format!(
+                "\u{1f4a1} {}\n\n  [\u{00d7}] Dismiss    Don't show again",
+                tip
+            );
+            self.snackbar_buffer
+                .set_size(&mut self.font_system, Some(330.0), Some(120.0));
+            self.snackbar_buffer.set_text(
+                &mut self.font_system,
+                &snackbar_text,
+                Attrs::new()
+                    .family(Family::Name("JetBrains Mono"))
+                    .color(theme.fg.to_glyphon()),
+                Shaping::Advanced,
+            );
+            self.snackbar_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
     }
 
     /// Render everything to the screen
@@ -1398,8 +1477,8 @@ impl Renderer {
         overlay: &crate::overlay::OverlayState,
         config: &crate::settings::AppConfig,
         settings_cursor: usize,
-        encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
+        snackbar_tip: Option<&str>,
     ) {
         let s = self.scale_factor;
         let width = self.width as f32;
@@ -1952,7 +2031,7 @@ impl Renderer {
                         40.0 * s
                     }
                 }
-                crate::overlay::ActiveOverlay::Help => 600.0 * s,
+                crate::overlay::ActiveOverlay::Help => 400.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 crate::overlay::ActiveOverlay::LanguagePicker => {
                     picker_panel_height(PICKER_MAX_VISIBLE_ITEMS) * s
@@ -2485,6 +2564,115 @@ impl Renderer {
             });
         }
 
+        // Snackbar (tip-of-the-day)
+        if snackbar_tip.is_some() && !overlay.is_active() {
+            let snack_w = 360.0 * s;
+            let snack_h = 90.0 * s;
+            let snack_margin = 12.0 * s;
+            let snack_x = width - snack_w - snack_margin;
+            let snack_y = status_top - snack_h - snack_margin;
+
+            self.snackbar_bounds = Some((snack_x, snack_y, snack_w, snack_h));
+
+            // "[×] Dismiss" button bounds — anchored to bottom of card
+            let dismiss_x = snack_x + 8.0 * s + 2.0 * OVERLAY_CHAR_WIDTH * s;
+            let dismiss_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 6.0 * s;
+            let dismiss_w = 11.0 * OVERLAY_CHAR_WIDTH * s;
+            let dismiss_h = OVERLAY_LINE_HEIGHT * s;
+            self.snackbar_dismiss_bounds = Some((dismiss_x, dismiss_y, dismiss_w, dismiss_h));
+
+            // "Don't show again" link bounds — anchored to bottom of card
+            let link_x = snack_x + 8.0 * s + 17.0 * OVERLAY_CHAR_WIDTH * s;
+            let link_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 6.0 * s;
+            let link_w = 15.0 * OVERLAY_CHAR_WIDTH * s;
+            let link_h = OVERLAY_LINE_HEIGHT * s;
+            self.snackbar_dismiss_forever_bounds = Some((link_x, link_y, link_w, link_h));
+
+            // Background with shadow
+            base_rects.push(Rect::rounded_shadow(
+                snack_x,
+                snack_y,
+                snack_w,
+                snack_h,
+                [
+                    theme.tab_bar_bg.r,
+                    theme.tab_bar_bg.g,
+                    theme.tab_bar_bg.b,
+                    0.97,
+                ],
+                8.0 * s,
+                10.0 * s,
+                [0.0, 0.0, 0.0, 0.35],
+            ));
+
+            // Accent top border
+            base_rects.push(Rect::rounded(
+                snack_x,
+                snack_y,
+                snack_w,
+                2.0 * s,
+                [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
+                8.0 * s,
+            ));
+
+            // Hover highlight on snackbar buttons
+            if let Some(hovered) = self.hovered_snackbar_button {
+                let (hx, hy, hw, hh) = match hovered {
+                    SnackbarButton::Dismiss => self.snackbar_dismiss_bounds.unwrap_or_default(),
+                    SnackbarButton::DontShowAgain => {
+                        self.snackbar_dismiss_forever_bounds.unwrap_or_default()
+                    }
+                };
+                base_rects.push(Rect::rounded(
+                    hx - 4.0 * s,
+                    hy,
+                    hw + 8.0 * s,
+                    hh,
+                    [
+                        theme.selection.r,
+                        theme.selection.g,
+                        theme.selection.b,
+                        0.25,
+                    ],
+                    4.0 * s,
+                ));
+            }
+
+            // Separator line between tip and dismiss controls
+            let sep_y = snack_y + snack_h - OVERLAY_LINE_HEIGHT * s - 18.0 * s;
+            base_rects.push(Rect::flat(
+                snack_x + 12.0 * s,
+                sep_y,
+                snack_w - 24.0 * s,
+                1.0 * s,
+                [
+                    theme.gutter_fg.r,
+                    theme.gutter_fg.g,
+                    theme.gutter_fg.b,
+                    0.25,
+                ],
+            ));
+
+            base_text_areas.push(TextArea {
+                buffer: &self.snackbar_buffer,
+                left: snack_x + 8.0 * s,
+                top: snack_y + 6.0 * s,
+                scale: s,
+                bounds: TextBounds {
+                    left: snack_x as i32,
+                    top: snack_y as i32,
+                    right: (snack_x + snack_w) as i32,
+                    bottom: (snack_y + snack_h) as i32,
+                },
+                default_color: theme.fg.to_glyphon(),
+                custom_glyphs: &[],
+            });
+        } else {
+            self.snackbar_bounds = None;
+            self.snackbar_dismiss_bounds = None;
+            self.snackbar_dismiss_forever_bounds = None;
+        }
+
         // Prepare base text areas
         self.text_renderer
             .prepare(
@@ -2500,6 +2688,9 @@ impl Renderer {
 
         // --- Pass 1: Base Layer (Clear + Shapes + Text) ---
         {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("NotepadX Base Encoder"),
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("NotepadX Base Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2526,6 +2717,8 @@ impl Renderer {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .unwrap_or_else(|e| log::error!("Failed to render base text: {e}"));
+            drop(pass);
+            queue.submit(std::iter::once(encoder.finish()));
         }
 
         // --- Pass 2: Overlay Layer (Load + Shapes + Text) ---
@@ -2559,7 +2752,7 @@ impl Renderer {
                         40.0 * s
                     }
                 }
-                crate::overlay::ActiveOverlay::Help => 600.0 * s,
+                crate::overlay::ActiveOverlay::Help => 400.0 * s,
                 crate::overlay::ActiveOverlay::Settings => 360.0 * s,
                 crate::overlay::ActiveOverlay::LanguagePicker => {
                     picker_panel_height(PICKER_MAX_VISIBLE_ITEMS) * s
@@ -2620,6 +2813,9 @@ impl Renderer {
                 )
                 .unwrap_or_else(|e| log::error!("Failed to prepare overlay text rendering: {e}"));
 
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("NotepadX Overlay Encoder"),
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("NotepadX Overlay Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2646,6 +2842,8 @@ impl Renderer {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .unwrap_or_else(|e| log::error!("Failed to render overlay text: {e}"));
+            drop(pass);
+            queue.submit(std::iter::once(encoder.finish()));
         }
 
         // Trim atlas to free unused glyph space

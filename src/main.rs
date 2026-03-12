@@ -128,6 +128,30 @@ struct ScrollbarDrag {
     grab_offset_y: f32,
 }
 
+/// Tips shown in the startup snackbar, one per launch.
+const TIPS: &[&str] = &[
+    "Cmd+Shift+P opens the Command Palette \u{2014} search any action.",
+    "Cmd+F to find, Cmd+H to find & replace.",
+    "Cmd+G jumps to a specific line number.",
+    "Cmd+D selects the next occurrence of the current word.",
+    "Alt+Up/Down moves the current line up or down.",
+    "Cmd+/ toggles line comments on the selection.",
+    "Cmd+Shift+D duplicates the current line.",
+    "Tab/Shift+Tab indents or outdents selected lines.",
+    "Alt+Z toggles line wrapping on and off.",
+    "Cmd+K / Cmd+Shift+K cycles through themes.",
+    "Cmd+, opens Settings \u{2014} tweak font size, tabs, and more.",
+    "Drag tabs to reorder them.",
+    "Click the language in the status bar to change syntax.",
+    "Click the encoding in the status bar to change file encoding.",
+    "Cmd+Shift+E enters large-file edit mode for big files.",
+    "F1 opens the full keyboard shortcut reference.",
+    "Cmd+W closes the active tab (with save prompt if dirty).",
+    "Click Ln/Col in the status bar to jump to a line.",
+    "Cmd+Opt+C/W/R toggles Case/Whole-word/Regex in Find.",
+    "Drop a file onto the window to open it in a new tab.",
+];
+
 struct App {
     // Core state
     editor: Editor,
@@ -176,6 +200,9 @@ struct App {
     current_workspace_path: Option<PathBuf>,
     last_saved_session_json: Option<String>,
     next_session_sync: Instant,
+
+    // Tip-of-the-day snackbar
+    snackbar_tip: Option<String>,
 }
 
 impl App {
@@ -289,6 +316,7 @@ impl App {
             current_workspace_path: None,
             last_saved_session_json: None,
             next_session_sync: Instant::now() + Duration::from_millis(1000),
+            snackbar_tip: None,
         }
     }
 
@@ -493,6 +521,7 @@ impl App {
             &self.overlay,
             &self.config,
             self.settings_cursor,
+            self.snackbar_tip.as_deref(),
         );
 
         // Get surface texture
@@ -569,9 +598,6 @@ impl App {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("NotepadX Encoder"),
-        });
 
         // Update tab drag indicator for rendering
         if let Some(ref drag) = self.tab_drag {
@@ -602,11 +628,10 @@ impl App {
             &self.overlay,
             &self.config,
             self.settings_cursor,
-            &mut encoder,
             &view,
+            self.snackbar_tip.as_deref(),
         );
 
-        queue.submit(std::iter::once(encoder.finish()));
         output.present();
     }
 
@@ -712,6 +737,39 @@ impl App {
                         break;
                     }
                 }
+            }
+        }
+        // Snackbar (tip-of-the-day)
+        else if self.snackbar_tip.is_some() && !self.overlay.is_active() {
+            if let Some(renderer) = &self.renderer {
+                let s = renderer.scale_factor;
+                let px = x as f32 * s;
+                let py = y as f32 * s;
+
+                // Check "Don't show again" link
+                if let Some((lx, ly, lw, lh)) = renderer.snackbar_dismiss_forever_bounds {
+                    if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
+                        self.snackbar_tip = None;
+                        self.config.show_tips = false;
+                        self.config.save();
+                        self.needs_redraw = true;
+                        return;
+                    }
+                }
+
+                // Check [×] Dismiss button
+                if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
+                    if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
+                        self.snackbar_tip = None;
+                        self.needs_redraw = true;
+                        return;
+                    }
+                }
+            }
+            // Fall through to status bar / editor area handling below
+            if y >= status_top {
+                self.suppress_drag = true;
+                self.handle_status_bar_click(x as f32);
             }
         }
         // Status Bar
@@ -2534,10 +2592,13 @@ impl App {
     }
 
     fn open_file(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().pick_file() {
+        let Some(paths) = rfd::FileDialog::new().pick_files() else {
+            return;
+        };
+        for path in &paths {
             if let Err(e) = self
                 .editor
-                .open_file(&path, Some(&self.syntax), &self.config)
+                .open_file(path, Some(&self.syntax), &self.config)
             {
                 log::error!("Open failed: {}", e);
             } else {
@@ -2545,9 +2606,11 @@ impl App {
                 if self.editor.active().is_large_file() {
                     self.editor.active_mut().wrap_enabled = false;
                 }
-                self.track_recent_file(&path);
-                self.persist_session_now();
+                self.track_recent_file(path);
             }
+        }
+        if !paths.is_empty() {
+            self.persist_session_now();
         }
     }
 
@@ -2854,7 +2917,44 @@ impl ApplicationHandler for App {
                             })
                             .unwrap_or(false);
 
-                    if y >= status_top {
+                    // Snackbar button hover detection (physical pixels)
+                    let snackbar_hover = if self.snackbar_tip.is_some() {
+                        let px = position.x as f32;
+                        let py = position.y as f32;
+                        if let Some(renderer) = &self.renderer {
+                            if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
+                                if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
+                                    Some(renderer::SnackbarButton::Dismiss)
+                                } else if let Some((lx, ly, lw, lh)) =
+                                    renderer.snackbar_dismiss_forever_bounds
+                                {
+                                    if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
+                                        Some(renderer::SnackbarButton::DontShowAgain)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(renderer) = &mut self.renderer {
+                        if renderer.hovered_snackbar_button != snackbar_hover {
+                            renderer.hovered_snackbar_button = snackbar_hover;
+                            self.needs_redraw = true;
+                        }
+                    }
+
+                    if snackbar_hover.is_some() {
+                        window.set_cursor(winit::window::CursorIcon::Pointer);
+                    } else if y >= status_top {
                         let new_seg = self
                             .renderer
                             .as_ref()
@@ -3205,6 +3305,14 @@ fn main() -> Result<()> {
         app.sync_session_baseline();
     } else {
         app.restore_last_session();
+    }
+
+    // Show tip-of-the-day snackbar
+    if app.config.show_tips {
+        let idx = app.config.next_tip_index % TIPS.len();
+        app.snackbar_tip = Some(TIPS[idx].to_string());
+        app.config.next_tip_index = (idx + 1) % TIPS.len();
+        app.config.save();
     }
 
     event_loop.run_app(&mut app)?;

@@ -55,6 +55,12 @@ pub struct AppConfig {
 
     /// Recently opened file paths (most recent first, max 10)
     pub recent_files: Vec<PathBuf>,
+
+    /// Show a tip-of-the-day snackbar on startup
+    pub show_tips: bool,
+
+    /// Index of the next tip to show (cycles through available tips)
+    pub next_tip_index: usize,
 }
 
 impl Default for AppConfig {
@@ -74,6 +80,8 @@ impl Default for AppConfig {
             large_file_search_results_limit: DEFAULT_SEARCH_RESULTS_LIMIT,
             large_file_search_scan_limit_mb: DEFAULT_SEARCH_SCAN_LIMIT_MB,
             recent_files: Vec::new(),
+            show_tips: true,
+            next_tip_index: 0,
         }
     }
 }

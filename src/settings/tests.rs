@@ -59,6 +59,8 @@ mod cases {
             large_file_search_results_limit: 2000,
             large_file_search_scan_limit_mb: 128,
             recent_files: Vec::new(),
+            show_tips: true,
+            next_tip_index: 0,
         };
 
         let json = serde_json::to_string_pretty(&original).expect("Failed to serialize");
@@ -306,6 +308,8 @@ mod cases {
             large_file_search_results_limit: usize::MAX,
             large_file_search_scan_limit_mb: u64::MAX,
             recent_files: Vec::new(),
+            show_tips: true,
+            next_tip_index: 0,
         };
 
         // Serialization should not fail
