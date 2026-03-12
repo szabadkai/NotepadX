@@ -50,6 +50,7 @@ pub enum CommandId {
     ChangeEncoding,
     ChangeLineEnding,
     EnableLargeFileEdit,
+    SwitchTab,
 }
 
 /// Get all available commands
@@ -199,6 +200,11 @@ pub fn all_commands() -> Vec<Command> {
             name: "Large File: Enable Edit Mode",
             shortcut: "Cmd+Shift+E",
             id: CommandId::EnableLargeFileEdit,
+        },
+        Command {
+            name: "Switch Tab",
+            shortcut: "Cmd+T",
+            id: CommandId::SwitchTab,
         },
     ]
 }

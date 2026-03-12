@@ -602,10 +602,11 @@ impl App {
         // Update tab drag indicator for rendering
         if let Some(ref drag) = self.tab_drag {
             if drag.is_dragging {
-                // Compute the insertion indicator x position
+                // Compute the insertion indicator x position (in buffer space)
+                let scroll = renderer.tab_scroll_offset;
                 let mut indicator_x = 0.0f32;
                 for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
-                    if drag.current_x < tx + tw / 2.0 {
+                    if drag.current_x + scroll < tx + tw / 2.0 {
                         indicator_x = tx;
                         break;
                     }
@@ -699,43 +700,85 @@ impl App {
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
             self.suppress_drag = true;
-            if let Some(renderer) = &self.renderer {
-                let click_x = x as f32;
-                for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
-                    if click_x >= tx && click_x < tx + tw {
-                        // Check if click is on the close button (last ~24px of tab, larger target)
-                        let close_x = tx + tw - 24.0;
-                        if click_x >= close_x && self.editor.buffers.len() > 1 {
-                            // Check for unsaved changes before closing
-                            let can_close = if self.editor.buffers[i].dirty {
-                                let name = self.editor.buffers[i].display_name();
-                                rfd::MessageDialog::new()
-                                    .set_title("Unsaved Changes")
-                                    .set_description(format!(
-                                        "\"{}\" has unsaved changes. Close without saving?",
-                                        name
-                                    ))
-                                    .set_buttons(rfd::MessageButtons::YesNo)
-                                    .show()
-                                    == rfd::MessageDialogResult::Yes
-                            } else {
-                                true
-                            };
-                            if can_close {
-                                self.editor.close_tab(i);
-                            }
+            let click_x = x as f32;
+
+            // Extract scroll/overflow state before any mutable borrow
+            let (tab_scroll, tab_overflow, tab_scroll_max) = self
+                .renderer
+                .as_ref()
+                .map(|r| (r.tab_scroll_offset, r.tab_overflow, r.tab_scroll_max))
+                .unwrap_or((0.0, false, 0.0));
+            let win_w_log = self.logical_window_size().0 as f32;
+
+            // ⌄ All Tabs button (far right, only when overflow)
+            if tab_overflow && click_x >= win_w_log - renderer::ALL_TABS_BTN_WIDTH {
+                self.overlay.all_tabs_count = self.editor.buffers.len();
+                self.overlay.open(ActiveOverlay::AllTabs);
+                self.needs_redraw = true;
+                return;
+            }
+            // ‹ left scroll arrow
+            if tab_overflow && click_x < renderer::TAB_ARROW_WIDTH {
+                if let Some(r) = &mut self.renderer {
+                    r.tab_scroll_offset = (tab_scroll - renderer::TAB_SCROLL_STEP).max(0.0);
+                }
+                self.needs_redraw = true;
+                return;
+            }
+            // › right scroll arrow
+            let right_arr_x = win_w_log - renderer::ALL_TABS_BTN_WIDTH - renderer::TAB_ARROW_WIDTH;
+            if tab_overflow && click_x >= right_arr_x && tab_scroll < tab_scroll_max - 0.5 {
+                if let Some(r) = &mut self.renderer {
+                    r.tab_scroll_offset = (tab_scroll + renderer::TAB_SCROLL_STEP).min(tab_scroll_max);
+                }
+                self.needs_redraw = true;
+                return;
+            }
+
+            // Normal tab hit-test — compare against buffer-space positions
+            let tab_positions: Vec<(f32, f32)> = self
+                .renderer
+                .as_ref()
+                .map(|r| r.tab_positions.clone())
+                .unwrap_or_default();
+            let content_x = click_x + tab_scroll; // convert screen → buffer space
+            for (i, (tx, tw)) in tab_positions.iter().enumerate() {
+                if content_x >= *tx && content_x < tx + tw {
+                    // Check if click is on the close button (last ~24px of tab, larger target)
+                    let close_x = tx + tw - 24.0;
+                    if content_x >= close_x && self.editor.buffers.len() > 1 {
+                        // Check for unsaved changes before closing
+                        let can_close = if self.editor.buffers[i].dirty {
+                            let name = self.editor.buffers[i].display_name();
+                            rfd::MessageDialog::new()
+                                .set_title("Unsaved Changes")
+                                .set_description(format!(
+                                    "\"{}\" has unsaved changes. Close without saving?",
+                                    name
+                                ))
+                                .set_buttons(rfd::MessageButtons::YesNo)
+                                .show()
+                                == rfd::MessageDialogResult::Yes
                         } else {
-                            // Start potential tab drag (resolved on mouse release)
-                            self.tab_drag = Some(TabDrag {
-                                from: i,
-                                start_x: click_x,
-                                current_x: click_x,
-                                is_dragging: false,
-                            });
-                            self.editor.active_buffer = i;
+                            true
+                        };
+                        if can_close {
+                            self.editor.close_tab(i);
                         }
-                        break;
+                    } else {
+                        // Start potential tab drag (resolved on mouse release)
+                        self.tab_drag = Some(TabDrag {
+                            from: i,
+                            start_x: click_x,
+                            current_x: click_x,
+                            is_dragging: false,
+                        });
+                        self.editor.active_buffer = i;
+                        if let Some(r) = &mut self.renderer {
+                            r.scroll_active_tab_into_view(i);
+                        }
                     }
+                    break;
                 }
             }
         }
@@ -1448,6 +1491,10 @@ impl App {
                 self.editor.active_mut().wrap_enabled = self.config.line_wrap;
                 self.persist_session_now();
             }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "t" => {
+                self.overlay.all_tabs_count = self.editor.buffers.len();
+                self.overlay.open(ActiveOverlay::AllTabs);
+            }
             Key::Character(c) if cmd_or_ctrl && c.as_str() == "w" => {
                 self.close_active_tab_with_confirm();
             }
@@ -1813,6 +1860,14 @@ impl App {
                     if self.overlay.picker_selected + 1 < count {
                         self.overlay.picker_selected += 1;
                     }
+                } else if self.overlay.active == ActiveOverlay::AllTabs {
+                    let query = self.overlay.input.to_lowercase();
+                    let count = self.editor.buffers.iter()
+                        .filter(|b| query.is_empty() || b.display_name().to_lowercase().contains(&query))
+                        .count();
+                    if self.overlay.picker_selected + 1 < count {
+                        self.overlay.picker_selected += 1;
+                    }
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
@@ -1822,6 +1877,10 @@ impl App {
                     self.overlay.find.prev_match();
                     self.jump_to_current_match();
                 } else if self.overlay.active == ActiveOverlay::CommandPalette
+                    && self.overlay.picker_selected > 0
+                {
+                    self.overlay.picker_selected -= 1;
+                } else if self.overlay.active == ActiveOverlay::AllTabs
                     && self.overlay.picker_selected > 0
                 {
                     self.overlay.picker_selected -= 1;
@@ -1919,7 +1978,7 @@ impl App {
                     self.jump_to_current_match();
                 }
             }
-            ActiveOverlay::CommandPalette => {
+            ActiveOverlay::CommandPalette | ActiveOverlay::AllTabs => {
                 self.overlay.picker_selected = 0;
             }
             _ => {}
@@ -1994,6 +2053,31 @@ impl App {
                 } else {
                     self.overlay.close();
                 }
+            }
+            ActiveOverlay::AllTabs => {
+                let query_lower = self.overlay.input.to_lowercase();
+                let matching: Vec<usize> = self
+                    .editor
+                    .buffers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, buf)| {
+                        query_lower.is_empty()
+                            || buf.display_name().to_lowercase().contains(&query_lower)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let sel = self
+                    .overlay
+                    .picker_selected
+                    .min(matching.len().saturating_sub(1));
+                if let Some(&tab_idx) = matching.get(sel) {
+                    self.editor.active_buffer = tab_idx;
+                    if let Some(r) = &mut self.renderer {
+                        r.scroll_active_tab_into_view(tab_idx);
+                    }
+                }
+                self.overlay.close();
             }
             ActiveOverlay::None => {}
             ActiveOverlay::Help => {
@@ -2110,6 +2194,10 @@ impl App {
                 {
                     self.editor.active_mut().enable_large_file_edit_mode();
                 }
+            }
+            CommandId::SwitchTab => {
+                self.overlay.all_tabs_count = self.editor.buffers.len();
+                self.overlay.open(ActiveOverlay::AllTabs);
             }
         }
         self.needs_redraw = true;
@@ -3110,10 +3198,11 @@ impl ApplicationHandler for App {
                             if drag.is_dragging {
                                 // Find target tab index based on current x
                                 if let Some(renderer) = &self.renderer {
+                                    let scroll = renderer.tab_scroll_offset;
                                     let mut target = renderer.tab_positions.len().saturating_sub(1);
                                     for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate()
                                     {
-                                        if drag.current_x < tx + tw / 2.0 {
+                                        if drag.current_x + scroll < tx + tw / 2.0 {
                                             target = i;
                                             break;
                                         }
@@ -3134,6 +3223,39 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // If the cursor is over the tab bar, scroll the tab strip instead of the editor
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
+                let mouse_log_y = self.mouse_pos.1 as f32 / scale;
+                if mouse_log_y < renderer::TAB_BAR_HEIGHT {
+                    let (tab_scroll, tab_scroll_max) = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| (r.tab_scroll_offset, r.tab_scroll_max))
+                        .unwrap_or((0.0, 0.0));
+                    let dx = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => {
+                            let h = if x.abs() > f32::EPSILON { x } else { -y };
+                            h * renderer::TAB_SCROLL_STEP
+                        }
+                        MouseScrollDelta::PixelDelta(pos) => {
+                            if pos.x.abs() > pos.y.abs() {
+                                pos.x as f32
+                            } else {
+                                -pos.y as f32
+                            }
+                        }
+                    };
+                    if let Some(r) = &mut self.renderer {
+                        r.tab_scroll_offset = (tab_scroll + dx).clamp(0.0, tab_scroll_max);
+                    }
+                    self.needs_redraw = true;
+                    return;
+                }
+
                 let visible_lines = self
                     .renderer
                     .as_ref()
@@ -3141,11 +3263,6 @@ impl ApplicationHandler for App {
                     .unwrap_or(1);
                 let char_width = self.config.font_size * 0.6;
                 let wrap_width = if self.editor.active().wrap_enabled {
-                    let scale = self
-                        .window
-                        .as_ref()
-                        .map(|w| w.scale_factor() as f32)
-                        .unwrap_or(1.0);
                     let win_width = self
                         .window
                         .as_ref()

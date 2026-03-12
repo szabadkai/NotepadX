@@ -256,6 +256,7 @@ pub enum ActiveOverlay {
     LanguagePicker,
     EncodingPicker,
     LineEndingPicker,
+    AllTabs,
 }
 
 /// State for all overlays
@@ -282,6 +283,9 @@ pub struct OverlayState {
 
     // Recently-used command IDs for palette ordering (session-scoped)
     pub recent_commands: Vec<palette::CommandId>,
+
+    // Number of tabs when AllTabs overlay was opened (used for panel height)
+    pub all_tabs_count: usize,
 }
 
 impl Default for OverlayState {
@@ -305,6 +309,7 @@ impl OverlayState {
             results_panel: results_panel::ResultsPanel::new(),
             picker_selected: 0,
             recent_commands: Vec::new(),
+            all_tabs_count: 0,
         }
     }
 

@@ -26,6 +26,10 @@ pub const TAB_FONT_SIZE: f32 = 13.0;
 pub const TAB_CHAR_WIDTH: f32 = TAB_FONT_SIZE * 0.6;
 pub const TAB_PADDING_H: f32 = 16.0; // horizontal padding per side inside each tab
 pub const TAB_MAX_LABEL_CHARS: usize = 30; // max visible characters before ellipsis
+pub const TAB_MIN_LABEL_CHARS: usize = 10; // floor so tabs stay legible even when crowded
+pub const ALL_TABS_BTN_WIDTH: f32 = 32.0; // ⌄ all-tabs button at right edge of tab bar
+pub const TAB_ARROW_WIDTH: f32 = 24.0;    // width of ‹/› scroll arrow buttons
+pub const TAB_SCROLL_STEP: f32 = 150.0;   // pixels scrolled per arrow click or wheel line
 pub const STATUS_BAR_HEIGHT: f32 = 28.0;
 pub const SCROLLBAR_WIDTH: f32 = 10.0;
 pub const RESULTS_PANEL_ROW_HEIGHT: f32 = 20.0;
@@ -245,6 +249,9 @@ fn modal_overlay_geometry(
         }
         crate::overlay::ActiveOverlay::EncodingPicker => 180.0 * scale_factor,
         crate::overlay::ActiveOverlay::LineEndingPicker => 100.0 * scale_factor,
+        crate::overlay::ActiveOverlay::AllTabs => {
+            picker_panel_height(overlay.all_tabs_count.min(PICKER_MAX_VISIBLE_ITEMS)) * scale_factor
+        }
         _ => 40.0 * scale_factor,
     };
 
@@ -469,6 +476,23 @@ fn set_overlay_text_buffer(font_system: &mut FontSystem, buffer: &mut GlyphonBuf
     buffer.shape_until_scroll(font_system, false);
 }
 
+fn set_tab_control_buffer(
+    font_system: &mut FontSystem,
+    buffer: &mut GlyphonBuffer,
+    text: &str,
+    color: glyphon::Color,
+) {
+    buffer.set_text(
+        font_system,
+        text,
+        Attrs::new()
+            .family(Family::Name("JetBrains Mono"))
+            .color(color),
+        Shaping::Advanced,
+    );
+    buffer.shape_until_scroll(font_system, false);
+}
+
 /// Persistent text buffers for glyphon rendering
 pub struct Renderer {
     pub font_system: FontSystem,
@@ -487,6 +511,12 @@ pub struct Renderer {
     // Persistent glyphon buffers
     pub tab_bar_buffer: GlyphonBuffer,
     pub tab_positions: Vec<(f32, f32)>, // (x, width) for each tab in scaled pixels
+    pub tab_scroll_offset: f32,          // current horizontal scroll of the tab strip (logical px)
+    pub tab_scroll_max: f32,             // maximum scroll value (0 when no overflow)
+    pub tab_overflow: bool,              // true when tabs don't fit and scrolling is active
+    pub tab_arrow_left_buffer: GlyphonBuffer,
+    pub tab_arrow_right_buffer: GlyphonBuffer,
+    pub tab_all_btn_buffer: GlyphonBuffer,
     pub gutter_buffer: GlyphonBuffer,
     pub editor_buffer: GlyphonBuffer,
     pub status_buffer: GlyphonBuffer,
@@ -563,6 +593,9 @@ impl Renderer {
         let shape_renderer = ShapeRenderer::new(device, format);
 
         let tab_bar_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(13.0, 16.0));
+        let tab_arrow_left_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(13.0, 16.0));
+        let tab_arrow_right_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(13.0, 16.0));
+        let tab_all_btn_buffer = GlyphonBuffer::new(&mut font_system, Metrics::new(13.0, 16.0));
         let gutter_buffer =
             GlyphonBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         let editor_buffer =
@@ -619,6 +652,12 @@ impl Renderer {
             queue,
             tab_bar_buffer,
             tab_positions: Vec::new(),
+            tab_scroll_offset: 0.0,
+            tab_scroll_max: 0.0,
+            tab_overflow: false,
+            tab_arrow_left_buffer,
+            tab_arrow_right_buffer,
+            tab_all_btn_buffer,
             gutter_buffer,
             editor_buffer,
             status_buffer,
@@ -708,6 +747,29 @@ impl Renderer {
             }
         }
         None
+    }
+
+    /// Adjust `tab_scroll_offset` so the tab at `active_idx` is fully visible.
+    /// Call this after changing `editor.active_buffer`.
+    pub fn scroll_active_tab_into_view(&mut self, active_idx: usize) {
+        if !self.tab_overflow {
+            return;
+        }
+        let Some(&(tx, tw)) = self.tab_positions.get(active_idx) else {
+            return;
+        };
+        let win_w = self.width as f32 / self.scale_factor;
+        let tab_area_width = win_w - ALL_TABS_BTN_WIDTH;
+        // Scroll left so the tab's left edge is visible
+        if tx < self.tab_scroll_offset {
+            self.tab_scroll_offset = tx;
+        }
+        // Scroll right so the tab's right edge is visible
+        let tab_right = tx + tw;
+        if tab_right > self.tab_scroll_offset + tab_area_width {
+            self.tab_scroll_offset = tab_right - tab_area_width;
+        }
+        self.tab_scroll_offset = self.tab_scroll_offset.clamp(0.0, self.tab_scroll_max);
     }
 
     pub fn scrollbar_thumb(
@@ -837,6 +899,14 @@ impl Renderer {
         let base_tab_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
         let show_close = editor.buffers.len() > 1;
         let tab_count = editor.buffers.len();
+
+        let tab_area_width = width - ALL_TABS_BTN_WIDTH;
+        let total_gap_px  = tab_gap * tab_count.saturating_sub(1) as f32;
+        let per_tab_budget = (tab_area_width - total_gap_px) / tab_count.max(1) as f32;
+        let dyn_max_label_chars = (((per_tab_budget - tab_pad * 2.0) / tab_char_w).floor() as usize)
+            .max(TAB_MIN_LABEL_CHARS)
+            .min(TAB_MAX_LABEL_CHARS);
+
         for (i, buf) in editor.buffers.iter().enumerate() {
             let name = buf.display_name();
             let dirty_marker = if buf.dirty { "● " } else { "" };
@@ -844,7 +914,7 @@ impl Renderer {
             // Truncate the file name if the full label would exceed the max
             let prefix_len = dirty_marker.chars().count();
             let suffix_len = close_marker.chars().count();
-            let max_name_chars = TAB_MAX_LABEL_CHARS.saturating_sub(prefix_len + suffix_len);
+            let max_name_chars = dyn_max_label_chars.saturating_sub(prefix_len + suffix_len);
             let truncated_name: String = if name.chars().count() > max_name_chars {
                 let trimmed: String = name
                     .chars()
@@ -895,6 +965,31 @@ impl Renderer {
         );
         self.tab_bar_buffer
             .shape_until_scroll(&mut self.font_system, false);
+
+        // Compute tab bar overflow / scroll state
+        let tab_content_width = tab_x; // total width of all tab text (logical px)
+        // tab_area_width already computed above before the loop
+        self.tab_overflow = tab_content_width > tab_area_width;
+        self.tab_scroll_max = if self.tab_overflow {
+            (tab_content_width - tab_area_width).max(0.0)
+        } else {
+            0.0
+        };
+        // Clamp (handles tab close reducing total width below scroll offset)
+        self.tab_scroll_offset = self.tab_scroll_offset.clamp(0.0, self.tab_scroll_max);
+
+        // Update control button text buffers
+        let active_col = theme.tab_active_fg.to_glyphon();
+        let inactive_col = theme.tab_inactive_fg.to_glyphon();
+        let left_col = if self.tab_scroll_offset > 0.5 { active_col } else { inactive_col };
+        let right_col = if self.tab_overflow && self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+            active_col
+        } else {
+            inactive_col
+        };
+        set_tab_control_buffer(&mut self.font_system, &mut self.tab_arrow_left_buffer, "\u{2039}", left_col);
+        set_tab_control_buffer(&mut self.font_system, &mut self.tab_arrow_right_buffer, "\u{203a}", right_col);
+        set_tab_control_buffer(&mut self.font_system, &mut self.tab_all_btn_buffer, "\u{2304}", active_col);
 
         // --- Gutter (line numbers) ---
         let gutter_w = self.effective_gutter_width;
@@ -1307,6 +1402,9 @@ impl Renderer {
                     picker_panel_height(PICKER_MAX_VISIBLE_ITEMS)
                 }
                 crate::overlay::ActiveOverlay::LineEndingPicker => 100.0,
+                crate::overlay::ActiveOverlay::AllTabs => {
+                    picker_panel_height(overlay.all_tabs_count.min(PICKER_MAX_VISIBLE_ITEMS))
+                }
                 _ => 32.0,
             };
 
@@ -1707,6 +1805,61 @@ impl Renderer {
                     }
                     text
                 }
+                crate::overlay::ActiveOverlay::AllTabs => {
+                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                    let mut text = format!("> {}│{}\n", before, after);
+                    let query_lower = overlay.input.to_lowercase();
+                    // Collect all tab entries
+                    let items: Vec<(usize, String, bool)> = editor
+                        .buffers
+                        .iter()
+                        .enumerate()
+                        .map(|(i, buf)| (i, buf.display_name(), buf.dirty))
+                        .collect();
+                    let filtered: Vec<&(usize, String, bool)> = if query_lower.is_empty() {
+                        items.iter().collect()
+                    } else {
+                        items
+                            .iter()
+                            .filter(|(_, name, _)| name.to_lowercase().contains(&query_lower))
+                            .collect()
+                    };
+                    let selected = overlay
+                        .picker_selected
+                        .min(filtered.len().saturating_sub(1));
+                    let max_visible = picker_visible_items(filtered.len());
+                    let scroll_offset = if selected >= max_visible {
+                        selected - max_visible + 1
+                    } else {
+                        0
+                    };
+                    // Max chars for names: panel ≤ 600px, ~7.8px/char, 12px padding
+                    // each side, 6-char prefix ("▸ ● ") → ~70 chars usable; cap at 55
+                    // so layout stays clean even at smaller window widths.
+                    const MAX_NAME_CHARS: usize = 55;
+                    for (row_idx, (buf_idx, name, dirty)) in filtered
+                        .iter()
+                        .skip(scroll_offset)
+                        .take(max_visible)
+                        .enumerate()
+                    {
+                        let idx = scroll_offset + row_idx;
+                        let is_active = *buf_idx == editor.active_buffer;
+                        // ● marks the active tab; ○ marks dirty but inactive
+                        let status = if is_active { "● " } else if *dirty { "○ " } else { "  " };
+                        let sel = if idx == selected { "▸ " } else { "  " };
+                        let display_name: std::borrow::Cow<str> =
+                            if name.chars().count() > MAX_NAME_CHARS {
+                                let truncated: String =
+                                    name.chars().take(MAX_NAME_CHARS - 1).collect();
+                                format!("{}…", truncated).into()
+                            } else {
+                                name.as_str().into()
+                            };
+                        text.push_str(&format!("{}{}{}\n", sel, status, display_name));
+                    }
+                    text
+                }
                 crate::overlay::ActiveOverlay::None => String::new(),
             };
 
@@ -1911,9 +2064,39 @@ impl Renderer {
         ));
 
         // 2. Per-tab backgrounds from precomputed tab_positions
+        // Compute the physical-pixel strip that tabs are allowed to paint into.
+        // Left edge grows by TAB_ARROW_WIDTH when the ‹ arrow is visible;
+        // right edge shrinks by TAB_ARROW_WIDTH when the › arrow is visible,
+        // and always shrinks by ALL_TABS_BTN_WIDTH when overflow is active.
+        let tab_clip_left_px = if self.tab_overflow && self.tab_scroll_offset > 0.5 {
+            TAB_ARROW_WIDTH * s
+        } else {
+            0.0
+        };
+        let tab_clip_right_px = if self.tab_overflow {
+            let right_arrow_w = if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+                TAB_ARROW_WIDTH
+            } else {
+                0.0
+            };
+            width - (ALL_TABS_BTN_WIDTH + right_arrow_w) * s
+        } else {
+            width
+        };
         for (i, &(tx, tw)) in self.tab_positions.iter().enumerate() {
-            let tx_s = tx * s;
+            let tx_s = (tx - self.tab_scroll_offset) * s;
             let tw_s = tw * s;
+
+            // Skip tabs entirely outside the visible tab strip.
+            if tx_s + tw_s <= tab_clip_left_px || tx_s >= tab_clip_right_px {
+                continue;
+            }
+
+            // Clamp tab rect to the visible clip boundaries so partially-
+            // overlapping tabs don't bleed into arrow/button zones.
+            let vis_left = tx_s.max(tab_clip_left_px);
+            let vis_right = (tx_s + tw_s).min(tab_clip_right_px);
+            let vis_w = vis_right - vis_left;
 
             // Draw individual tab background
             let is_active = i == editor.active_buffer;
@@ -1925,9 +2108,9 @@ impl Renderer {
             // Active tab: rounded top corners (6px), inactive: 4px
             let tab_radius = if is_active { 6.0 * s } else { 4.0 * s };
             base_rects.push(Rect::rounded(
-                tx_s,
+                vis_left,
                 0.0,
-                tw_s,
+                vis_w,
                 tab_bar_height,
                 [tab_bg.r, tab_bg.g, tab_bg.b, tab_bg.a],
                 tab_radius,
@@ -1937,9 +2120,9 @@ impl Renderer {
             if is_active {
                 let accent = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
                 base_rects.push(Rect::flat(
-                    tx_s,
+                    vis_left,
                     tab_bar_height - 2.0 * s,
-                    tw_s,
+                    vis_w,
                     2.0 * s,
                     accent,
                 ));
@@ -1948,7 +2131,7 @@ impl Renderer {
 
         // 2a. Tab drag insertion indicator
         if let Some(indicator_x) = self.tab_drag_indicator_x {
-            let ix = indicator_x * s;
+            let ix = (indicator_x - self.tab_scroll_offset) * s;
             let accent = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
             base_rects.push(Rect::flat(
                 ix - 1.0 * s,
@@ -1959,7 +2142,43 @@ impl Renderer {
             ));
         }
 
-        // 2b. Gutter Background
+        // 2b. Tab bar control buttons (arrows + ⌄ all-tabs) — drawn on top of tab backgrounds
+        if self.tab_overflow {
+            let btn_bg = [theme.tab_bar_bg.r, theme.tab_bar_bg.g, theme.tab_bar_bg.b, theme.tab_bar_bg.a];
+            let sep_col = [theme.tab_inactive_fg.r, theme.tab_inactive_fg.g, theme.tab_inactive_fg.b, 0.35];
+            // ⌄ All-tabs button background
+            base_rects.push(Rect::flat(
+                width - ALL_TABS_BTN_WIDTH * s,
+                0.0,
+                ALL_TABS_BTN_WIDTH * s,
+                tab_bar_height,
+                btn_bg,
+            ));
+            // 1px left-border separator for ⌄ button
+            base_rects.push(Rect::flat(
+                width - ALL_TABS_BTN_WIDTH * s,
+                4.0 * s,
+                1.0 * s,
+                tab_bar_height - 8.0 * s,
+                sep_col,
+            ));
+            // ‹ left arrow (shown when scrolled right)
+            if self.tab_scroll_offset > 0.5 {
+                base_rects.push(Rect::flat(0.0, 0.0, TAB_ARROW_WIDTH * s, tab_bar_height, btn_bg));
+            }
+            // › right arrow (shown when more tabs are off-screen to the right)
+            if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+                base_rects.push(Rect::flat(
+                    width - ALL_TABS_BTN_WIDTH * s - TAB_ARROW_WIDTH * s,
+                    0.0,
+                    TAB_ARROW_WIDTH * s,
+                    tab_bar_height,
+                    btn_bg,
+                ));
+            }
+        }
+
+        // 2c. Gutter Background
         let editor_height_px =
             height - tab_bar_height - status_bar_height - results_panel_height_px;
         base_rects.push(Rect::flat(
@@ -2745,7 +2964,8 @@ impl Renderer {
                 }
                 crate::overlay::ActiveOverlay::CommandPalette
                 | crate::overlay::ActiveOverlay::LanguagePicker
-                | crate::overlay::ActiveOverlay::EncodingPicker => {
+                | crate::overlay::ActiveOverlay::EncodingPicker
+                | crate::overlay::ActiveOverlay::AllTabs => {
                     let field_x = overlay_left + 6.0 * s;
                     let field_y = overlay_top_panel + 4.0 * s;
                     let field_w = overlay_width - 12.0 * s;
@@ -2786,20 +3006,90 @@ impl Renderer {
 
         // Tab bar text - single buffer with padding-based alignment
         let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0; // vertically center (line_height 16)
+        // Tab text is clipped to the strip between any visible arrow buttons,
+        // so labels never bleed into the ‹ / › / ⌄ zones.
+        let tab_text_clip_left = if self.tab_overflow && self.tab_scroll_offset > 0.5 {
+            (TAB_ARROW_WIDTH * s) as i32
+        } else {
+            0
+        };
+        let tab_text_clip_right = if self.tab_overflow {
+            let right_arrow_w = if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+                TAB_ARROW_WIDTH
+            } else {
+                0.0
+            };
+            (width - (ALL_TABS_BTN_WIDTH + right_arrow_w) * s) as i32
+        } else {
+            width as i32
+        };
         base_text_areas.push(TextArea {
             buffer: &self.tab_bar_buffer,
-            left: 0.0,
+            left: -(self.tab_scroll_offset * s),
             top: tab_text_top,
             scale: s,
             bounds: TextBounds {
-                left: 0,
+                left: tab_text_clip_left,
                 top: 0,
-                right: width as i32,
+                right: tab_text_clip_right,
                 bottom: tab_bar_height as i32,
             },
             default_color: theme.tab_active_fg.to_glyphon(),
             custom_glyphs: &[],
         });
+        // Tab control button text (arrows + ⌄)
+        if self.tab_overflow {
+            // ‹ left arrow
+            if self.tab_scroll_offset > 0.5 {
+                base_text_areas.push(TextArea {
+                    buffer: &self.tab_arrow_left_buffer,
+                    left: 7.0 * s,
+                    top: tab_text_top,
+                    scale: s,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: (TAB_ARROW_WIDTH * s) as i32,
+                        bottom: tab_bar_height as i32,
+                    },
+                    default_color: theme.tab_active_fg.to_glyphon(),
+                    custom_glyphs: &[],
+                });
+            }
+            // › right arrow
+            if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+                let rx_left = width - ALL_TABS_BTN_WIDTH * s - TAB_ARROW_WIDTH * s;
+                base_text_areas.push(TextArea {
+                    buffer: &self.tab_arrow_right_buffer,
+                    left: rx_left + 7.0 * s,
+                    top: tab_text_top,
+                    scale: s,
+                    bounds: TextBounds {
+                        left: rx_left as i32,
+                        top: 0,
+                        right: (width - ALL_TABS_BTN_WIDTH * s) as i32,
+                        bottom: tab_bar_height as i32,
+                    },
+                    default_color: theme.tab_active_fg.to_glyphon(),
+                    custom_glyphs: &[],
+                });
+            }
+            // ⌄ all-tabs button
+            base_text_areas.push(TextArea {
+                buffer: &self.tab_all_btn_buffer,
+                left: (width - ALL_TABS_BTN_WIDTH * s) + 9.0 * s,
+                top: tab_text_top,
+                scale: s,
+                bounds: TextBounds {
+                    left: (width - ALL_TABS_BTN_WIDTH * s) as i32,
+                    top: 0,
+                    right: width as i32,
+                    bottom: tab_bar_height as i32,
+                },
+                default_color: theme.tab_active_fg.to_glyphon(),
+                custom_glyphs: &[],
+            });
+        }
 
         // Gutter text
         base_text_areas.push(TextArea {
