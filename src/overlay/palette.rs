@@ -212,6 +212,10 @@ pub fn all_commands() -> Vec<Command> {
 /// Fuzzy-match score: higher is better, 0 means no match.
 /// Bonuses for consecutive matches, word-boundary hits, and start-of-string.
 fn fuzzy_score(name: &str, query: &str) -> i32 {
+    const CONSECUTIVE_BONUS: i32 = 5;
+    const START_BONUS: i32 = 10;
+    const WORD_BOUNDARY_BONUS: i32 = 8;
+
     let name_bytes: Vec<char> = name.to_lowercase().chars().collect();
     let query_bytes: Vec<char> = query.to_lowercase().chars().collect();
 
@@ -229,11 +233,11 @@ fn fuzzy_score(name: &str, query: &str) -> i32 {
             score += 1;
             // Bonus: consecutive match
             if prev_matched {
-                score += 5;
+                score += CONSECUTIVE_BONUS;
             }
             // Bonus: match at start of string
             if ni == 0 {
-                score += 10;
+                score += START_BONUS;
             }
             // Bonus: match at word boundary (after space, or uppercase in original)
             if ni > 0 {
@@ -244,7 +248,7 @@ fn fuzzy_score(name: &str, query: &str) -> i32 {
                     || prev_char == '-'
                     || (curr_char.is_uppercase() && prev_char.is_lowercase())
                 {
-                    score += 8;
+                    score += WORD_BOUNDARY_BONUS;
                 }
             }
             if first_match {

@@ -206,6 +206,11 @@ struct App {
 }
 
 impl App {
+    const SCROLL_ANIM_THRESHOLD: f64 = 0.1;
+    const DOUBLE_CLICK_TIME_MS: u128 = 400;
+    const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
+    const DRAG_START_THRESHOLD: f32 = 4.0;
+
     fn paste_from_clipboard(&mut self) {
         let text = self
             .clipboard
@@ -509,7 +514,9 @@ impl App {
             (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
         let scroll_diff_x =
             (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
-        if scroll_diff_y > 0.1 || scroll_diff_x > 0.1 {
+        if scroll_diff_y > Self::SCROLL_ANIM_THRESHOLD
+            || scroll_diff_x > Self::SCROLL_ANIM_THRESHOLD as f32
+        {
             self.needs_redraw = true;
         }
 
@@ -685,7 +692,7 @@ impl App {
         let x = x / scale;
         let y = y / scale;
 
-        use renderer::{LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+        use renderer::TAB_BAR_HEIGHT;
         let gutter_w = renderer::effective_gutter_width(self.config.show_line_numbers);
 
         let (win_w, win_h) = self.logical_window_size();
@@ -700,88 +707,7 @@ impl App {
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
             self.suppress_drag = true;
-            let click_x = x as f32;
-
-            // Extract scroll/overflow state before any mutable borrow
-            let (tab_scroll, tab_overflow, tab_scroll_max) = self
-                .renderer
-                .as_ref()
-                .map(|r| (r.tab_scroll_offset, r.tab_overflow, r.tab_scroll_max))
-                .unwrap_or((0.0, false, 0.0));
-            let win_w_log = self.logical_window_size().0 as f32;
-
-            // ⌄ All Tabs button (far right, only when overflow)
-            if tab_overflow && click_x >= win_w_log - renderer::ALL_TABS_BTN_WIDTH {
-                self.overlay.all_tabs_count = self.editor.buffers.len();
-                self.overlay.open(ActiveOverlay::AllTabs);
-                self.needs_redraw = true;
-                return;
-            }
-            // ‹ left scroll arrow
-            if tab_overflow && click_x < renderer::TAB_ARROW_WIDTH {
-                if let Some(r) = &mut self.renderer {
-                    r.tab_scroll_offset = (tab_scroll - renderer::TAB_SCROLL_STEP).max(0.0);
-                }
-                self.needs_redraw = true;
-                return;
-            }
-            // › right scroll arrow
-            let right_arr_x = win_w_log - renderer::ALL_TABS_BTN_WIDTH - renderer::TAB_ARROW_WIDTH;
-            if tab_overflow && click_x >= right_arr_x && tab_scroll < tab_scroll_max - 0.5 {
-                if let Some(r) = &mut self.renderer {
-                    r.tab_scroll_offset =
-                        (tab_scroll + renderer::TAB_SCROLL_STEP).min(tab_scroll_max);
-                }
-                self.needs_redraw = true;
-                return;
-            }
-
-            // Normal tab hit-test — compare against buffer-space positions
-            let tab_positions: Vec<(f32, f32)> = self
-                .renderer
-                .as_ref()
-                .map(|r| r.tab_positions.clone())
-                .unwrap_or_default();
-            let content_x = click_x + tab_scroll; // convert screen → buffer space
-            for (i, (tx, tw)) in tab_positions.iter().enumerate() {
-                if content_x >= *tx && content_x < tx + tw {
-                    // Check if click is on the close button (× sits near the right edge)
-                    let close_x = tx + tw - 20.0;
-                    if content_x >= close_x && self.editor.buffers.len() > 1 {
-                        // Check for unsaved changes before closing
-                        let can_close = if self.editor.buffers[i].dirty {
-                            let name = self.editor.buffers[i].display_name();
-                            rfd::MessageDialog::new()
-                                .set_title("Unsaved Changes")
-                                .set_description(format!(
-                                    "\"{}\" has unsaved changes. Close without saving?",
-                                    name
-                                ))
-                                .set_buttons(rfd::MessageButtons::YesNo)
-                                .show()
-                                == rfd::MessageDialogResult::Yes
-                        } else {
-                            true
-                        };
-                        if can_close {
-                            self.editor.close_tab(i);
-                        }
-                    } else {
-                        // Start potential tab drag (resolved on mouse release)
-                        self.tab_drag = Some(TabDrag {
-                            from: i,
-                            start_x: click_x,
-                            current_x: click_x,
-                            is_dragging: false,
-                        });
-                        self.editor.active_buffer = i;
-                        if let Some(r) = &mut self.renderer {
-                            r.scroll_active_tab_into_view(i);
-                        }
-                    }
-                    break;
-                }
-            }
+            self.handle_tab_bar_click(x as f32);
         }
         // Snackbar (tip-of-the-day) — intercept clicks on the floating card so
         // they never reach the editor or status bar underneath.
@@ -796,48 +722,7 @@ impl App {
                 })
             })
         {
-            if let Some(renderer) = &self.renderer {
-                let s = renderer.scale_factor;
-                let px = x as f32 * s;
-                let py = y as f32 * s;
-
-                // Check "Don't show again" link
-                if let Some((lx, ly, lw, lh)) = renderer.snackbar_dismiss_forever_bounds {
-                    if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
-                        self.snackbar_tip = None;
-                        self.config.show_tips = false;
-                        self.config.save();
-                        self.suppress_drag = true;
-                        self.needs_redraw = true;
-                        return;
-                    }
-                }
-
-                // Check [×] Dismiss button
-                if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
-                    if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
-                        self.snackbar_tip = None;
-                        self.suppress_drag = true;
-                        self.needs_redraw = true;
-                        return;
-                    }
-                }
-
-                // Check [>] Next tip button
-                if let Some((nx, ny, nw, nh)) = renderer.snackbar_next_tip_bounds {
-                    if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
-                        let idx = self.config.next_tip_index % TIPS.len();
-                        self.snackbar_tip = Some(TIPS[idx].to_string());
-                        self.config.next_tip_index = (idx + 1) % TIPS.len();
-                        self.config.save();
-                        self.suppress_drag = true;
-                        self.needs_redraw = true;
-                        return;
-                    }
-                }
-            }
-            // Click on card but not on a button — consume it and suppress drag
-            self.suppress_drag = true;
+            self.handle_snackbar_click(x as f32, y as f32);
         }
         // Status Bar
         else if y >= status_top {
@@ -846,79 +731,202 @@ impl App {
         }
         // Editor Area
         else if y >= TAB_BAR_HEIGHT as f64 {
-            if self.try_begin_scrollbar_drag(x as f32, y as f32) {
-                self.needs_redraw = true;
-                return;
-            }
-
-            let shift = self.modifiers.shift_key();
-            let editor_y = (y - TAB_BAR_HEIGHT as f64).max(0.0);
-            let line_height = self.config.font_size * 1.44;
-            let char_width = self.config.font_size * 0.6;
-
-            // Calculate wrap width for line wrapping
-            let wrap_width = if self.editor.active().wrap_enabled {
-                Some(
-                    (self
-                        .renderer
-                        .as_ref()
-                        .map(|r| r.width as f32 / r.scale_factor.max(1.0))
-                        .unwrap_or(800.0)
-                        - (gutter_w + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
-                        .max(100.0),
-                )
-            } else {
-                None
-            };
-
-            let buffer = self.editor.active_mut();
-            let new_pos = buffer.char_at_pos(
-                x as f32,
-                editor_y as f32,
-                gutter_w + LINE_PADDING_LEFT,
-                line_height,
-                char_width,
-                wrap_width,
-            );
-
-            let alt = self.modifiers.alt_key();
-            let cmd = self.modifiers.super_key();
-
-            if alt && shift && click_count == 1 && !buffer.wrap_enabled {
-                buffer.clear_extra_cursors();
-                buffer.set_selection_anchor(None);
-                buffer.set_cursor(new_pos);
-                self.block_drag_anchor = Some(new_pos);
-            } else if (alt || cmd) && !shift && click_count == 1 {
-                // Alt+Click or Cmd+Click: add a new cursor at the clicked position
-                buffer.add_cursor(new_pos);
-                // Suppress drag so the newly added cursor isn't disrupted
-                self.suppress_drag = true;
-                self.block_drag_anchor = None;
-            } else if shift {
-                self.block_drag_anchor = None;
-                if buffer.selection_anchor().is_none() {
-                    buffer.set_selection_anchor(Some(buffer.cursor()));
-                }
-                buffer.set_cursor(new_pos);
-            } else {
-                // Normal click: clear extra cursors and move
-                buffer.clear_extra_cursors();
-                buffer.set_selection_anchor(None);
-                buffer.set_cursor(new_pos);
-                self.block_drag_anchor = None;
-            }
-
-            // Double-click: select word
-            if click_count == 2 {
-                buffer.select_word_at_cursor();
-            }
-            // Triple-click: select entire line
-            if click_count >= 3 {
-                buffer.select_line_at_cursor();
-            }
+            self.handle_editor_area_click(x as f32, y as f32, gutter_w, click_count);
         }
         self.needs_redraw = true;
+    }
+
+    fn handle_tab_bar_click(&mut self, click_x: f32) {
+        let (tab_scroll, tab_overflow, tab_scroll_max) = self
+            .renderer
+            .as_ref()
+            .map(|r| (r.tab_scroll_offset, r.tab_overflow, r.tab_scroll_max))
+            .unwrap_or((0.0, false, 0.0));
+        let win_w_log = self.logical_window_size().0 as f32;
+
+        // ⌄ All Tabs button (far right, only when overflow)
+        if tab_overflow && click_x >= win_w_log - renderer::ALL_TABS_BTN_WIDTH {
+            self.overlay.all_tabs_count = self.editor.buffers.len();
+            self.overlay.open(ActiveOverlay::AllTabs);
+            self.needs_redraw = true;
+            return;
+        }
+        // ‹ left scroll arrow
+        if tab_overflow && click_x < renderer::TAB_ARROW_WIDTH {
+            if let Some(r) = &mut self.renderer {
+                r.tab_scroll_offset = (tab_scroll - renderer::TAB_SCROLL_STEP).max(0.0);
+            }
+            self.needs_redraw = true;
+            return;
+        }
+        // › right scroll arrow
+        let right_arr_x = win_w_log - renderer::ALL_TABS_BTN_WIDTH - renderer::TAB_ARROW_WIDTH;
+        if tab_overflow && click_x >= right_arr_x && tab_scroll < tab_scroll_max - 0.5 {
+            if let Some(r) = &mut self.renderer {
+                r.tab_scroll_offset = (tab_scroll + renderer::TAB_SCROLL_STEP).min(tab_scroll_max);
+            }
+            self.needs_redraw = true;
+            return;
+        }
+
+        // Normal tab hit-test — compare against buffer-space positions
+        let tab_positions: Vec<(f32, f32)> = self
+            .renderer
+            .as_ref()
+            .map(|r| r.tab_positions.clone())
+            .unwrap_or_default();
+        let content_x = click_x + tab_scroll; // convert screen → buffer space
+        for (i, (tx, tw)) in tab_positions.iter().enumerate() {
+            if content_x >= *tx && content_x < tx + tw {
+                let close_x = tx + tw - 20.0;
+                if content_x >= close_x && self.editor.buffers.len() > 1 {
+                    let can_close = if self.editor.buffers[i].dirty {
+                        let name = self.editor.buffers[i].display_name();
+                        rfd::MessageDialog::new()
+                            .set_title("Unsaved Changes")
+                            .set_description(format!(
+                                "\"{}\" has unsaved changes. Close without saving?",
+                                name
+                            ))
+                            .set_buttons(rfd::MessageButtons::YesNo)
+                            .show()
+                            == rfd::MessageDialogResult::Yes
+                    } else {
+                        true
+                    };
+                    if can_close {
+                        self.editor.close_tab(i);
+                    }
+                } else {
+                    self.tab_drag = Some(TabDrag {
+                        from: i,
+                        start_x: click_x,
+                        current_x: click_x,
+                        is_dragging: false,
+                    });
+                    self.editor.active_buffer = i;
+                    if let Some(r) = &mut self.renderer {
+                        r.scroll_active_tab_into_view(i);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    fn handle_snackbar_click(&mut self, x: f32, y: f32) {
+        if let Some(renderer) = &self.renderer {
+            let s = renderer.scale_factor;
+            let px = x * s;
+            let py = y * s;
+
+            // Check "Don't show again" link
+            if let Some((lx, ly, lw, lh)) = renderer.snackbar_dismiss_forever_bounds {
+                if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
+                    self.snackbar_tip = None;
+                    self.config.show_tips = false;
+                    self.config.save();
+                    self.suppress_drag = true;
+                    self.needs_redraw = true;
+                    return;
+                }
+            }
+
+            // Check [×] Dismiss button
+            if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
+                if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
+                    self.snackbar_tip = None;
+                    self.suppress_drag = true;
+                    self.needs_redraw = true;
+                    return;
+                }
+            }
+
+            // Check [>] Next tip button
+            if let Some((nx, ny, nw, nh)) = renderer.snackbar_next_tip_bounds {
+                if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
+                    let idx = self.config.next_tip_index % TIPS.len();
+                    self.snackbar_tip = Some(TIPS[idx].to_string());
+                    self.config.next_tip_index = (idx + 1) % TIPS.len();
+                    self.config.save();
+                    self.suppress_drag = true;
+                    self.needs_redraw = true;
+                    return;
+                }
+            }
+        }
+        // Click on card but not on a button — consume it and suppress drag
+        self.suppress_drag = true;
+    }
+
+    fn handle_editor_area_click(&mut self, x: f32, y: f32, gutter_w: f32, click_count: u8) {
+        use renderer::{LINE_PADDING_LEFT, SCROLLBAR_WIDTH, TAB_BAR_HEIGHT};
+
+        if self.try_begin_scrollbar_drag(x, y) {
+            self.needs_redraw = true;
+            return;
+        }
+
+        let shift = self.modifiers.shift_key();
+        let editor_y = (y - TAB_BAR_HEIGHT as f32).max(0.0);
+        let line_height = self.config.font_size * 1.44;
+        let char_width = self.config.font_size * 0.6;
+
+        let wrap_width = if self.editor.active().wrap_enabled {
+            Some(
+                (self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.width as f32 / r.scale_factor.max(1.0))
+                    .unwrap_or(800.0)
+                    - (gutter_w + LINE_PADDING_LEFT + SCROLLBAR_WIDTH))
+                    .max(100.0),
+            )
+        } else {
+            None
+        };
+
+        let buffer = self.editor.active_mut();
+        let new_pos = buffer.char_at_pos(
+            x,
+            editor_y,
+            gutter_w + LINE_PADDING_LEFT,
+            line_height,
+            char_width,
+            wrap_width,
+        );
+
+        let alt = self.modifiers.alt_key();
+        let cmd = self.modifiers.super_key();
+
+        if alt && shift && click_count == 1 && !buffer.wrap_enabled {
+            buffer.clear_extra_cursors();
+            buffer.set_selection_anchor(None);
+            buffer.set_cursor(new_pos);
+            self.block_drag_anchor = Some(new_pos);
+        } else if (alt || cmd) && !shift && click_count == 1 {
+            buffer.add_cursor(new_pos);
+            self.suppress_drag = true;
+            self.block_drag_anchor = None;
+        } else if shift {
+            self.block_drag_anchor = None;
+            if buffer.selection_anchor().is_none() {
+                buffer.set_selection_anchor(Some(buffer.cursor()));
+            }
+            buffer.set_cursor(new_pos);
+        } else {
+            buffer.clear_extra_cursors();
+            buffer.set_selection_anchor(None);
+            buffer.set_cursor(new_pos);
+            self.block_drag_anchor = None;
+        }
+
+        if click_count == 2 {
+            buffer.select_word_at_cursor();
+        }
+        if click_count >= 3 {
+            buffer.select_line_at_cursor();
+        }
     }
 
     fn handle_status_bar_click(&mut self, x: f32) {
@@ -1357,395 +1365,26 @@ impl App {
         };
         let shift = self.modifiers.shift_key();
 
-        // --- Global shortcuts (work even with overlay open) ---
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                // Close results panel first, then overlay
-                if self.overlay.results_panel.visible {
-                    self.overlay.results_panel.close();
-                    self.needs_redraw = true;
-                    return;
-                } else if self.overlay.is_active() {
-                    self.overlay.close();
-                    self.needs_redraw = true;
-                    return;
-                } else if self.editor.active().has_multiple_cursors() {
-                    // Clear extra cursors first, then selection
-                    self.editor.active_mut().clear_extra_cursors();
-                } else {
-                    self.editor.active_mut().set_selection_anchor(None);
-                }
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "f" => {
-                self.overlay.open(ActiveOverlay::Find);
-                self.needs_redraw = true;
-                return;
-            }
-            Key::Character(c) if cmd_or_ctrl && self.modifiers.alt_key() && c.as_str() == "f" => {
-                self.overlay.open(ActiveOverlay::FindReplace);
-                self.needs_redraw = true;
-                return;
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "g" => {
-                self.overlay.open(ActiveOverlay::GotoLine);
-                self.needs_redraw = true;
-                return;
-            }
-            Key::Character(c)
-                if cmd_or_ctrl && shift && (c.as_str() == "e" || c.as_str() == "E") =>
-            {
-                if self.editor.active().is_large_file()
-                    && !self.editor.active().large_file_edit_mode
-                    && self.editor.active().edit_mode_loader.is_none()
-                {
-                    self.editor.active_mut().enable_large_file_edit_mode();
-                    self.needs_redraw = true;
-                    return;
-                }
-            }
-            Key::Character(c)
-                if cmd_or_ctrl && shift && (c.as_str() == "P" || c.as_str() == "p") =>
-            {
-                self.overlay.open(ActiveOverlay::CommandPalette);
-                self.needs_redraw = true;
-                return;
-            }
-            Key::Named(NamedKey::F1) => {
-                if self.overlay.active == ActiveOverlay::Help {
-                    self.overlay.close();
-                } else {
-                    self.overlay.open(ActiveOverlay::Help);
-                }
-                self.needs_redraw = true;
-                return;
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "," => {
-                if self.overlay.active == ActiveOverlay::Settings {
-                    self.overlay.close();
-                } else {
-                    self.overlay.open(ActiveOverlay::Settings);
-                    self.settings_cursor = 0;
-                }
-                self.needs_redraw = true;
-                return;
-            }
-            _ => {}
+        if self.handle_global_shortcut(&event.logical_key, cmd_or_ctrl, shift) {
+            self.needs_redraw = true;
+            return;
         }
 
-        // --- Overlay input mode ---
         if self.overlay.is_active() {
             self.handle_overlay_key(event, cmd_or_ctrl, shift);
             return;
         }
 
-        // --- Results panel keyboard navigation ---
-        if self.overlay.results_panel.visible {
-            match &event.logical_key {
-                Key::Named(NamedKey::ArrowDown) => {
-                    self.overlay.results_panel.select_next();
-                    self.jump_to_results_panel_selection();
-                    self.needs_redraw = true;
-                    return;
-                }
-                Key::Named(NamedKey::ArrowUp) => {
-                    self.overlay.results_panel.select_prev();
-                    self.jump_to_results_panel_selection();
-                    self.needs_redraw = true;
-                    return;
-                }
-                Key::Named(NamedKey::Enter) => {
-                    self.jump_to_results_panel_selection();
-                    self.needs_redraw = true;
-                    return;
-                }
-                // Copy selected result line
-                Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
-                    if let Some(r) = self
-                        .overlay
-                        .results_panel
-                        .results
-                        .get(self.overlay.results_panel.selected)
-                    {
-                        if let Some(clip) = &mut self.clipboard {
-                            let _ = clip.set_text(r.line_text.clone());
-                        }
-                    }
-                    return;
-                }
-                _ => {} // fall through to normal shortcuts
-            }
+        if self.overlay.results_panel.visible
+            && self.handle_results_panel_key(&event.logical_key, cmd_or_ctrl)
+        {
+            return;
         }
 
         let alt = self.modifiers.alt_key();
+        self.handle_editor_key(&event.logical_key, cmd_or_ctrl, shift, alt);
 
-        // --- Normal editor shortcuts ---
-        match &event.logical_key {
-            // File Operations
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "s" => {
-                if shift {
-                    self.save_as();
-                } else {
-                    self.save();
-                }
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "o" => {
-                self.open_file();
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "n" => {
-                self.editor.new_tab();
-                self.editor.active_mut().wrap_enabled = self.config.line_wrap;
-                self.persist_session_now();
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "t" => {
-                self.overlay.all_tabs_count = self.editor.buffers.len();
-                self.overlay.open(ActiveOverlay::AllTabs);
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "w" => {
-                self.close_active_tab_with_confirm();
-            }
-
-            // Clipboard
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
-                if let Some(text) = self.editor.active().copy_multi() {
-                    if let Some(clip) = &mut self.clipboard {
-                        let _ = clip.set_text(text);
-                    }
-                }
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "x" => {
-                if let Some(text) = self.editor.active_mut().cut_multi() {
-                    if let Some(clip) = &mut self.clipboard {
-                        let _ = clip.set_text(text);
-                    }
-                }
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "v" => {
-                self.paste_from_clipboard();
-            }
-
-            // Undo/Redo
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "z" => {
-                if shift {
-                    self.editor.active_mut().redo();
-                } else {
-                    self.editor.active_mut().undo();
-                }
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "y" => {
-                self.editor.active_mut().redo();
-            }
-
-            // Select All
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "a" => {
-                self.editor.active_mut().select_all();
-            }
-
-            // Duplicate Line (Cmd+Shift+D)
-            Key::Character(c)
-                if cmd_or_ctrl && shift && (c.as_str() == "d" || c.as_str() == "D") =>
-            {
-                self.editor.active_mut().duplicate_line();
-            }
-
-            // Select Next Occurrence (Cmd+D)
-            Key::Character(c) if cmd_or_ctrl && !shift && c.as_str() == "d" => {
-                self.editor.active_mut().select_next_occurrence();
-            }
-
-            // Toggle Comment (Cmd+/)
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "/" => {
-                let prefix = self.comment_prefix().to_string();
-                self.editor.active_mut().toggle_comment(&prefix);
-            }
-
-            // Tab switching
-            Key::Character(c) if cmd_or_ctrl && (c.as_str() == "}" || c.as_str() == "]") => {
-                self.editor.next_tab();
-            }
-            Key::Character(c) if cmd_or_ctrl && (c.as_str() == "{" || c.as_str() == "[") => {
-                self.editor.prev_tab();
-            }
-            Key::Named(NamedKey::Tab) if self.modifiers.control_key() && !shift => {
-                self.editor.next_tab();
-            }
-            Key::Named(NamedKey::Tab) if self.modifiers.control_key() && shift => {
-                self.editor.prev_tab();
-            }
-
-            // Theme cycling
-            Key::Character(c) if cmd_or_ctrl && shift && c.as_str() == "K" => {
-                let themes = Theme::all_themes();
-                self.theme_index = if self.theme_index == 0 {
-                    themes.len() - 1
-                } else {
-                    self.theme_index - 1
-                };
-                self.theme = themes[self.theme_index].clone();
-            }
-            Key::Character(c) if cmd_or_ctrl && c.as_str() == "k" => {
-                let themes = Theme::all_themes();
-                self.theme_index = (self.theme_index + 1) % themes.len();
-                self.theme = themes[self.theme_index].clone();
-            }
-
-            // Toggle Line Wrap (Alt+Z)
-            Key::Character(c)
-                if self.modifiers.alt_key()
-                    && !cmd_or_ctrl
-                    && (c.as_str() == "Ω" || c.as_str() == "z") =>
-            {
-                self.config.line_wrap = !self.config.line_wrap;
-                for buf in &mut self.editor.buffers {
-                    buf.wrap_enabled = self.config.line_wrap;
-                }
-                self.config.save();
-            }
-
-            // Navigation — line start/end (Cmd+Left/Right)
-            Key::Named(NamedKey::ArrowLeft) if cmd_or_ctrl => {
-                self.editor.active_mut().move_to_line_start_sel(shift)
-            }
-            Key::Named(NamedKey::ArrowRight) if cmd_or_ctrl => {
-                self.editor.active_mut().move_to_line_end_sel(shift)
-            }
-
-            // Navigation — document start/end (Cmd+Up/Down or Cmd+Home/End)
-            Key::Named(NamedKey::ArrowUp) if cmd_or_ctrl => {
-                self.editor.active_mut().move_to_start()
-            }
-            Key::Named(NamedKey::ArrowDown) if cmd_or_ctrl => {
-                self.editor.active_mut().move_to_end()
-            }
-            Key::Named(NamedKey::Home) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
-            Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
-
-            // Move line up/down (Alt+Up/Down)
-            Key::Named(NamedKey::ArrowUp) if alt && !cmd_or_ctrl && !shift => {
-                self.editor.active_mut().move_line_up();
-            }
-            Key::Named(NamedKey::ArrowDown) if alt && !cmd_or_ctrl && !shift => {
-                self.editor.active_mut().move_line_down();
-            }
-
-            // Navigation — word-wise (Alt/Opt+Arrow)
-            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_all_word_left(),
-            Key::Named(NamedKey::ArrowRight) if alt => {
-                self.editor.active_mut().move_all_word_right()
-            }
-
-            // Navigation — basic (with shift-selection + multi-cursor support)
-            Key::Named(NamedKey::ArrowLeft) => self.editor.active_mut().move_all_left(shift),
-            Key::Named(NamedKey::ArrowRight) => self.editor.active_mut().move_all_right(shift),
-            Key::Named(NamedKey::ArrowUp) => self.editor.active_mut().move_all_up(shift),
-            Key::Named(NamedKey::ArrowDown) => self.editor.active_mut().move_all_down(shift),
-            Key::Named(NamedKey::Home) => self.editor.active_mut().move_all_to_line_start(shift),
-            Key::Named(NamedKey::End) => self.editor.active_mut().move_all_to_line_end(shift),
-            Key::Named(NamedKey::PageUp) => {
-                let visible = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.visible_lines())
-                    .unwrap_or(20);
-                for _ in 0..visible {
-                    self.editor.active_mut().move_all_up(shift);
-                }
-            }
-            Key::Named(NamedKey::PageDown) => {
-                let visible = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.visible_lines())
-                    .unwrap_or(20);
-                for _ in 0..visible {
-                    self.editor.active_mut().move_all_down(shift);
-                }
-            }
-
-            // Editing — delete to line start (Shift+Backspace)
-            Key::Named(NamedKey::Backspace) if shift && !alt && !cmd_or_ctrl => {
-                self.editor.active_mut().delete_to_line_start_multi();
-            }
-
-            // Editing — word-wise deletion
-            Key::Named(NamedKey::Backspace) if alt => {
-                self.editor.active_mut().delete_word_left_multi()
-            }
-            Key::Named(NamedKey::Delete) if alt => {
-                self.editor.active_mut().delete_word_right_multi()
-            }
-
-            // Editing — basic (multi-cursor aware)
-            Key::Named(NamedKey::Backspace) => {
-                self.editor.active_mut().backspace_multi();
-            }
-            Key::Named(NamedKey::Delete) => {
-                self.editor.active_mut().delete_forward_multi();
-            }
-            Key::Named(NamedKey::Enter) => {
-                let le = self.editor.active().line_ending.as_str().to_string();
-                if self.editor.active().has_multiple_cursors() {
-                    self.editor.active_mut().insert_text_multi(&le);
-                } else {
-                    self.editor.active_mut().insert_newline(&le);
-                }
-            }
-            Key::Named(NamedKey::Tab) if shift => {
-                let ts = self.config.tab_size;
-                self.editor.active_mut().dedent_lines(ts);
-            }
-            Key::Named(NamedKey::Tab) => {
-                let ts = self.config.tab_size;
-                let use_spaces = self.config.use_spaces;
-                self.editor.active_mut().indent_lines(ts, use_spaces);
-            }
-            Key::Named(NamedKey::Space) => {
-                self.editor.active_mut().insert_text_multi(" ");
-            }
-
-            // Text input (with auto-close for brackets/quotes)
-            Key::Character(c) if !cmd_or_ctrl => {
-                let s = c.as_str();
-                if self.editor.active().has_multiple_cursors() {
-                    self.editor.active_mut().insert_text_multi(s);
-                } else if !self.editor.active_mut().insert_with_autoclose(s) {
-                    self.editor.active_mut().insert_text(s);
-                }
-            }
-
-            _ => {}
-        }
-
-        // Keep cursor visible
-        if let Some(renderer) = &self.renderer {
-            let visible = renderer.visible_lines();
-            let win_width = self
-                .window
-                .as_ref()
-                .map(|w| w.inner_size().width)
-                .unwrap_or(1200) as f32
-                / self
-                    .window
-                    .as_ref()
-                    .map(|w| w.scale_factor() as f32)
-                    .unwrap_or(1.0);
-            let editor_width = win_width
-                - renderer::effective_gutter_width(self.config.show_line_numbers)
-                - renderer::LINE_PADDING_LEFT
-                - renderer::SCROLLBAR_WIDTH;
-            let wrap_width = if self.editor.active().wrap_enabled {
-                Some(editor_width.max(100.0))
-            } else {
-                None
-            };
-            let char_width = self.config.font_size * 0.6;
-            self.editor
-                .active_mut()
-                .ensure_cursor_visible(visible, wrap_width, char_width);
-            self.editor
-                .active_mut()
-                .ensure_cursor_visible_x(renderer::CHAR_WIDTH, editor_width);
-        }
-
+        self.ensure_cursor_visible_after_edit();
         self.needs_redraw = true;
     }
 
@@ -2966,6 +2605,683 @@ impl App {
             }
         }
     }
+
+    fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        self.mouse_pos = (position.x, position.y);
+
+        // Update cursor icon and hovered status bar segment
+        if let Some(window) = &self.window {
+            let scale = window.scale_factor();
+            let y = position.y / scale;
+            let x = position.x / scale;
+            let win_h = self
+                .renderer
+                .as_ref()
+                .map(|r| r.height as f32 / r.scale_factor)
+                .unwrap_or(600.0);
+            let status_top = (win_h - renderer::STATUS_BAR_HEIGHT) as f64;
+            use renderer::TAB_BAR_HEIGHT;
+            let over_scrollbar = self.scrollbar_drag.is_some()
+                || self
+                    .renderer
+                    .as_ref()
+                    .and_then(|renderer| {
+                        renderer.scrollbar_thumb(self.editor.active(), &self.overlay)
+                    })
+                    .map(|scrollbar| scrollbar.contains_track(position.x as f32, position.y as f32))
+                    .unwrap_or(false);
+
+            // Snackbar button hover detection (physical pixels)
+            let snackbar_hover = if self.snackbar_tip.is_some() {
+                let px = position.x as f32;
+                let py = position.y as f32;
+                if let Some(renderer) = &self.renderer {
+                    if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
+                        if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
+                            Some(renderer::SnackbarButton::Dismiss)
+                        } else if let Some((lx, ly, lw, lh)) =
+                            renderer.snackbar_dismiss_forever_bounds
+                        {
+                            if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
+                                Some(renderer::SnackbarButton::DontShowAgain)
+                            } else if let Some((nx, ny, nw, nh)) = renderer.snackbar_next_tip_bounds
+                            {
+                                if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
+                                    Some(renderer::SnackbarButton::NextTip)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(renderer) = &mut self.renderer {
+                if renderer.hovered_snackbar_button != snackbar_hover {
+                    renderer.hovered_snackbar_button = snackbar_hover;
+                    self.needs_redraw = true;
+                }
+            }
+
+            if snackbar_hover.is_some() {
+                window.set_cursor(winit::window::CursorIcon::Pointer);
+            } else if y >= status_top {
+                let new_seg = self
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| r.hit_test_status_bar(x as f32))
+                    .filter(|seg| self.status_bar_segment_is_actionable(*seg));
+                window.set_cursor(if new_seg.is_some() {
+                    winit::window::CursorIcon::Pointer
+                } else {
+                    winit::window::CursorIcon::Default
+                });
+                if let Some(renderer) = &mut self.renderer {
+                    if renderer.hovered_status_segment != new_seg {
+                        renderer.hovered_status_segment = new_seg;
+                        self.needs_redraw = true;
+                    }
+                }
+            } else if over_scrollbar {
+                window.set_cursor(winit::window::CursorIcon::Pointer);
+                if let Some(renderer) = &mut self.renderer {
+                    if renderer.hovered_status_segment.is_some() {
+                        renderer.hovered_status_segment = None;
+                        self.needs_redraw = true;
+                    }
+                }
+            } else if y >= TAB_BAR_HEIGHT as f64 {
+                window.set_cursor(winit::window::CursorIcon::Text);
+                if let Some(renderer) = &mut self.renderer {
+                    if renderer.hovered_status_segment.is_some() {
+                        renderer.hovered_status_segment = None;
+                        self.needs_redraw = true;
+                    }
+                }
+            } else {
+                window.set_cursor(winit::window::CursorIcon::Default);
+                if let Some(renderer) = &mut self.renderer {
+                    if renderer.hovered_status_segment.is_some() {
+                        renderer.hovered_status_segment = None;
+                        self.needs_redraw = true;
+                    }
+                }
+            }
+        }
+
+        if self.is_mouse_down && self.overlay.is_active() {
+            self.handle_overlay_drag();
+        } else if self.is_mouse_down
+            && !self.overlay.is_active()
+            && (self.scrollbar_drag.is_some() || !self.suppress_drag)
+        {
+            self.handle_mouse_drag();
+        }
+
+        // Tab drag tracking
+        if let Some(ref mut drag) = self.tab_drag {
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor())
+                .unwrap_or(1.0);
+            let lx = self.mouse_pos.0 / scale;
+            drag.current_x = lx as f32;
+            if (drag.current_x - drag.start_x).abs() > Self::DRAG_START_THRESHOLD {
+                drag.is_dragging = true;
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    fn handle_mouse_input_event(&mut self, state: ElementState, button: winit::event::MouseButton) {
+        if button == winit::event::MouseButton::Left {
+            self.is_mouse_down = state == ElementState::Pressed;
+            if self.is_mouse_down && self.overlay.is_active() {
+                self.handle_overlay_click();
+            } else if self.is_mouse_down && !self.overlay.is_active() {
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(self.last_click_time);
+                let (cx, cy) = self.mouse_pos;
+                let dist = ((cx - self.last_click_pos.0).powi(2)
+                    + (cy - self.last_click_pos.1).powi(2))
+                .sqrt();
+                let is_multi = elapsed.as_millis() < Self::DOUBLE_CLICK_TIME_MS
+                    && dist < Self::DOUBLE_CLICK_DISTANCE;
+                if is_multi {
+                    self.click_count = (self.click_count + 1).min(3);
+                } else {
+                    self.click_count = 1;
+                }
+                self.suppress_drag = self.click_count >= 2;
+                self.handle_mouse_click(self.click_count);
+                self.last_click_time = now;
+                self.last_click_pos = (cx, cy);
+            } else if !self.is_mouse_down {
+                self.suppress_drag = false;
+                self.block_drag_anchor = None;
+                self.scrollbar_drag = None;
+
+                // Resolve tab drag-to-reorder
+                if let Some(drag) = self.tab_drag.take() {
+                    if drag.is_dragging {
+                        if let Some(renderer) = &self.renderer {
+                            let scroll = renderer.tab_scroll_offset;
+                            let mut target = renderer.tab_positions.len().saturating_sub(1);
+                            for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
+                                if drag.current_x + scroll < tx + tw / 2.0 {
+                                    target = i;
+                                    break;
+                                }
+                            }
+                            if target != drag.from {
+                                self.editor.move_tab(drag.from, target);
+                            }
+                        }
+                        self.needs_redraw = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_mouse_wheel_event(&mut self, delta: MouseScrollDelta) {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let mouse_log_y = self.mouse_pos.1 as f32 / scale;
+        if mouse_log_y < renderer::TAB_BAR_HEIGHT {
+            let (tab_scroll, tab_scroll_max) = self
+                .renderer
+                .as_ref()
+                .map(|r| (r.tab_scroll_offset, r.tab_scroll_max))
+                .unwrap_or((0.0, 0.0));
+            let dx = match delta {
+                MouseScrollDelta::LineDelta(x, y) => {
+                    let h = if x.abs() > f32::EPSILON { x } else { -y };
+                    h * renderer::TAB_SCROLL_STEP
+                }
+                MouseScrollDelta::PixelDelta(pos) => {
+                    if pos.x.abs() > pos.y.abs() {
+                        pos.x as f32
+                    } else {
+                        -pos.y as f32
+                    }
+                }
+            };
+            if let Some(r) = &mut self.renderer {
+                r.tab_scroll_offset = (tab_scroll + dx).clamp(0.0, tab_scroll_max);
+            }
+            self.needs_redraw = true;
+            return;
+        }
+
+        let visible_lines = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.visible_lines())
+            .unwrap_or(1);
+        let char_width = self.config.font_size * 0.6;
+        let wrap_width = if self.editor.active().wrap_enabled {
+            let win_width = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().width as f32 / scale)
+                .unwrap_or(1200.0);
+            Some(
+                (win_width
+                    - renderer::effective_gutter_width(self.config.show_line_numbers)
+                    - renderer::LINE_PADDING_LEFT
+                    - renderer::SCROLLBAR_WIDTH)
+                    .max(100.0),
+            )
+        } else {
+            None
+        };
+        match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                self.editor.active_mut().scroll(
+                    -y as f64 * 3.0,
+                    visible_lines,
+                    wrap_width,
+                    char_width,
+                );
+                if x.abs() > 0.0 {
+                    self.editor
+                        .active_mut()
+                        .scroll_horizontal(x * renderer::CHAR_WIDTH * 3.0);
+                }
+            }
+            MouseScrollDelta::PixelDelta(pos) => {
+                let lines = -pos.y / renderer::LINE_HEIGHT as f64;
+                self.editor.active_mut().scroll_direct(
+                    lines,
+                    visible_lines,
+                    wrap_width,
+                    char_width,
+                );
+                if pos.x.abs() > 0.0 {
+                    self.editor
+                        .active_mut()
+                        .scroll_horizontal_direct(-pos.x as f32);
+                }
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    fn check_external_modifications(&mut self) {
+        for buf in &mut self.editor.buffers {
+            if buf.file_path.is_some() && !buf.is_binary && buf.check_external_modification() {
+                let name = buf.display_name();
+                if buf.dirty {
+                    let reload = rfd::MessageDialog::new()
+                        .set_title("File Changed on Disk")
+                        .set_description(format!(
+                            "\"{}\" has been modified externally and has unsaved changes.\nReload from disk? (unsaved changes will be lost)",
+                            name
+                        ))
+                        .set_buttons(rfd::MessageButtons::YesNo)
+                        .show()
+                        == rfd::MessageDialogResult::Yes;
+                    if reload {
+                        let _ = buf.reload_from_disk();
+                    } else {
+                        buf.file_mtime = buf
+                            .file_path
+                            .as_deref()
+                            .and_then(|p| std::fs::metadata(p).ok())
+                            .and_then(|m| m.modified().ok());
+                    }
+                } else {
+                    let _ = buf.reload_from_disk();
+                }
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    fn handle_global_shortcut(&mut self, key: &Key, cmd_or_ctrl: bool, shift: bool) -> bool {
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                if self.overlay.results_panel.visible {
+                    self.overlay.results_panel.close();
+                    return true;
+                } else if self.overlay.is_active() {
+                    self.overlay.close();
+                    return true;
+                }
+                return false;
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "f" => {
+                self.overlay.open(ActiveOverlay::Find);
+            }
+            Key::Character(c) if cmd_or_ctrl && self.modifiers.alt_key() && c.as_str() == "f" => {
+                self.overlay.open(ActiveOverlay::FindReplace);
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "g" => {
+                self.overlay.open(ActiveOverlay::GotoLine);
+            }
+            Key::Character(c)
+                if cmd_or_ctrl && shift && (c.as_str() == "e" || c.as_str() == "E") =>
+            {
+                if self.editor.active().is_large_file()
+                    && !self.editor.active().large_file_edit_mode
+                    && self.editor.active().edit_mode_loader.is_none()
+                {
+                    self.editor.active_mut().enable_large_file_edit_mode();
+                    return true;
+                }
+                return false;
+            }
+            Key::Character(c)
+                if cmd_or_ctrl && shift && (c.as_str() == "P" || c.as_str() == "p") =>
+            {
+                self.overlay.open(ActiveOverlay::CommandPalette);
+            }
+            Key::Named(NamedKey::F1) => {
+                if self.overlay.active == ActiveOverlay::Help {
+                    self.overlay.close();
+                } else {
+                    self.overlay.open(ActiveOverlay::Help);
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "," => {
+                if self.overlay.active == ActiveOverlay::Settings {
+                    self.overlay.close();
+                } else {
+                    self.overlay.open(ActiveOverlay::Settings);
+                    self.settings_cursor = 0;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_results_panel_key(&mut self, key: &Key, cmd_or_ctrl: bool) -> bool {
+        match key {
+            Key::Named(NamedKey::ArrowDown) => {
+                self.overlay.results_panel.select_next();
+                self.jump_to_results_panel_selection();
+                self.needs_redraw = true;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.overlay.results_panel.select_prev();
+                self.jump_to_results_panel_selection();
+                self.needs_redraw = true;
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.jump_to_results_panel_selection();
+                self.needs_redraw = true;
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
+                if let Some(r) = self
+                    .overlay
+                    .results_panel
+                    .results
+                    .get(self.overlay.results_panel.selected)
+                {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(r.line_text.clone());
+                    }
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_editor_key(&mut self, key: &Key, cmd_or_ctrl: bool, shift: bool, alt: bool) {
+        match key {
+            // Escape — clear multi-cursors or selection
+            Key::Named(NamedKey::Escape) => {
+                if self.editor.active().has_multiple_cursors() {
+                    self.editor.active_mut().clear_extra_cursors();
+                } else {
+                    self.editor.active_mut().set_selection_anchor(None);
+                }
+            }
+
+            // File Operations
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "s" => {
+                if shift {
+                    self.save_as();
+                } else {
+                    self.save();
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "o" => {
+                self.open_file();
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "n" => {
+                self.editor.new_tab();
+                self.editor.active_mut().wrap_enabled = self.config.line_wrap;
+                self.persist_session_now();
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "t" => {
+                self.overlay.all_tabs_count = self.editor.buffers.len();
+                self.overlay.open(ActiveOverlay::AllTabs);
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "w" => {
+                self.close_active_tab_with_confirm();
+            }
+
+            // Clipboard
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "c" => {
+                if let Some(text) = self.editor.active().copy_multi() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "x" => {
+                if let Some(text) = self.editor.active_mut().cut_multi() {
+                    if let Some(clip) = &mut self.clipboard {
+                        let _ = clip.set_text(text);
+                    }
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "v" => {
+                self.paste_from_clipboard();
+            }
+
+            // Undo/Redo
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "z" => {
+                if shift {
+                    self.editor.active_mut().redo();
+                } else {
+                    self.editor.active_mut().undo();
+                }
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "y" => {
+                self.editor.active_mut().redo();
+            }
+
+            // Select All
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "a" => {
+                self.editor.active_mut().select_all();
+            }
+
+            // Duplicate Line (Cmd+Shift+D)
+            Key::Character(c)
+                if cmd_or_ctrl && shift && (c.as_str() == "d" || c.as_str() == "D") =>
+            {
+                self.editor.active_mut().duplicate_line();
+            }
+
+            // Select Next Occurrence (Cmd+D)
+            Key::Character(c) if cmd_or_ctrl && !shift && c.as_str() == "d" => {
+                self.editor.active_mut().select_next_occurrence();
+            }
+
+            // Toggle Comment (Cmd+/)
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "/" => {
+                let prefix = self.comment_prefix().to_string();
+                self.editor.active_mut().toggle_comment(&prefix);
+            }
+
+            // Tab switching
+            Key::Character(c) if cmd_or_ctrl && (c.as_str() == "}" || c.as_str() == "]") => {
+                self.editor.next_tab();
+            }
+            Key::Character(c) if cmd_or_ctrl && (c.as_str() == "{" || c.as_str() == "[") => {
+                self.editor.prev_tab();
+            }
+            Key::Named(NamedKey::Tab) if self.modifiers.control_key() && !shift => {
+                self.editor.next_tab();
+            }
+            Key::Named(NamedKey::Tab) if self.modifiers.control_key() && shift => {
+                self.editor.prev_tab();
+            }
+
+            // Theme cycling
+            Key::Character(c) if cmd_or_ctrl && shift && c.as_str() == "K" => {
+                let themes = Theme::all_themes();
+                self.theme_index = if self.theme_index == 0 {
+                    themes.len() - 1
+                } else {
+                    self.theme_index - 1
+                };
+                self.theme = themes[self.theme_index].clone();
+            }
+            Key::Character(c) if cmd_or_ctrl && c.as_str() == "k" => {
+                let themes = Theme::all_themes();
+                self.theme_index = (self.theme_index + 1) % themes.len();
+                self.theme = themes[self.theme_index].clone();
+            }
+
+            // Toggle Line Wrap (Alt+Z)
+            Key::Character(c)
+                if self.modifiers.alt_key()
+                    && !cmd_or_ctrl
+                    && (c.as_str() == "Ω" || c.as_str() == "z") =>
+            {
+                self.config.line_wrap = !self.config.line_wrap;
+                for buf in &mut self.editor.buffers {
+                    buf.wrap_enabled = self.config.line_wrap;
+                }
+                self.config.save();
+            }
+
+            // Navigation — line start/end (Cmd+Left/Right)
+            Key::Named(NamedKey::ArrowLeft) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_line_start_sel(shift)
+            }
+            Key::Named(NamedKey::ArrowRight) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_line_end_sel(shift)
+            }
+
+            // Navigation — document start/end (Cmd+Up/Down or Cmd+Home/End)
+            Key::Named(NamedKey::ArrowUp) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_start()
+            }
+            Key::Named(NamedKey::ArrowDown) if cmd_or_ctrl => {
+                self.editor.active_mut().move_to_end()
+            }
+            Key::Named(NamedKey::Home) if cmd_or_ctrl => self.editor.active_mut().move_to_start(),
+            Key::Named(NamedKey::End) if cmd_or_ctrl => self.editor.active_mut().move_to_end(),
+
+            // Move line up/down (Alt+Up/Down)
+            Key::Named(NamedKey::ArrowUp) if alt && !cmd_or_ctrl && !shift => {
+                self.editor.active_mut().move_line_up();
+            }
+            Key::Named(NamedKey::ArrowDown) if alt && !cmd_or_ctrl && !shift => {
+                self.editor.active_mut().move_line_down();
+            }
+
+            // Navigation — word-wise (Alt/Opt+Arrow)
+            Key::Named(NamedKey::ArrowLeft) if alt => self.editor.active_mut().move_all_word_left(),
+            Key::Named(NamedKey::ArrowRight) if alt => {
+                self.editor.active_mut().move_all_word_right()
+            }
+
+            // Navigation — basic (with shift-selection + multi-cursor support)
+            Key::Named(NamedKey::ArrowLeft) => self.editor.active_mut().move_all_left(shift),
+            Key::Named(NamedKey::ArrowRight) => self.editor.active_mut().move_all_right(shift),
+            Key::Named(NamedKey::ArrowUp) => self.editor.active_mut().move_all_up(shift),
+            Key::Named(NamedKey::ArrowDown) => self.editor.active_mut().move_all_down(shift),
+            Key::Named(NamedKey::Home) => self.editor.active_mut().move_all_to_line_start(shift),
+            Key::Named(NamedKey::End) => self.editor.active_mut().move_all_to_line_end(shift),
+            Key::Named(NamedKey::PageUp) => {
+                let visible = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.visible_lines())
+                    .unwrap_or(20);
+                for _ in 0..visible {
+                    self.editor.active_mut().move_all_up(shift);
+                }
+            }
+            Key::Named(NamedKey::PageDown) => {
+                let visible = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.visible_lines())
+                    .unwrap_or(20);
+                for _ in 0..visible {
+                    self.editor.active_mut().move_all_down(shift);
+                }
+            }
+
+            // Editing — delete to line start (Shift+Backspace)
+            Key::Named(NamedKey::Backspace) if shift && !alt && !cmd_or_ctrl => {
+                self.editor.active_mut().delete_to_line_start_multi();
+            }
+
+            // Editing — word-wise deletion
+            Key::Named(NamedKey::Backspace) if alt => {
+                self.editor.active_mut().delete_word_left_multi()
+            }
+            Key::Named(NamedKey::Delete) if alt => {
+                self.editor.active_mut().delete_word_right_multi()
+            }
+
+            // Editing — basic (multi-cursor aware)
+            Key::Named(NamedKey::Backspace) => {
+                self.editor.active_mut().backspace_multi();
+            }
+            Key::Named(NamedKey::Delete) => {
+                self.editor.active_mut().delete_forward_multi();
+            }
+            Key::Named(NamedKey::Enter) => {
+                let le = self.editor.active().line_ending.as_str().to_string();
+                if self.editor.active().has_multiple_cursors() {
+                    self.editor.active_mut().insert_text_multi(&le);
+                } else {
+                    self.editor.active_mut().insert_newline(&le);
+                }
+            }
+            Key::Named(NamedKey::Tab) if shift => {
+                let ts = self.config.tab_size;
+                self.editor.active_mut().dedent_lines(ts);
+            }
+            Key::Named(NamedKey::Tab) => {
+                let ts = self.config.tab_size;
+                let use_spaces = self.config.use_spaces;
+                self.editor.active_mut().indent_lines(ts, use_spaces);
+            }
+            Key::Named(NamedKey::Space) => {
+                self.editor.active_mut().insert_text_multi(" ");
+            }
+
+            // Text input (with auto-close for brackets/quotes)
+            Key::Character(c) if !cmd_or_ctrl => {
+                let s = c.as_str();
+                if self.editor.active().has_multiple_cursors() {
+                    self.editor.active_mut().insert_text_multi(s);
+                } else if !self.editor.active_mut().insert_with_autoclose(s) {
+                    self.editor.active_mut().insert_text(s);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    fn ensure_cursor_visible_after_edit(&mut self) {
+        if let Some(renderer) = &self.renderer {
+            let visible = renderer.visible_lines();
+            let win_width = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().width)
+                .unwrap_or(1200) as f32
+                / self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
+            let editor_width = win_width
+                - renderer::effective_gutter_width(self.config.show_line_numbers)
+                - renderer::LINE_PADDING_LEFT
+                - renderer::SCROLLBAR_WIDTH;
+            let wrap_width = if self.editor.active().wrap_enabled {
+                Some(editor_width.max(100.0))
+            } else {
+                None
+            };
+            let char_width = self.config.font_size * 0.6;
+            self.editor
+                .active_mut()
+                .ensure_cursor_visible(visible, wrap_width, char_width);
+            self.editor
+                .active_mut()
+                .ensure_cursor_visible_x(renderer::CHAR_WIDTH, editor_width);
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -3032,197 +3348,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_pos = (position.x, position.y);
-
-                // Update cursor icon and hovered status bar segment
-                if let Some(window) = &self.window {
-                    let scale = window.scale_factor();
-                    let y = position.y / scale;
-                    let x = position.x / scale;
-                    let win_h = self
-                        .renderer
-                        .as_ref()
-                        .map(|r| r.height as f32 / r.scale_factor)
-                        .unwrap_or(600.0);
-                    let status_top = (win_h - renderer::STATUS_BAR_HEIGHT) as f64;
-                    use renderer::TAB_BAR_HEIGHT;
-                    let over_scrollbar = self.scrollbar_drag.is_some()
-                        || self
-                            .renderer
-                            .as_ref()
-                            .and_then(|renderer| {
-                                renderer.scrollbar_thumb(self.editor.active(), &self.overlay)
-                            })
-                            .map(|scrollbar| {
-                                scrollbar.contains_track(position.x as f32, position.y as f32)
-                            })
-                            .unwrap_or(false);
-
-                    // Snackbar button hover detection (physical pixels)
-                    let snackbar_hover = if self.snackbar_tip.is_some() {
-                        let px = position.x as f32;
-                        let py = position.y as f32;
-                        if let Some(renderer) = &self.renderer {
-                            if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
-                                if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
-                                    Some(renderer::SnackbarButton::Dismiss)
-                                } else if let Some((lx, ly, lw, lh)) =
-                                    renderer.snackbar_dismiss_forever_bounds
-                                {
-                                    if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
-                                        Some(renderer::SnackbarButton::DontShowAgain)
-                                    } else if let Some((nx, ny, nw, nh)) =
-                                        renderer.snackbar_next_tip_bounds
-                                    {
-                                        if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
-                                            Some(renderer::SnackbarButton::NextTip)
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(renderer) = &mut self.renderer {
-                        if renderer.hovered_snackbar_button != snackbar_hover {
-                            renderer.hovered_snackbar_button = snackbar_hover;
-                            self.needs_redraw = true;
-                        }
-                    }
-
-                    if snackbar_hover.is_some() {
-                        window.set_cursor(winit::window::CursorIcon::Pointer);
-                    } else if y >= status_top {
-                        let new_seg = self
-                            .renderer
-                            .as_ref()
-                            .and_then(|r| r.hit_test_status_bar(x as f32))
-                            .filter(|seg| self.status_bar_segment_is_actionable(*seg));
-                        window.set_cursor(if new_seg.is_some() {
-                            winit::window::CursorIcon::Pointer
-                        } else {
-                            winit::window::CursorIcon::Default
-                        });
-                        if let Some(renderer) = &mut self.renderer {
-                            if renderer.hovered_status_segment != new_seg {
-                                renderer.hovered_status_segment = new_seg;
-                                self.needs_redraw = true;
-                            }
-                        }
-                    } else if over_scrollbar {
-                        window.set_cursor(winit::window::CursorIcon::Pointer);
-                        if let Some(renderer) = &mut self.renderer {
-                            if renderer.hovered_status_segment.is_some() {
-                                renderer.hovered_status_segment = None;
-                                self.needs_redraw = true;
-                            }
-                        }
-                    } else if y >= TAB_BAR_HEIGHT as f64 {
-                        window.set_cursor(winit::window::CursorIcon::Text);
-                        if let Some(renderer) = &mut self.renderer {
-                            if renderer.hovered_status_segment.is_some() {
-                                renderer.hovered_status_segment = None;
-                                self.needs_redraw = true;
-                            }
-                        }
-                    } else {
-                        window.set_cursor(winit::window::CursorIcon::Default);
-                        if let Some(renderer) = &mut self.renderer {
-                            if renderer.hovered_status_segment.is_some() {
-                                renderer.hovered_status_segment = None;
-                                self.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-
-                if self.is_mouse_down && self.overlay.is_active() {
-                    self.handle_overlay_drag();
-                } else if self.is_mouse_down
-                    && !self.overlay.is_active()
-                    && (self.scrollbar_drag.is_some() || !self.suppress_drag)
-                {
-                    self.handle_mouse_drag();
-                }
-
-                // Tab drag tracking
-                if let Some(ref mut drag) = self.tab_drag {
-                    let scale = self
-                        .window
-                        .as_ref()
-                        .map(|w| w.scale_factor())
-                        .unwrap_or(1.0);
-                    let lx = self.mouse_pos.0 / scale;
-                    drag.current_x = lx as f32;
-                    if (drag.current_x - drag.start_x).abs() > 4.0 {
-                        drag.is_dragging = true;
-                        self.needs_redraw = true;
-                    }
-                }
+                self.handle_cursor_moved(position);
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == winit::event::MouseButton::Left {
-                    self.is_mouse_down = state == ElementState::Pressed;
-                    if self.is_mouse_down && self.overlay.is_active() {
-                        self.handle_overlay_click();
-                    } else if self.is_mouse_down && !self.overlay.is_active() {
-                        let now = std::time::Instant::now();
-                        let elapsed = now.duration_since(self.last_click_time);
-                        let (cx, cy) = self.mouse_pos;
-                        let dist = ((cx - self.last_click_pos.0).powi(2)
-                            + (cy - self.last_click_pos.1).powi(2))
-                        .sqrt();
-                        let is_multi = elapsed.as_millis() < 400 && dist < 5.0;
-                        if is_multi {
-                            self.click_count = (self.click_count + 1).min(3);
-                        } else {
-                            self.click_count = 1;
-                        }
-                        self.suppress_drag = self.click_count >= 2;
-                        self.handle_mouse_click(self.click_count);
-                        self.last_click_time = now;
-                        self.last_click_pos = (cx, cy);
-                    } else if !self.is_mouse_down {
-                        // Mouse released — always re-enable drag for next click
-                        self.suppress_drag = false;
-                        self.block_drag_anchor = None;
-                        self.scrollbar_drag = None;
-
-                        // Resolve tab drag-to-reorder
-                        if let Some(drag) = self.tab_drag.take() {
-                            if drag.is_dragging {
-                                // Find target tab index based on current x
-                                if let Some(renderer) = &self.renderer {
-                                    let scroll = renderer.tab_scroll_offset;
-                                    let mut target = renderer.tab_positions.len().saturating_sub(1);
-                                    for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate()
-                                    {
-                                        if drag.current_x + scroll < tx + tw / 2.0 {
-                                            target = i;
-                                            break;
-                                        }
-                                    }
-                                    if target != drag.from {
-                                        self.editor.move_tab(drag.from, target);
-                                    }
-                                }
-                                self.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
+                self.handle_mouse_input_event(state, button);
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
@@ -3230,129 +3360,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                // If the cursor is over the tab bar, scroll the tab strip instead of the editor
-                let scale = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.scale_factor() as f32)
-                    .unwrap_or(1.0);
-                let mouse_log_y = self.mouse_pos.1 as f32 / scale;
-                if mouse_log_y < renderer::TAB_BAR_HEIGHT {
-                    let (tab_scroll, tab_scroll_max) = self
-                        .renderer
-                        .as_ref()
-                        .map(|r| (r.tab_scroll_offset, r.tab_scroll_max))
-                        .unwrap_or((0.0, 0.0));
-                    let dx = match delta {
-                        MouseScrollDelta::LineDelta(x, y) => {
-                            let h = if x.abs() > f32::EPSILON { x } else { -y };
-                            h * renderer::TAB_SCROLL_STEP
-                        }
-                        MouseScrollDelta::PixelDelta(pos) => {
-                            if pos.x.abs() > pos.y.abs() {
-                                pos.x as f32
-                            } else {
-                                -pos.y as f32
-                            }
-                        }
-                    };
-                    if let Some(r) = &mut self.renderer {
-                        r.tab_scroll_offset = (tab_scroll + dx).clamp(0.0, tab_scroll_max);
-                    }
-                    self.needs_redraw = true;
-                    return;
-                }
-
-                let visible_lines = self
-                    .renderer
-                    .as_ref()
-                    .map(|renderer| renderer.visible_lines())
-                    .unwrap_or(1);
-                let char_width = self.config.font_size * 0.6;
-                let wrap_width = if self.editor.active().wrap_enabled {
-                    let win_width = self
-                        .window
-                        .as_ref()
-                        .map(|w| w.inner_size().width as f32 / scale)
-                        .unwrap_or(1200.0);
-                    Some(
-                        (win_width
-                            - renderer::effective_gutter_width(self.config.show_line_numbers)
-                            - renderer::LINE_PADDING_LEFT
-                            - renderer::SCROLLBAR_WIDTH)
-                            .max(100.0),
-                    )
-                } else {
-                    None
-                };
-                match delta {
-                    MouseScrollDelta::LineDelta(x, y) => {
-                        self.editor.active_mut().scroll(
-                            -y as f64 * 3.0,
-                            visible_lines,
-                            wrap_width,
-                            char_width,
-                        );
-                        if x.abs() > 0.0 {
-                            self.editor
-                                .active_mut()
-                                .scroll_horizontal(x * renderer::CHAR_WIDTH * 3.0);
-                        }
-                    }
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        let lines = -pos.y / renderer::LINE_HEIGHT as f64;
-                        self.editor.active_mut().scroll_direct(
-                            lines,
-                            visible_lines,
-                            wrap_width,
-                            char_width,
-                        );
-                        if pos.x.abs() > 0.0 {
-                            self.editor
-                                .active_mut()
-                                .scroll_horizontal_direct(-pos.x as f32);
-                        }
-                    }
-                }
-                self.needs_redraw = true;
+                self.handle_mouse_wheel_event(delta);
             }
 
             WindowEvent::Focused(true) => {
-                // Check for external modifications on focus gain
-                for buf in &mut self.editor.buffers {
-                    if buf.file_path.is_some()
-                        && !buf.is_binary
-                        && buf.check_external_modification()
-                    {
-                        let name = buf.display_name();
-                        if buf.dirty {
-                            // File has local changes AND external changes — ask user
-                            let reload = rfd::MessageDialog::new()
-                                .set_title("File Changed on Disk")
-                                .set_description(format!(
-                                    "\"{}\" has been modified externally and has unsaved changes.\nReload from disk? (unsaved changes will be lost)",
-                                    name
-                                ))
-                                .set_buttons(rfd::MessageButtons::YesNo)
-                                .show()
-                                == rfd::MessageDialogResult::Yes;
-                            if reload {
-                                let _ = buf.reload_from_disk();
-                            } else {
-                                // Update mtime so we don't ask again
-                                buf.file_mtime = buf
-                                    .file_path
-                                    .as_deref()
-                                    .and_then(|p| std::fs::metadata(p).ok())
-                                    .and_then(|m| m.modified().ok());
-                            }
-                        } else {
-                            // No local changes — silently reload
-                            let _ = buf.reload_from_disk();
-                        }
-                    }
-                }
-                self.needs_redraw = true;
+                self.check_external_modifications();
             }
 
             WindowEvent::Focused(false) => {
@@ -3445,7 +3457,9 @@ impl ApplicationHandler for App {
             (self.editor.active().scroll_y - self.editor.active().scroll_y_target).abs();
         let scroll_diff_x =
             (self.editor.active().scroll_x - self.editor.active().scroll_x_target).abs();
-        if scroll_diff_y > 0.1 || scroll_diff_x > 0.1 {
+        if scroll_diff_y > Self::SCROLL_ANIM_THRESHOLD
+            || scroll_diff_x > Self::SCROLL_ANIM_THRESHOLD as f32
+        {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }

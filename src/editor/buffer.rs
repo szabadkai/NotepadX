@@ -9,6 +9,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 
+const BINARY_DETECT_SAMPLE_SIZE: usize = 8192;
+const SCROLL_MARGIN_LINES: f64 = 3.0;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub position: usize,
@@ -185,9 +188,6 @@ impl Buffer {
     pub fn set_selection_anchor(&mut self, a: Option<usize>) {
         self.cursors[0].selection_anchor = a;
     }
-    pub fn desired_col(&self) -> Option<usize> {
-        self.cursors[0].desired_col
-    }
     pub fn set_desired_col(&mut self, c: Option<usize>) {
         self.cursors[0].desired_col = c;
     }
@@ -220,23 +220,6 @@ impl Buffer {
     pub fn merge_cursors(&mut self) {
         self.cursors.sort();
         self.cursors.dedup_by(|a, b| a.position == b.position);
-    }
-
-    /// Return all selection ranges for multi-cursor rendering.
-    #[allow(dead_code)]
-    pub fn all_selection_ranges(&self) -> Vec<(usize, usize)> {
-        self.cursors
-            .iter()
-            .filter_map(|c| {
-                c.selection_anchor.map(|anchor| {
-                    if anchor < c.position {
-                        (anchor, c.position)
-                    } else {
-                        (c.position, anchor)
-                    }
-                })
-            })
-            .collect()
     }
 
     /// Create a rectangular block selection between two character positions.
@@ -366,8 +349,13 @@ impl Buffer {
         self.merge_cursors();
     }
 
-    /// Backspace at every cursor, adjusting offsets. Works for any cursor count.
-    pub fn backspace_multi(&mut self) {
+    /// Common boilerplate for multi-cursor delete operations.
+    /// The closure receives `(rope, pos)` and returns `Some((start, end))` for the range to delete,
+    /// or `None` if no edit should happen at this cursor. Selection deletion is handled automatically.
+    fn apply_multi_cursor_delete<F>(&mut self, edit_fn: F)
+    where
+        F: Fn(&Rope, usize) -> Option<(usize, usize)>,
+    {
         if self.is_read_only() {
             return;
         }
@@ -399,14 +387,13 @@ impl Buffer {
                     group_id,
                     cursors_before: save,
                 });
-            } else if pos > 0 {
-                let prev = pos - 1;
-                let removed: String = self.rope.slice(prev..pos).into();
-                self.rope.remove(prev..pos);
-                self.cursors[i].position = prev;
-                offset -= 1;
+            } else if let Some((start, end)) = edit_fn(&self.rope, pos) {
+                let removed: String = self.rope.slice(start..end).into();
+                self.rope.remove(start..end);
+                offset -= (end - start) as isize;
+                self.cursors[i].position = start;
                 self.undo_stack.push(EditOperation {
-                    offset: prev,
+                    offset: start,
                     removed,
                     inserted: String::new(),
                     cursor_before: pos,
@@ -421,120 +408,42 @@ impl Buffer {
         self.merge_cursors();
     }
 
+    /// Backspace at every cursor, adjusting offsets. Works for any cursor count.
+    pub fn backspace_multi(&mut self) {
+        self.apply_multi_cursor_delete(
+            |_rope, pos| {
+                if pos > 0 {
+                    Some((pos - 1, pos))
+                } else {
+                    None
+                }
+            },
+        );
+    }
+
     /// Delete forward at every cursor, adjusting offsets. Works for any cursor count.
     pub fn delete_forward_multi(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let group_id = self.new_undo_group();
-        let cursors_snapshot = self.cursors.clone();
-        self.cursors.sort();
-        let mut offset: isize = 0;
-        for i in 0..self.cursors.len() {
-            let pos = (self.cursors[i].position as isize + offset) as usize;
-            let save = if i == 0 {
-                Some(cursors_snapshot.clone())
+        self.apply_multi_cursor_delete(|rope, pos| {
+            if pos < rope.len_chars() {
+                Some((pos, pos + 1))
             } else {
                 None
-            };
-
-            if let Some(anchor) = self.cursors[i].selection_anchor.take() {
-                let adj_anchor = (anchor as isize + offset) as usize;
-                let start = pos.min(adj_anchor);
-                let end = pos.max(adj_anchor);
-                let removed: String = self.rope.slice(start..end).into();
-                self.rope.remove(start..end);
-                offset -= (end - start) as isize;
-                self.cursors[i].position = start;
-                self.undo_stack.push(EditOperation {
-                    offset: start,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before: pos,
-                    group_id,
-                    cursors_before: save,
-                });
-            } else if pos < self.rope.len_chars() {
-                let next = pos + 1;
-                let removed: String = self.rope.slice(pos..next).into();
-                self.rope.remove(pos..next);
-                self.cursors[i].position = pos;
-                offset -= 1;
-                self.undo_stack.push(EditOperation {
-                    offset: pos,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before: pos,
-                    group_id,
-                    cursors_before: save,
-                });
             }
-            self.cursors[i].desired_col = None;
-        }
-        self.dirty = true;
-        self.redo_stack.clear();
-        self.merge_cursors();
+        });
     }
 
     /// Delete from the start of the line to the cursor position at every cursor.
     /// If a cursor has a selection, deletes the selection instead. Multi-cursor safe.
     pub fn delete_to_line_start_multi(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let group_id = self.new_undo_group();
-        let cursors_snapshot = self.cursors.clone();
-        self.cursors.sort();
-        let mut offset: isize = 0;
-        for i in 0..self.cursors.len() {
-            let pos = (self.cursors[i].position as isize + offset) as usize;
-            let save = if i == 0 {
-                Some(cursors_snapshot.clone())
+        self.apply_multi_cursor_delete(|rope, pos| {
+            let line = rope.char_to_line(pos);
+            let line_start = rope.line_to_char(line);
+            if pos > line_start {
+                Some((line_start, pos))
             } else {
                 None
-            };
-
-            if let Some(anchor) = self.cursors[i].selection_anchor.take() {
-                // Selection exists: delete selection range (same as backspace)
-                let adj_anchor = (anchor as isize + offset) as usize;
-                let start = pos.min(adj_anchor);
-                let end = pos.max(adj_anchor);
-                let removed: String = self.rope.slice(start..end).into();
-                self.rope.remove(start..end);
-                offset -= (end - start) as isize;
-                self.cursors[i].position = start;
-                self.undo_stack.push(EditOperation {
-                    offset: start,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before: pos,
-                    group_id,
-                    cursors_before: save,
-                });
-            } else {
-                // Delete from line start to cursor
-                let line = self.rope.char_to_line(pos);
-                let line_start = self.rope.line_to_char(line);
-                if pos > line_start {
-                    let removed: String = self.rope.slice(line_start..pos).into();
-                    self.rope.remove(line_start..pos);
-                    offset -= (pos - line_start) as isize;
-                    self.cursors[i].position = line_start;
-                    self.undo_stack.push(EditOperation {
-                        offset: line_start,
-                        removed,
-                        inserted: String::new(),
-                        cursor_before: pos,
-                        group_id,
-                        cursors_before: save,
-                    });
-                }
             }
-            self.cursors[i].desired_col = None;
-        }
-        self.dirty = true;
-        self.redo_stack.clear();
-        self.merge_cursors();
+        });
     }
 
     /// Multi-cursor movement: move all cursors left.
@@ -758,7 +667,7 @@ impl Buffer {
 
     /// Check if bytes likely represent a binary file.
     fn is_likely_binary(bytes: &[u8]) -> bool {
-        let sample = &bytes[..bytes.len().min(8192)];
+        let sample = &bytes[..bytes.len().min(BINARY_DETECT_SAMPLE_SIZE)];
         if sample.contains(&0u8) {
             return true;
         }
@@ -804,12 +713,6 @@ impl Buffer {
         result
     }
 
-    /// Open a file and detect its encoding
-    #[allow(dead_code)]
-    pub fn from_file(path: &std::path::Path) -> Result<Self> {
-        Self::from_file_with_config(path, &AppConfig::default())
-    }
-
     /// Open a file with large-file handling options.
     pub fn from_file_with_config(path: &std::path::Path, config: &AppConfig) -> Result<Self> {
         let file_size = std::fs::metadata(path)?.len();
@@ -817,7 +720,7 @@ impl Buffer {
         // Check for binary content before large-file mode to avoid feeding
         // raw binary bytes to the text renderer (which can crash the GPU pipeline).
         {
-            let mut sample = [0u8; 8192];
+            let mut sample = [0u8; BINARY_DETECT_SAMPLE_SIZE];
             let n = {
                 use std::io::Read;
                 let mut f = std::fs::File::open(path)?;
@@ -829,30 +732,7 @@ impl Buffer {
                     file_size,
                     Self::hex_dump(&sample[..n.min(4096)])
                 );
-                let rope = Rope::from_str(&display_text);
-                return Ok(Self {
-                    rope,
-                    file_path: Some(path.to_path_buf()),
-                    dirty: false,
-                    cursors: vec![Cursor::new(0)],
-                    scroll_y: 0.0,
-                    scroll_y_target: 0.0,
-                    scroll_x: 0.0,
-                    scroll_x_target: 0.0,
-                    undo_stack: Vec::new(),
-                    redo_stack: Vec::new(),
-                    next_undo_group: 0,
-                    encoding: "Binary",
-                    line_ending: LineEnding::Lf,
-                    language_index: None,
-                    is_binary: true,
-                    large_file: None,
-                    large_file_edit_mode: false,
-                    edit_mode_loader: None,
-                    wrap_enabled: true,
-                    layout_cache: std::cell::RefCell::new(None),
-                    file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
-                });
+                return Ok(Self::make_binary_buffer(path, display_text));
             }
         }
 
@@ -869,30 +749,7 @@ impl Buffer {
                 bytes.len(),
                 Self::hex_dump(&bytes[..bytes.len().min(4096)])
             );
-            let rope = Rope::from_str(&display_text);
-            return Ok(Self {
-                rope,
-                file_path: Some(path.to_path_buf()),
-                dirty: false,
-                cursors: vec![Cursor::new(0)],
-                scroll_y: 0.0,
-                scroll_y_target: 0.0,
-                scroll_x: 0.0,
-                scroll_x_target: 0.0,
-                undo_stack: Vec::new(),
-                redo_stack: Vec::new(),
-                next_undo_group: 0,
-                encoding: "Binary",
-                line_ending: LineEnding::Lf,
-                language_index: None,
-                is_binary: true,
-                large_file: None,
-                large_file_edit_mode: false,
-                edit_mode_loader: None,
-                wrap_enabled: true,
-                layout_cache: std::cell::RefCell::new(None),
-                file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
-            });
+            return Ok(Self::make_binary_buffer(path, display_text));
         }
 
         // Detect encoding
@@ -931,6 +788,33 @@ impl Buffer {
             layout_cache: std::cell::RefCell::new(None),
             file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
         })
+    }
+
+    fn make_binary_buffer(path: &std::path::Path, display_text: String) -> Self {
+        let rope = Rope::from_str(&display_text);
+        Self {
+            rope,
+            file_path: Some(path.to_path_buf()),
+            dirty: false,
+            cursors: vec![Cursor::new(0)],
+            scroll_y: 0.0,
+            scroll_y_target: 0.0,
+            scroll_x: 0.0,
+            scroll_x_target: 0.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            next_undo_group: 0,
+            encoding: "Binary",
+            line_ending: LineEnding::Lf,
+            language_index: None,
+            is_binary: true,
+            large_file: None,
+            large_file_edit_mode: false,
+            edit_mode_loader: None,
+            wrap_enabled: true,
+            layout_cache: std::cell::RefCell::new(None),
+            file_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
+        }
     }
 
     fn from_large_file(path: &std::path::Path, preview_bytes: usize) -> Result<Self> {
@@ -1201,16 +1085,6 @@ impl Buffer {
         self.large_file.as_ref().map(|state| state.index_version())
     }
 
-    #[allow(dead_code)]
-    pub fn current_large_file_byte_offset(&self) -> Option<u64> {
-        let state = self.large_file.as_ref()?;
-        if self.large_file_edit_mode {
-            Some(self.rope.char_to_byte(self.cursor()) as u64)
-        } else {
-            Some(state.window_start_byte + self.rope.char_to_byte(self.cursor()) as u64)
-        }
-    }
-
     pub fn focus_large_file_offset(&mut self, byte_offset: u64, window_bytes: usize) -> Result<()> {
         if self.large_file_edit_mode {
             // In edit mode the full file is in the rope; just move the cursor.
@@ -1358,14 +1232,6 @@ impl Buffer {
             overlap_char.saturating_sub(visible_lines / 2),
         );
         Ok(true)
-    }
-
-    #[allow(dead_code)]
-    pub fn toggle_bookmark(&mut self, label: Option<String>) {
-        let byte_offset = self.current_large_file_byte_offset();
-        if let (Some(state), Some(byte_offset)) = (self.large_file.as_mut(), byte_offset) {
-            state.toggle_bookmark(byte_offset, label);
-        }
     }
 
     /// Save the buffer to its file path
@@ -1582,79 +1448,6 @@ impl Buffer {
         );
     }
 
-    /// Delete the character before the cursor (backspace)
-    #[allow(dead_code)]
-    pub fn backspace(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let group_id = self.new_undo_group();
-        // Delete selection if any
-        if let Some(anchor) = self.selection_anchor() {
-            self.set_selection_anchor(None);
-            let start = self.cursor().min(anchor);
-            let end = self.cursor().max(anchor);
-            let removed: String = self.rope.slice(start..end).into();
-            self.rope.remove(start..end);
-            let cursor_before = self.cursor();
-            self.set_cursor(start);
-            self.dirty = true;
-            self.redo_stack.clear();
-            self.push_edit(start, removed, String::new(), cursor_before, group_id, None);
-            return;
-        }
-
-        if self.cursor() > 0 {
-            let cursor_before = self.cursor();
-            let prev = self.cursor() - 1;
-            let removed: String = self.rope.slice(prev..self.cursor()).into();
-            self.rope.remove(prev..self.cursor());
-            self.set_cursor(prev);
-            self.dirty = true;
-            self.redo_stack.clear();
-            self.push_edit(prev, removed, String::new(), cursor_before, group_id, None);
-        }
-    }
-
-    /// Delete the character after the cursor (delete key)
-    #[allow(dead_code)]
-    pub fn delete_forward(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let group_id = self.new_undo_group();
-        // Delete selection if any
-        if let Some(anchor) = self.selection_anchor() {
-            self.set_selection_anchor(None);
-            let start = self.cursor().min(anchor);
-            let end = self.cursor().max(anchor);
-            let removed: String = self.rope.slice(start..end).into();
-            self.rope.remove(start..end);
-            let cursor_before = self.cursor();
-            self.set_cursor(start);
-            self.dirty = true;
-            self.redo_stack.clear();
-            self.push_edit(start, removed, String::new(), cursor_before, group_id, None);
-            return;
-        }
-
-        if self.cursor() < self.rope.len_chars() {
-            let next = self.cursor() + 1;
-            let removed: String = self.rope.slice(self.cursor()..next).into();
-            self.rope.remove(self.cursor()..next);
-            self.dirty = true;
-            self.redo_stack.clear();
-            self.push_edit(
-                self.cursor(),
-                removed,
-                String::new(),
-                self.cursor(),
-                group_id,
-                None,
-            );
-        }
-    }
-
     /// Undo the last edit (or the entire undo group if grouped)
     pub fn undo(&mut self) {
         if let Some(first_op) = self.undo_stack.pop() {
@@ -1754,89 +1547,6 @@ impl Buffer {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn move_left(&mut self) {
-        self.move_left_sel(false);
-    }
-    #[allow(dead_code)]
-    pub fn move_right(&mut self) {
-        self.move_right_sel(false);
-    }
-    #[allow(dead_code)]
-    pub fn move_up(&mut self) {
-        self.move_up_sel(false);
-    }
-    #[allow(dead_code)]
-    pub fn move_down(&mut self) {
-        self.move_down_sel(false);
-    }
-
-    pub fn move_left_sel(&mut self, shift: bool) {
-        self.update_selection_for_move(shift);
-        if self.cursor() > 0 {
-            self.set_cursor(self.cursor() - 1);
-        }
-        self.set_desired_col(None);
-    }
-
-    pub fn move_right_sel(&mut self, shift: bool) {
-        self.update_selection_for_move(shift);
-        if self.cursor() < self.rope.len_chars() {
-            self.set_cursor(self.cursor() + 1);
-        }
-        self.set_desired_col(None);
-    }
-
-    pub fn move_up_sel(&mut self, shift: bool) {
-        self.update_selection_for_move(shift);
-        let line = self.rope.char_to_line(self.cursor());
-        if line > 0 {
-            let current_col = self.cursor() - self.rope.line_to_char(line);
-            let target_col = self.desired_col().unwrap_or(current_col);
-            self.set_desired_col(Some(target_col));
-
-            let prev_line_start = self.rope.line_to_char(line - 1);
-            let prev_line_len = self.rope.line(line - 1).len_chars().saturating_sub(1);
-            let actual_col = target_col.min(prev_line_len);
-            self.set_cursor(prev_line_start + actual_col);
-        } else if self.is_large_file() && self.shift_large_file_window_backward(1).unwrap_or(false)
-        {
-            self.set_cursor(
-                self.rope
-                    .line_to_char(self.rope.char_to_line(self.cursor())),
-            );
-        }
-    }
-
-    pub fn move_down_sel(&mut self, shift: bool) {
-        self.update_selection_for_move(shift);
-        let line = self.rope.char_to_line(self.cursor());
-        if line < self.rope.len_lines().saturating_sub(1) {
-            let current_col = self.cursor() - self.rope.line_to_char(line);
-            let target_col = self.desired_col().unwrap_or(current_col);
-            self.set_desired_col(Some(target_col));
-
-            let next_line_start = self.rope.line_to_char(line + 1);
-            let next_line_len = self.rope.line(line + 1).len_chars().saturating_sub(1);
-            let actual_col = target_col.min(next_line_len);
-            self.set_cursor(next_line_start + actual_col);
-        } else if self.is_large_file() && self.shift_large_file_window_forward(1).unwrap_or(false) {
-            self.set_cursor(
-                self.rope
-                    .line_to_char(self.rope.char_to_line(self.cursor())),
-            );
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn move_to_line_start(&mut self) {
-        self.move_to_line_start_sel(false);
-    }
-    #[allow(dead_code)]
-    pub fn move_to_line_end(&mut self) {
-        self.move_to_line_end_sel(false);
-    }
-
     pub fn move_to_line_start_sel(&mut self, shift: bool) {
         self.update_selection_for_move(shift);
         let line = self.rope.char_to_line(self.cursor());
@@ -1863,15 +1573,6 @@ impl Buffer {
     pub fn select_all(&mut self) {
         self.set_selection_anchor(Some(0));
         self.set_cursor(self.rope.len_chars());
-    }
-
-    #[allow(dead_code)]
-    pub fn get_selected_text(&self) -> Option<String> {
-        self.selection_anchor().map(|anchor| {
-            let start = self.cursor().min(anchor);
-            let end = self.cursor().max(anchor);
-            self.rope.slice(start..end).to_string()
-        })
     }
 
     /// Delete the current selection and return the removed text.
@@ -1903,55 +1604,6 @@ impl Buffer {
     }
 
     // --- Clipboard Helpers ---
-
-    /// Copy: return selected text (or entire current line if no selection)
-    #[allow(dead_code)]
-    pub fn copy(&self) -> Option<String> {
-        if let Some(text) = self.get_selected_text() {
-            Some(text)
-        } else {
-            // Copy entire current line
-            let line = self.rope.char_to_line(self.cursor());
-            let line_text: String = self.rope.line(line).into();
-            Some(line_text)
-        }
-    }
-
-    /// Cut: delete selection and return it (or cut entire current line if no selection)
-    #[allow(dead_code)]
-    pub fn cut(&mut self) -> Option<String> {
-        if self.is_read_only() {
-            return None;
-        }
-        if self.selection_anchor().is_some() {
-            self.delete_selection()
-        } else {
-            // Cut entire current line
-            let line = self.rope.char_to_line(self.cursor());
-            let line_start = self.rope.line_to_char(line);
-            let line_end = if line + 1 < self.rope.len_lines() {
-                self.rope.line_to_char(line + 1)
-            } else {
-                self.rope.len_chars()
-            };
-            let removed: String = self.rope.slice(line_start..line_end).into();
-            let cursor_before = self.cursor();
-            let group_id = self.new_undo_group();
-            self.rope.remove(line_start..line_end);
-            self.set_cursor(line_start);
-            self.dirty = true;
-            self.redo_stack.clear();
-            self.push_edit(
-                line_start,
-                removed.clone(),
-                String::new(),
-                cursor_before,
-                group_id,
-                None,
-            );
-            Some(removed)
-        }
-    }
 
     /// Multi-cursor copy: collect selected text from each cursor, joined by newlines.
     pub fn copy_multi(&self) -> Option<String> {
@@ -2050,237 +1702,43 @@ impl Buffer {
         ch.is_alphanumeric() || ch == '_'
     }
 
-    /// Move cursor to the beginning of the previous word
-    #[allow(dead_code)]
-    pub fn move_word_left(&mut self) {
-        self.set_selection_anchor(None);
-        if self.cursor() == 0 {
-            return;
-        }
-        let mut pos = self.cursor();
-        // Skip whitespace/non-word chars going left
-        while pos > 0 && !Self::is_word_char(self.rope.char(pos - 1)) {
-            pos -= 1;
-        }
-        // Skip word chars going left
-        while pos > 0 && Self::is_word_char(self.rope.char(pos - 1)) {
-            pos -= 1;
-        }
-        self.set_cursor(pos);
-    }
-
-    /// Move cursor to the end of the next word
-    #[allow(dead_code)]
-    pub fn move_word_right(&mut self) {
-        self.set_selection_anchor(None);
-        let len = self.rope.len_chars();
-        if self.cursor() >= len {
-            return;
-        }
-        let mut pos = self.cursor();
-        // Skip word chars going right
-        while pos < len && Self::is_word_char(self.rope.char(pos)) {
-            pos += 1;
-        }
-        // Skip whitespace/non-word chars going right
-        while pos < len && !Self::is_word_char(self.rope.char(pos)) {
-            pos += 1;
-        }
-        self.set_cursor(pos);
-    }
-
     // --- Word-wise Deletion ---
-
-    /// Delete backward to the previous word boundary (Opt+Backspace)
-    #[allow(dead_code)]
-    pub fn delete_word_left(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        if self.selection_anchor().is_some() {
-            self.delete_selection();
-            return;
-        }
-        if self.cursor() == 0 {
-            return;
-        }
-        let mut pos = self.cursor();
-        while pos > 0 && !Self::is_word_char(self.rope.char(pos - 1)) {
-            pos -= 1;
-        }
-        while pos > 0 && Self::is_word_char(self.rope.char(pos - 1)) {
-            pos -= 1;
-        }
-        let removed: String = self.rope.slice(pos..self.cursor()).into();
-        let cursor_before = self.cursor();
-        let group_id = self.new_undo_group();
-        self.rope.remove(pos..self.cursor());
-        self.set_cursor(pos);
-        self.dirty = true;
-        self.redo_stack.clear();
-        self.push_edit(pos, removed, String::new(), cursor_before, group_id, None);
-    }
-
-    /// Delete forward to the next word boundary (Opt+Delete)
-    #[allow(dead_code)]
-    pub fn delete_word_right(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        if self.selection_anchor().is_some() {
-            self.delete_selection();
-            return;
-        }
-        let len = self.rope.len_chars();
-        if self.cursor() >= len {
-            return;
-        }
-        let mut pos = self.cursor();
-        while pos < len && Self::is_word_char(self.rope.char(pos)) {
-            pos += 1;
-        }
-        while pos < len && !Self::is_word_char(self.rope.char(pos)) {
-            pos += 1;
-        }
-        let removed: String = self.rope.slice(self.cursor()..pos).into();
-        let cursor_before = self.cursor();
-        let group_id = self.new_undo_group();
-        self.rope.remove(self.cursor()..pos);
-        self.dirty = true;
-        self.redo_stack.clear();
-        self.push_edit(
-            self.cursor(),
-            removed,
-            String::new(),
-            cursor_before,
-            group_id,
-            None,
-        );
-    }
 
     /// Multi-cursor delete word left (Opt+Backspace). Works for any cursor count.
     pub fn delete_word_left_multi(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let group_id = self.new_undo_group();
-        let cursors_snapshot = self.cursors.clone();
-        self.cursors.sort();
-        let mut offset: isize = 0;
-        for i in 0..self.cursors.len() {
-            let pos = (self.cursors[i].position as isize + offset) as usize;
-            let save = if i == 0 {
-                Some(cursors_snapshot.clone())
+        self.apply_multi_cursor_delete(|rope, pos| {
+            if pos > 0 {
+                let mut word_start = pos;
+                while word_start > 0 && !Self::is_word_char(rope.char(word_start - 1)) {
+                    word_start -= 1;
+                }
+                while word_start > 0 && Self::is_word_char(rope.char(word_start - 1)) {
+                    word_start -= 1;
+                }
+                Some((word_start, pos))
             } else {
                 None
-            };
-
-            if let Some(anchor) = self.cursors[i].selection_anchor.take() {
-                let adj_anchor = (anchor as isize + offset) as usize;
-                let start = pos.min(adj_anchor);
-                let end = pos.max(adj_anchor);
-                let removed: String = self.rope.slice(start..end).into();
-                self.rope.remove(start..end);
-                offset -= (end - start) as isize;
-                self.cursors[i].position = start;
-                self.undo_stack.push(EditOperation {
-                    offset: start,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before: pos,
-                    group_id,
-                    cursors_before: save,
-                });
-            } else if pos > 0 {
-                let mut word_start = pos;
-                while word_start > 0 && !Self::is_word_char(self.rope.char(word_start - 1)) {
-                    word_start -= 1;
-                }
-                while word_start > 0 && Self::is_word_char(self.rope.char(word_start - 1)) {
-                    word_start -= 1;
-                }
-                let removed: String = self.rope.slice(word_start..pos).into();
-                self.rope.remove(word_start..pos);
-                offset -= (pos - word_start) as isize;
-                self.cursors[i].position = word_start;
-                self.undo_stack.push(EditOperation {
-                    offset: word_start,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before: pos,
-                    group_id,
-                    cursors_before: save,
-                });
             }
-            self.cursors[i].desired_col = None;
-        }
-        self.dirty = true;
-        self.redo_stack.clear();
-        self.merge_cursors();
+        });
     }
 
     /// Multi-cursor delete word right (Opt+Delete). Works for any cursor count.
     pub fn delete_word_right_multi(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let group_id = self.new_undo_group();
-        let cursors_snapshot = self.cursors.clone();
-        self.cursors.sort();
-        let mut offset: isize = 0;
-        for i in 0..self.cursors.len() {
-            let pos = (self.cursors[i].position as isize + offset) as usize;
-            let save = if i == 0 {
-                Some(cursors_snapshot.clone())
+        self.apply_multi_cursor_delete(|rope, pos| {
+            let len = rope.len_chars();
+            if pos < len {
+                let mut word_end = pos;
+                while word_end < len && Self::is_word_char(rope.char(word_end)) {
+                    word_end += 1;
+                }
+                while word_end < len && !Self::is_word_char(rope.char(word_end)) {
+                    word_end += 1;
+                }
+                Some((pos, word_end))
             } else {
                 None
-            };
-
-            if let Some(anchor) = self.cursors[i].selection_anchor.take() {
-                let adj_anchor = (anchor as isize + offset) as usize;
-                let start = pos.min(adj_anchor);
-                let end = pos.max(adj_anchor);
-                let removed: String = self.rope.slice(start..end).into();
-                self.rope.remove(start..end);
-                offset -= (end - start) as isize;
-                self.cursors[i].position = start;
-                self.undo_stack.push(EditOperation {
-                    offset: start,
-                    removed,
-                    inserted: String::new(),
-                    cursor_before: pos,
-                    group_id,
-                    cursors_before: save,
-                });
-            } else {
-                let len = self.rope.len_chars();
-                if pos < len {
-                    let mut word_end = pos;
-                    while word_end < len && Self::is_word_char(self.rope.char(word_end)) {
-                        word_end += 1;
-                    }
-                    while word_end < len && !Self::is_word_char(self.rope.char(word_end)) {
-                        word_end += 1;
-                    }
-                    let removed: String = self.rope.slice(pos..word_end).into();
-                    self.rope.remove(pos..word_end);
-                    offset -= (word_end - pos) as isize;
-                    self.cursors[i].position = pos;
-                    self.undo_stack.push(EditOperation {
-                        offset: pos,
-                        removed,
-                        inserted: String::new(),
-                        cursor_before: pos,
-                        group_id,
-                        cursors_before: save,
-                    });
-                }
             }
-            self.cursors[i].desired_col = None;
-        }
-        self.dirty = true;
-        self.redo_stack.clear();
-        self.merge_cursors();
+        });
     }
 
     // --- Document Navigation ---
@@ -3437,7 +2895,7 @@ impl Buffer {
             .visual_position_of_char(self.cursor(), wrap_width, char_width)
             .0 as f64;
         let scroll = self.scroll_y_target;
-        let margin = 3.0; // Keep 3 lines of context
+        let margin = SCROLL_MARGIN_LINES;
         let max_scroll = self.max_vertical_scroll(visible_lines, wrap_width, char_width);
 
         if cursor_line < scroll + margin {
@@ -3544,17 +3002,6 @@ impl Buffer {
             Some(line) => line.start_char + col_in_segment.min(line.end_char - line.start_char),
             None => 0,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn selection_range(&self) -> Option<(usize, usize)> {
-        self.selection_anchor().map(|anchor| {
-            if anchor < self.cursor() {
-                (anchor, self.cursor())
-            } else {
-                (self.cursor(), anchor)
-            }
-        })
     }
 }
 

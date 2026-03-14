@@ -45,6 +45,7 @@ pub const COMMAND_PALETTE_MAX_VISIBLE_ITEMS: usize = 16;
 pub const PICKER_MAX_VISIBLE_ITEMS: usize = 12;
 pub const SNACKBAR_TIP_WIDTH: usize = 44;
 pub const SNACKBAR_TIP_LINES: usize = 2;
+const MATCH_TICK_LIMIT: usize = 500;
 
 pub fn command_palette_visible_items(item_count: usize) -> usize {
     item_count.min(COMMAND_PALETTE_MAX_VISIBLE_ITEMS)
@@ -853,23 +854,18 @@ impl Renderer {
         settings_cursor: usize,
         snackbar_tip: Option<&str>,
     ) {
-        // Calculate metrics based on config font size
         let font_size = config.font_size;
-        let line_height = font_size * 1.44; // Maintain same ratio as default (26/18 ≈ 1.44)
-
-        // Update stored font size for rendering calculations
+        let line_height = font_size * 1.44;
         self.current_font_size = font_size;
-
-        // Update effective gutter width based on show_line_numbers setting
         self.effective_gutter_width = effective_gutter_width(config.show_line_numbers);
 
-        // Update editor buffer metrics if font size changed
         self.editor_buffer
             .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
         self.gutter_buffer
             .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
         self.cursor_buffer
             .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
+
         let buffer = editor.active();
         let width = self.width as f32 / self.scale_factor.max(1.0);
         let results_panel_h = self.results_panel_height(overlay);
@@ -878,17 +874,45 @@ impl Renderer {
             - STATUS_BAR_HEIGHT
             - results_panel_h;
 
-        // --- Tab Bar ---
-        // Use None for width to prevent tab labels from wrapping to a second row
+        self.update_tab_bar_buffers(editor, theme, width);
+        self.update_editor_content_buffers(
+            buffer,
+            theme,
+            syntax,
+            config,
+            font_size,
+            line_height,
+            width,
+            editor_height,
+        );
+        self.update_status_bar_buffer(buffer, overlay, syntax, theme, width);
+        self.update_overlay_buffers(
+            editor,
+            buffer,
+            overlay,
+            syntax,
+            config,
+            width,
+            settings_cursor,
+        );
+        self.update_results_panel_buffer(overlay, theme, results_panel_h);
+        self.update_snackbar_buffer(snackbar_tip, theme);
+    }
+
+    fn update_tab_bar_buffers(
+        &mut self,
+        editor: &crate::editor::Editor,
+        theme: &Theme,
+        width: f32,
+    ) {
         self.tab_bar_buffer
             .set_size(&mut self.font_system, None, Some(TAB_BAR_HEIGHT));
 
-        // Compute per-tab positions based on actual label width
         let tab_char_w = TAB_CHAR_WIDTH;
         let tab_pad = TAB_PADDING_H;
-        let tab_gap = 3.0; // logical px gap between tabs
-        let tab_gap_chars = (tab_gap / tab_char_w).ceil() as usize; // space chars to fill gap
-        let tab_gap_text_w = tab_gap_chars as f32 * tab_char_w; // actual text width of gap
+        let tab_gap = 3.0;
+        let tab_gap_chars = (tab_gap / tab_char_w).ceil() as usize;
+        let tab_gap_text_w = tab_gap_chars as f32 * tab_char_w;
         self.tab_positions.clear();
         let mut tab_x = 0.0f32;
         let mut tab_spans: Vec<(String, Attrs)> = Vec::new();
@@ -907,7 +931,6 @@ impl Renderer {
             let name = buf.display_name();
             let dirty_marker = if buf.dirty { "● " } else { "" };
             let close_marker = if show_close { " ×" } else { "" };
-            // Truncate the file name if the full label would exceed the max
             let prefix_len = dirty_marker.chars().count();
             let suffix_len = close_marker.chars().count();
             let max_name_chars = dyn_max_label_chars.saturating_sub(prefix_len + suffix_len);
@@ -923,9 +946,6 @@ impl Renderer {
             let label = format!("{dirty_marker}{truncated_name}{close_marker}");
             let label_chars = label.chars().count();
 
-            // Pad with spaces to fill ~tab_pad worth of space on each side.
-            // When a close button is present, use minimal right padding so the ×
-            // stays flush against the tab's right edge (matching the click target).
             let pad_chars = (tab_pad / tab_char_w).round() as usize;
             let right_pad_chars = if show_close { 1 } else { pad_chars };
             let tw =
@@ -947,10 +967,8 @@ impl Renderer {
             self.tab_positions.push((tab_x, tw));
             tab_x += tw;
 
-            // Add invisible gap spacer between tabs (not after the last tab)
             if i + 1 < tab_count {
                 let gap_text: String = " ".repeat(tab_gap_chars);
-                // Use transparent color so the gap shows the tab bar background
                 let gap_attrs = base_tab_attrs.color(glyphon::Color::rgba(0, 0, 0, 0));
                 tab_spans.push((gap_text, gap_attrs));
                 tab_x += tab_gap_text_w;
@@ -968,19 +986,15 @@ impl Renderer {
         self.tab_bar_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        // Compute tab bar overflow / scroll state
-        let tab_content_width = tab_x; // total width of all tab text (logical px)
-                                       // tab_area_width already computed above before the loop
+        let tab_content_width = tab_x;
         self.tab_overflow = tab_content_width > tab_area_width;
         self.tab_scroll_max = if self.tab_overflow {
             (tab_content_width - tab_area_width).max(0.0)
         } else {
             0.0
         };
-        // Clamp (handles tab close reducing total width below scroll offset)
         self.tab_scroll_offset = self.tab_scroll_offset.clamp(0.0, self.tab_scroll_max);
 
-        // Update control button text buffers
         let active_col = theme.tab_active_fg.to_glyphon();
         let inactive_col = theme.tab_inactive_fg.to_glyphon();
         let left_col = if self.tab_scroll_offset > 0.5 {
@@ -1011,8 +1025,20 @@ impl Renderer {
             "\u{2304}",
             active_col,
         );
+    }
 
-        // --- Gutter (line numbers) ---
+    #[allow(clippy::too_many_arguments)]
+    fn update_editor_content_buffers(
+        &mut self,
+        buffer: &crate::editor::Buffer,
+        theme: &Theme,
+        syntax: &crate::syntax::SyntaxHighlighter,
+        config: &crate::settings::AppConfig,
+        font_size: f32,
+        line_height: f32,
+        width: f32,
+        editor_height: f32,
+    ) {
         let gutter_w = self.effective_gutter_width;
         self.gutter_buffer.set_size(
             &mut self.font_system,
@@ -1023,10 +1049,8 @@ impl Renderer {
         let visible_lines = (editor_height / line_height).ceil() as usize;
         let scroll_line = buffer.scroll_y.floor() as usize;
 
-        // --- Editor Text (with syntax highlighting) ---
         let editor_left = gutter_w + LINE_PADDING_LEFT;
         let editor_width = width - editor_left - SCROLLBAR_WIDTH;
-        // Use finite width for line wrapping, or None for unlimited (horizontal scroll)
         let buf_width = if buffer.wrap_enabled {
             Some(editor_width)
         } else {
@@ -1035,6 +1059,7 @@ impl Renderer {
         let visible_visual_lines =
             buffer.visual_lines(scroll_line, visible_lines + 2, buf_width, char_width);
 
+        // Gutter (line numbers)
         if config.show_line_numbers {
             let mut gutter_text = String::new();
             for line in &visible_visual_lines {
@@ -1069,6 +1094,7 @@ impl Renderer {
         self.gutter_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
+        // Editor text (with syntax highlighting)
         self.editor_buffer
             .set_size(&mut self.font_system, buf_width, Some(editor_height));
 
@@ -1097,9 +1123,7 @@ impl Renderer {
             .family(Family::Name("JetBrains Mono"))
             .color(theme.fg.to_glyphon());
 
-        // Apply syntax highlighting if language is detected (with caching)
         if let Some(lang_idx) = buffer.language_index {
-            // Hash the visible text to check if we need to re-highlight
             let mut hasher = DefaultHasher::new();
             visible_text.hash(&mut hasher);
             let text_hash = hasher.finish();
@@ -1155,7 +1179,7 @@ impl Renderer {
         self.editor_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        // --- Cursor ---
+        // Cursor
         let (cursor_visual_line, _cursor_visual_col) =
             buffer.visual_position_of_char(buffer.cursor(), buf_width, char_width);
         let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
@@ -1177,8 +1201,16 @@ impl Renderer {
             self.cursor_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         }
+    }
 
-        // --- Status Bar ---
+    fn update_status_bar_buffer(
+        &mut self,
+        buffer: &crate::editor::Buffer,
+        overlay: &crate::overlay::OverlayState,
+        syntax: &crate::syntax::SyntaxHighlighter,
+        theme: &Theme,
+        width: f32,
+    ) {
         self.status_buffer
             .set_size(&mut self.font_system, Some(width), Some(STATUS_BAR_HEIGHT));
         let line = buffer.display_cursor_line() + 1;
@@ -1246,11 +1278,8 @@ impl Renderer {
             None
         };
 
-        // Build status text and compute segment boundaries for hit testing.
-        // Each segment is separated by "   ·   " (7 chars). Lower-priority segments
-        // are dropped as width shrinks so the status bar stays on a single row.
         let sep = "   ·   ";
-        let padding = "  "; // 2-char left padding
+        let padding = "  ";
         let seg_cursor = format!("Ln {}, Col {}", line, col);
         let seg_lines = format!("{} lines", total_lines);
         let seg_lang = lang_name.to_string();
@@ -1374,9 +1403,8 @@ impl Renderer {
                 .join(sep)
         );
 
-        // Compute segment x boundaries (logical px, with 10px left offset matching TextArea left)
         let cw = STATUS_CHAR_WIDTH;
-        let left_offset = 10.0; // matches the `left: 10.0 * s` in TextArea for status bar
+        let left_offset = 10.0;
         let sep_chars = sep_chars as f32;
         let mut x = left_offset + padding.chars().count() as f32 * cw;
         self.status_segments.clear();
@@ -1396,557 +1424,561 @@ impl Renderer {
         );
         self.status_buffer
             .shape_until_scroll(&mut self.font_system, false);
+    }
 
-        // --- Overlay Panel ---
-        if overlay.is_active() {
-            let overlay_width = crate::overlay::overlay_panel_width(&overlay.active, width, 1.0);
-            let _overlay_h = match &overlay.active {
-                crate::overlay::ActiveOverlay::Find => {
-                    if overlay.find.regex_error.is_some() {
-                        52.0
+    #[allow(clippy::too_many_arguments)]
+    fn update_overlay_buffers(
+        &mut self,
+        editor: &crate::editor::Editor,
+        buffer: &crate::editor::Buffer,
+        overlay: &crate::overlay::OverlayState,
+        syntax: &crate::syntax::SyntaxHighlighter,
+        config: &crate::settings::AppConfig,
+        width: f32,
+        settings_cursor: usize,
+    ) {
+        if !overlay.is_active() {
+            return;
+        }
+        let overlay_width = crate::overlay::overlay_panel_width(&overlay.active, width, 1.0);
+        let _overlay_h = match &overlay.active {
+            crate::overlay::ActiveOverlay::Find => {
+                if overlay.find.regex_error.is_some() {
+                    52.0
+                } else {
+                    32.0
+                }
+            }
+            crate::overlay::ActiveOverlay::FindReplace => 52.0,
+            crate::overlay::ActiveOverlay::CommandPalette => {
+                let item_count = crate::overlay::palette::filter_commands(
+                    &overlay.input,
+                    &overlay.recent_commands,
+                )
+                .len();
+                command_palette_panel_height(item_count)
+            }
+            crate::overlay::ActiveOverlay::Help => 400.0,
+            crate::overlay::ActiveOverlay::Settings => 360.0,
+            crate::overlay::ActiveOverlay::LanguagePicker => {
+                picker_panel_height(PICKER_MAX_VISIBLE_ITEMS)
+            }
+            crate::overlay::ActiveOverlay::LineEndingPicker => 100.0,
+            crate::overlay::ActiveOverlay::AllTabs => {
+                picker_panel_height(overlay.all_tabs_count.min(PICKER_MAX_VISIBLE_ITEMS))
+            }
+            _ => 32.0,
+        };
+        let _ = (overlay_width, _overlay_h);
+
+        let overlay_text = match &overlay.active {
+            crate::overlay::ActiveOverlay::Find => {
+                let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_find_label_buffer,
+                    "Find:",
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_find_input_buffer,
+                    &format!("{}│{}", before, after),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_count_buffer,
+                    &overlay.find.match_count_label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_case_toggle_buffer,
+                    crate::overlay::FindToggleKind::CaseSensitive.label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_word_toggle_buffer,
+                    crate::overlay::FindToggleKind::WholeWord.label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_regex_toggle_buffer,
+                    crate::overlay::FindToggleKind::Regex.label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_replace_label_buffer,
+                    "",
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_replace_input_buffer,
+                    "",
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_replace_all_btn_buffer,
+                    "",
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_error_buffer,
+                    &overlay
+                        .find
+                        .regex_error
+                        .as_ref()
+                        .map(|err| format!("! Regex: {}", err))
+                        .unwrap_or_default(),
+                );
+                String::new()
+            }
+            crate::overlay::ActiveOverlay::FindReplace => {
+                let (find_before, find_after) = if overlay.focus_replace {
+                    (overlay.input.as_str(), "")
+                } else {
+                    overlay.input.split_at(overlay.cursor_pos)
+                };
+                let (replace_before, replace_after) = if overlay.focus_replace {
+                    overlay.replace_input.split_at(overlay.replace_cursor_pos)
+                } else {
+                    (overlay.replace_input.as_str(), "")
+                };
+                let find_display = if overlay.focus_replace {
+                    find_before.to_string()
+                } else {
+                    format!("{}│{}", find_before, find_after)
+                };
+                let replace_display = if overlay.focus_replace {
+                    format!("{}│{}", replace_before, replace_after)
+                } else {
+                    replace_before.to_string()
+                };
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_find_label_buffer,
+                    "Find:",
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_replace_label_buffer,
+                    "Replace:",
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_find_input_buffer,
+                    &find_display,
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_replace_input_buffer,
+                    &replace_display,
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_count_buffer,
+                    &overlay.find.match_count_label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_case_toggle_buffer,
+                    crate::overlay::FindToggleKind::CaseSensitive.label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_word_toggle_buffer,
+                    crate::overlay::FindToggleKind::WholeWord.label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_regex_toggle_buffer,
+                    crate::overlay::FindToggleKind::Regex.label(),
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_replace_all_btn_buffer,
+                    "All",
+                );
+                set_overlay_text_buffer(
+                    &mut self.font_system,
+                    &mut self.overlay_error_buffer,
+                    &overlay
+                        .find
+                        .regex_error
+                        .as_ref()
+                        .map(|err| format!("! Regex: {}", err))
+                        .unwrap_or_default(),
+                );
+                String::new()
+            }
+            crate::overlay::ActiveOverlay::GotoLine => {
+                let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                format!("Go to Line: {}│{}", before, after)
+            }
+            crate::overlay::ActiveOverlay::CommandPalette => {
+                let filtered = crate::overlay::palette::filter_commands(
+                    &overlay.input,
+                    &overlay.recent_commands,
+                );
+                let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                let mut text = format!("> {}│{}\n", before, after);
+                let selected = overlay
+                    .picker_selected
+                    .min(filtered.len().saturating_sub(1));
+                let max_visible = command_palette_visible_items(filtered.len());
+                let scroll_offset = if selected >= max_visible {
+                    selected - max_visible + 1
+                } else {
+                    0
+                };
+                let visible_commands: Vec<_> = filtered
+                    .iter()
+                    .skip(scroll_offset)
+                    .take(max_visible)
+                    .collect();
+                let name_width = visible_commands
+                    .iter()
+                    .map(|cmd| cmd.name.len())
+                    .max()
+                    .unwrap_or(0);
+                for (row_idx, cmd) in visible_commands.iter().enumerate() {
+                    let idx = scroll_offset + row_idx;
+                    let sel = if idx == selected { "▸ " } else { "  " };
+                    let shortcut = crate::overlay::palette::format_shortcut_badge(cmd.shortcut);
+                    if shortcut.is_empty() {
+                        text.push_str(&format!("{}{:<name_width$}\n", sel, cmd.name));
                     } else {
-                        32.0
+                        text.push_str(
+                            &format!("{}{:<name_width$}  {}\n", sel, cmd.name, shortcut,),
+                        );
                     }
                 }
-                crate::overlay::ActiveOverlay::FindReplace => 52.0,
-                crate::overlay::ActiveOverlay::CommandPalette => {
-                    let item_count = crate::overlay::palette::filter_commands(
-                        &overlay.input,
-                        &overlay.recent_commands,
-                    )
-                    .len();
-                    command_palette_panel_height(item_count)
-                }
-                crate::overlay::ActiveOverlay::Help => 400.0,
-                crate::overlay::ActiveOverlay::Settings => 360.0,
-                crate::overlay::ActiveOverlay::LanguagePicker => {
-                    picker_panel_height(PICKER_MAX_VISIBLE_ITEMS)
-                }
-                crate::overlay::ActiveOverlay::LineEndingPicker => 100.0,
-                crate::overlay::ActiveOverlay::AllTabs => {
-                    picker_panel_height(overlay.all_tabs_count.min(PICKER_MAX_VISIBLE_ITEMS))
-                }
-                _ => 32.0,
-            };
-
-            // Don't resize - use pre-allocated buffer size
-            // Just track the current size for rendering bounds
-            let _ = (overlay_width, _overlay_h); // suppress unused warnings
-
-            let overlay_text = match &overlay.active {
-                crate::overlay::ActiveOverlay::Find => {
-                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_find_label_buffer,
-                        "Find:",
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_find_input_buffer,
-                        &format!("{}│{}", before, after),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_count_buffer,
-                        &overlay.find.match_count_label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_case_toggle_buffer,
-                        crate::overlay::FindToggleKind::CaseSensitive.label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_word_toggle_buffer,
-                        crate::overlay::FindToggleKind::WholeWord.label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_regex_toggle_buffer,
-                        crate::overlay::FindToggleKind::Regex.label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_replace_label_buffer,
-                        "",
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_replace_input_buffer,
-                        "",
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_replace_all_btn_buffer,
-                        "",
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_error_buffer,
-                        &overlay
-                            .find
-                            .regex_error
-                            .as_ref()
-                            .map(|err| format!("! Regex: {}", err))
-                            .unwrap_or_default(),
-                    );
-                    String::new()
-                }
-                crate::overlay::ActiveOverlay::FindReplace => {
-                    let (find_before, find_after) = if overlay.focus_replace {
-                        (overlay.input.as_str(), "")
+                text
+            }
+            crate::overlay::ActiveOverlay::Help => {
+                let mut text = String::from("--- NotepadX Keyboard Shortcuts ---\n\n");
+                let left_col: &[&str] = &[
+                    "File:      Cmd+N: New    | Cmd+O: Open",
+                    "           Cmd+S: Save   | Cmd+W: Close",
+                    "",
+                    "Edit:      Cmd+Z: Undo   | Cmd+Y: Redo",
+                    "           Cmd+C: Copy   | Cmd+X: Cut",
+                    "           Cmd+V: Paste  | Cmd+A: Sel All",
+                    "           Cmd+/: Commnt | Cmd+Shift+D: Dupl",
+                    "           Cmd+D: Sel Next Occurrence",
+                    "",
+                    "Nav:       Arrows: Move  | Alt+Arr: Word",
+                    "           Shift+Arr: Sel| Home/End",
+                    "           Cmd+Arr: Doc Start/End",
+                    "           PgUp/PgDn     | Cmd+[/]: Tab",
+                    "",
+                    "Lines:     Alt+Up/Dn: Move Line",
+                    "           Tab/Shift+Tab: Indent (sel)",
+                ];
+                let right_col: &[&str] = &[
+                    "Search:    Cmd+F: Find   | Cmd+Opt+F: Replace",
+                    "           Cmd+G: Goto   | Cmd+Shift+P: Palette",
+                    "",
+                    "Tabs:      Drag to reorder tabs.",
+                    "",
+                    "Other:     Cmd+K/Shift+K: Theme Cycle",
+                    "           Cmd+,: Settings | Alt+Z: Wrap",
+                    "           Cmd+Shift+E: Large File Edit Mode",
+                    "           F1: Help | Esc: Close Overlay",
+                    "",
+                    "Help:      TAB toggles fields in Replace.",
+                    "           Cmd+Shift+Enter: Replace All.",
+                    "           Cmd+Opt+C/W/R: Case/Word/Regex.",
+                    "           Click [Aa] [W] [.*] to toggle.",
+                    "           ENTER/Arrows for search results.",
+                    "",
+                ];
+                let rows = left_col.len().max(right_col.len());
+                for i in 0..rows {
+                    let l = left_col.get(i).copied().unwrap_or("");
+                    let r = right_col.get(i).copied().unwrap_or("");
+                    if r.is_empty() {
+                        text.push_str(l);
                     } else {
-                        overlay.input.split_at(overlay.cursor_pos)
-                    };
-                    let (replace_before, replace_after) = if overlay.focus_replace {
-                        overlay.replace_input.split_at(overlay.replace_cursor_pos)
-                    } else {
-                        (overlay.replace_input.as_str(), "")
-                    };
-                    let find_display = if overlay.focus_replace {
-                        find_before.to_string()
-                    } else {
-                        format!("{}│{}", find_before, find_after)
-                    };
-                    let replace_display = if overlay.focus_replace {
-                        format!("{}│{}", replace_before, replace_after)
-                    } else {
-                        replace_before.to_string()
-                    };
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_find_label_buffer,
-                        "Find:",
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_replace_label_buffer,
-                        "Replace:",
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_find_input_buffer,
-                        &find_display,
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_replace_input_buffer,
-                        &replace_display,
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_count_buffer,
-                        &overlay.find.match_count_label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_case_toggle_buffer,
-                        crate::overlay::FindToggleKind::CaseSensitive.label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_word_toggle_buffer,
-                        crate::overlay::FindToggleKind::WholeWord.label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_regex_toggle_buffer,
-                        crate::overlay::FindToggleKind::Regex.label(),
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_replace_all_btn_buffer,
-                        "All",
-                    );
-                    set_overlay_text_buffer(
-                        &mut self.font_system,
-                        &mut self.overlay_error_buffer,
-                        &overlay
-                            .find
-                            .regex_error
-                            .as_ref()
-                            .map(|err| format!("! Regex: {}", err))
-                            .unwrap_or_default(),
-                    );
-                    String::new()
+                        text.push_str(&format!("{:<50}{}", l, r));
+                    }
+                    text.push('\n');
                 }
-                crate::overlay::ActiveOverlay::GotoLine => {
-                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    format!("Go to Line: {}│{}", before, after)
-                }
-                crate::overlay::ActiveOverlay::CommandPalette => {
-                    let filtered = crate::overlay::palette::filter_commands(
-                        &overlay.input,
-                        &overlay.recent_commands,
-                    );
-                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    let mut text = format!("> {}│{}\n", before, after);
-                    let selected = overlay
-                        .picker_selected
-                        .min(filtered.len().saturating_sub(1));
-                    // Scroll the visible window so the selected item is always on screen
-                    let max_visible = command_palette_visible_items(filtered.len());
-                    let scroll_offset = if selected >= max_visible {
-                        selected - max_visible + 1
-                    } else {
-                        0
-                    };
-                    let visible_commands: Vec<_> = filtered
-                        .iter()
-                        .skip(scroll_offset)
-                        .take(max_visible)
-                        .collect();
-                    let name_width = visible_commands
-                        .iter()
-                        .map(|cmd| cmd.name.len())
-                        .max()
-                        .unwrap_or(0);
-                    for (row_idx, cmd) in visible_commands.iter().enumerate() {
-                        let idx = scroll_offset + row_idx;
-                        let sel = if idx == selected { "▸ " } else { "  " };
-                        let shortcut = crate::overlay::palette::format_shortcut_badge(cmd.shortcut);
-                        if shortcut.is_empty() {
-                            text.push_str(&format!("{}{:<name_width$}\n", sel, cmd.name));
+                text.pop();
+                text
+            }
+            crate::overlay::ActiveOverlay::Settings => {
+                let all_themes = Theme::all_themes();
+                let theme_name = all_themes
+                    .get(config.theme_index)
+                    .map(|t| t.name())
+                    .unwrap_or("Unknown");
+                let rows: &[(&str, String)] = &[
+                    ("Theme", format!("  {}  ", theme_name)),
+                    ("Font Size", format!("  {} pt  ", config.font_size as usize)),
+                    (
+                        "Line Wrap",
+                        (if config.line_wrap { " On" } else { " Off" }).to_string(),
+                    ),
+                    (
+                        "Auto-Save",
+                        (if config.auto_save { " On" } else { " Off" }).to_string(),
+                    ),
+                    (
+                        "Show Line Numbers",
+                        (if config.show_line_numbers {
+                            " On"
                         } else {
-                            text.push_str(&format!(
-                                "{}{:<name_width$}  {}\n",
-                                sel, cmd.name, shortcut,
-                            ));
-                        }
-                    }
-                    text
-                }
-                crate::overlay::ActiveOverlay::Help => {
-                    let mut text = String::from("--- NotepadX Keyboard Shortcuts ---\n\n");
-                    let left_col: &[&str] = &[
-                        "File:      Cmd+N: New    | Cmd+O: Open",
-                        "           Cmd+S: Save   | Cmd+W: Close",
-                        "",
-                        "Edit:      Cmd+Z: Undo   | Cmd+Y: Redo",
-                        "           Cmd+C: Copy   | Cmd+X: Cut",
-                        "           Cmd+V: Paste  | Cmd+A: Sel All",
-                        "           Cmd+/: Commnt | Cmd+Shift+D: Dupl",
-                        "           Cmd+D: Sel Next Occurrence",
-                        "",
-                        "Nav:       Arrows: Move  | Alt+Arr: Word",
-                        "           Shift+Arr: Sel| Home/End",
-                        "           Cmd+Arr: Doc Start/End",
-                        "           PgUp/PgDn     | Cmd+[/]: Tab",
-                        "",
-                        "Lines:     Alt+Up/Dn: Move Line",
-                        "           Tab/Shift+Tab: Indent (sel)",
-                    ];
-                    let right_col: &[&str] = &[
-                        "Search:    Cmd+F: Find   | Cmd+Opt+F: Replace",
-                        "           Cmd+G: Goto   | Cmd+Shift+P: Palette",
-                        "",
-                        "Tabs:      Drag to reorder tabs.",
-                        "",
-                        "Other:     Cmd+K/Shift+K: Theme Cycle",
-                        "           Cmd+,: Settings | Alt+Z: Wrap",
-                        "           Cmd+Shift+E: Large File Edit Mode",
-                        "           F1: Help | Esc: Close Overlay",
-                        "",
-                        "Help:      TAB toggles fields in Replace.",
-                        "           Cmd+Shift+Enter: Replace All.",
-                        "           Cmd+Opt+C/W/R: Case/Word/Regex.",
-                        "           Click [Aa] [W] [.*] to toggle.",
-                        "           ENTER/Arrows for search results.",
-                        "",
-                    ];
-                    let rows = left_col.len().max(right_col.len());
-                    for i in 0..rows {
-                        let l = left_col.get(i).copied().unwrap_or("");
-                        let r = right_col.get(i).copied().unwrap_or("");
-                        if r.is_empty() {
-                            text.push_str(l);
-                        } else {
-                            text.push_str(&format!("{:<50}{}", l, r));
-                        }
-                        text.push('\n');
-                    }
-                    text.pop(); // remove trailing newline
-                    text
-                }
-                crate::overlay::ActiveOverlay::Settings => {
-                    let all_themes = Theme::all_themes();
-                    let theme_name = all_themes
-                        .get(config.theme_index)
-                        .map(|t| t.name())
-                        .unwrap_or("Unknown");
-                    let rows: &[(&str, String)] = &[
-                        ("Theme", format!("  {}  ", theme_name)),
-                        ("Font Size", format!("  {} pt  ", config.font_size as usize)),
-                        (
-                            "Line Wrap",
-                            (if config.line_wrap { " On" } else { " Off" }).to_string(),
-                        ),
-                        (
-                            "Auto-Save",
-                            (if config.auto_save { " On" } else { " Off" }).to_string(),
-                        ),
-                        (
-                            "Show Line Numbers",
-                            (if config.show_line_numbers {
-                                " On"
-                            } else {
-                                " Off"
-                            })
-                            .to_string(),
-                        ),
-                        ("Tab Size", format!("  {}  ", config.tab_size)),
-                        (
-                            "Use Spaces",
-                            (if config.use_spaces { " On" } else { " Off" }).to_string(),
-                        ),
-                        (
-                            "Highlight Line",
-                            (if config.highlight_current_line {
-                                " On"
-                            } else {
-                                " Off"
-                            })
-                            .to_string(),
-                        ),
-                        (
-                            "Show Whitespace",
-                            (if config.show_whitespace {
-                                " On"
-                            } else {
-                                " Off"
-                            })
-                            .to_string(),
-                        ),
-                    ];
-                    let mut text = String::from(
-                        "⚙  Settings  (↑↓ navigate · ←→/Space toggle · Esc close)\n\n",
-                    );
-                    for (i, (label, value)) in rows.iter().enumerate() {
-                        let cursor = if i == settings_cursor { "▶ " } else { "  " };
-                        text.push_str(&format!("{}{:<22} {}\n", cursor, label, value));
-                    }
-                    text.push_str(&format!(
-                        "\nConfig: {}",
-                        crate::settings::AppConfig::config_path().display()
-                    ));
-                    text
-                }
-                crate::overlay::ActiveOverlay::LanguagePicker => {
-                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    let mut text = format!("> {}│{}\n", before, after);
-                    let query_lower = overlay.input.to_lowercase();
-                    // Item 0: Plain Text (auto-detect off)
-                    let mut items: Vec<(usize, &str)> = Vec::new();
-                    items.push((0, "Plain Text"));
-                    for i in 0..syntax.language_count() {
-                        items.push((i + 1, syntax.language_name(i)));
-                    }
-                    let filtered: Vec<(usize, &str)> = if query_lower.is_empty() {
-                        items
-                    } else {
-                        items
-                            .into_iter()
-                            .filter(|(_, name)| name.to_lowercase().contains(&query_lower))
-                            .collect()
-                    };
-                    let current_lang = buffer.language_index;
-                    let selected = overlay
-                        .picker_selected
-                        .min(filtered.len().saturating_sub(1));
-                    let max_visible = picker_visible_items(filtered.len());
-                    let scroll_offset = if selected >= max_visible {
-                        selected - max_visible + 1
-                    } else {
-                        0
-                    };
-                    let visible_items: Vec<_> = filtered
-                        .iter()
-                        .skip(scroll_offset)
-                        .take(max_visible)
-                        .collect();
-                    for (row_idx, (item_idx, name)) in visible_items.iter().enumerate() {
-                        let idx = scroll_offset + row_idx;
-                        let is_current = match current_lang {
-                            Some(li) => *item_idx == li + 1,
-                            None => *item_idx == 0,
-                        };
-                        let marker = if is_current { "● " } else { "  " };
-                        let sel = if idx == selected { "▸ " } else { "  " };
-                        text.push_str(&format!("{}{}{}\n", sel, marker, name));
-                    }
-                    text
-                }
-                crate::overlay::ActiveOverlay::EncodingPicker => {
-                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    let mut text = format!("> {}│{}\n", before, after);
-                    let query_lower = overlay.input.to_lowercase();
-                    let current_encoding = buffer.encoding;
-                    let items = [
-                        ("UTF-8", encoding_rs::UTF_8),
-                        ("UTF-16 LE", encoding_rs::UTF_16LE),
-                        ("UTF-16 BE", encoding_rs::UTF_16BE),
-                        ("Windows-1252", encoding_rs::WINDOWS_1252),
-                    ];
-                    let filtered: Vec<_> = items
-                        .into_iter()
-                        .filter(|(label, encoding)| {
-                            query_lower.is_empty()
-                                || label.to_lowercase().contains(&query_lower)
-                                || encoding.name().to_lowercase().contains(&query_lower)
+                            " Off"
                         })
-                        .collect();
-                    for (idx, (label, encoding)) in filtered.iter().take(10).enumerate() {
-                        let is_current = encoding.name().eq_ignore_ascii_case(current_encoding);
-                        let marker = if is_current { "● " } else { "  " };
-                        let sel = if idx == overlay.picker_selected {
-                            "▸ "
+                        .to_string(),
+                    ),
+                    ("Tab Size", format!("  {}  ", config.tab_size)),
+                    (
+                        "Use Spaces",
+                        (if config.use_spaces { " On" } else { " Off" }).to_string(),
+                    ),
+                    (
+                        "Highlight Line",
+                        (if config.highlight_current_line {
+                            " On"
                         } else {
-                            "  "
-                        };
-                        text.push_str(&format!("{}{}{}\n", sel, marker, label));
-                    }
-                    text
+                            " Off"
+                        })
+                        .to_string(),
+                    ),
+                    (
+                        "Show Whitespace",
+                        (if config.show_whitespace {
+                            " On"
+                        } else {
+                            " Off"
+                        })
+                        .to_string(),
+                    ),
+                ];
+                let mut text =
+                    String::from("⚙  Settings  (↑↓ navigate · ←→/Space toggle · Esc close)\n\n");
+                for (i, (label, value)) in rows.iter().enumerate() {
+                    let cursor = if i == settings_cursor { "▶ " } else { "  " };
+                    text.push_str(&format!("{}{:<22} {}\n", cursor, label, value));
                 }
-                crate::overlay::ActiveOverlay::LineEndingPicker => {
-                    let items = ["LF (\\n)", "CRLF (\\r\\n)"];
-                    let current = match buffer.line_ending {
-                        crate::editor::buffer::LineEnding::Lf => 0,
-                        crate::editor::buffer::LineEnding::CrLf => 1,
-                    };
-                    let mut text = String::from("Select End of Line Sequence\n\n");
-                    for (i, label) in items.iter().enumerate() {
-                        let marker = if i == current { "● " } else { "  " };
-                        let sel = if i == overlay.picker_selected {
-                            "▸ "
-                        } else {
-                            "  "
-                        };
-                        text.push_str(&format!("{}{}{}\n", sel, marker, label));
-                    }
-                    text
+                text.push_str(&format!(
+                    "\nConfig: {}",
+                    crate::settings::AppConfig::config_path().display()
+                ));
+                text
+            }
+            crate::overlay::ActiveOverlay::LanguagePicker => {
+                let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                let mut text = format!("> {}│{}\n", before, after);
+                let query_lower = overlay.input.to_lowercase();
+                let mut items: Vec<(usize, &str)> = Vec::new();
+                items.push((0, "Plain Text"));
+                for i in 0..syntax.language_count() {
+                    items.push((i + 1, syntax.language_name(i)));
                 }
-                crate::overlay::ActiveOverlay::AllTabs => {
-                    let (before, after) = overlay.input.split_at(overlay.cursor_pos);
-                    let mut text = format!("> {}│{}\n", before, after);
-                    let query_lower = overlay.input.to_lowercase();
-                    // Collect all tab entries
-                    let items: Vec<(usize, String, bool)> = editor
-                        .buffers
-                        .iter()
-                        .enumerate()
-                        .map(|(i, buf)| (i, buf.display_name(), buf.dirty))
-                        .collect();
-                    let filtered: Vec<&(usize, String, bool)> = if query_lower.is_empty() {
-                        items.iter().collect()
-                    } else {
-                        items
-                            .iter()
-                            .filter(|(_, name, _)| name.to_lowercase().contains(&query_lower))
-                            .collect()
+                let filtered: Vec<(usize, &str)> = if query_lower.is_empty() {
+                    items
+                } else {
+                    items
+                        .into_iter()
+                        .filter(|(_, name)| name.to_lowercase().contains(&query_lower))
+                        .collect()
+                };
+                let current_lang = buffer.language_index;
+                let selected = overlay
+                    .picker_selected
+                    .min(filtered.len().saturating_sub(1));
+                let max_visible = picker_visible_items(filtered.len());
+                let scroll_offset = if selected >= max_visible {
+                    selected - max_visible + 1
+                } else {
+                    0
+                };
+                let visible_items: Vec<_> = filtered
+                    .iter()
+                    .skip(scroll_offset)
+                    .take(max_visible)
+                    .collect();
+                for (row_idx, (item_idx, name)) in visible_items.iter().enumerate() {
+                    let idx = scroll_offset + row_idx;
+                    let is_current = match current_lang {
+                        Some(li) => *item_idx == li + 1,
+                        None => *item_idx == 0,
                     };
-                    let selected = overlay
-                        .picker_selected
-                        .min(filtered.len().saturating_sub(1));
-                    let max_visible = picker_visible_items(filtered.len());
-                    let scroll_offset = if selected >= max_visible {
-                        selected - max_visible + 1
+                    let marker = if is_current { "● " } else { "  " };
+                    let sel = if idx == selected { "▸ " } else { "  " };
+                    text.push_str(&format!("{}{}{}\n", sel, marker, name));
+                }
+                text
+            }
+            crate::overlay::ActiveOverlay::EncodingPicker => {
+                let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                let mut text = format!("> {}│{}\n", before, after);
+                let query_lower = overlay.input.to_lowercase();
+                let current_encoding = buffer.encoding;
+                let items = [
+                    ("UTF-8", encoding_rs::UTF_8),
+                    ("UTF-16 LE", encoding_rs::UTF_16LE),
+                    ("UTF-16 BE", encoding_rs::UTF_16BE),
+                    ("Windows-1252", encoding_rs::WINDOWS_1252),
+                ];
+                let filtered: Vec<_> = items
+                    .into_iter()
+                    .filter(|(label, encoding)| {
+                        query_lower.is_empty()
+                            || label.to_lowercase().contains(&query_lower)
+                            || encoding.name().to_lowercase().contains(&query_lower)
+                    })
+                    .collect();
+                for (idx, (label, encoding)) in filtered.iter().take(10).enumerate() {
+                    let is_current = encoding.name().eq_ignore_ascii_case(current_encoding);
+                    let marker = if is_current { "● " } else { "  " };
+                    let sel = if idx == overlay.picker_selected {
+                        "▸ "
                     } else {
-                        0
+                        "  "
                     };
-                    // Max chars for names: panel ≤ 600px, ~7.8px/char, 12px padding
-                    // each side, 6-char prefix ("▸ ● ") → ~70 chars usable; cap at 55
-                    // so layout stays clean even at smaller window widths.
-                    const MAX_NAME_CHARS: usize = 55;
-                    for (row_idx, (buf_idx, name, dirty)) in filtered
+                    text.push_str(&format!("{}{}{}\n", sel, marker, label));
+                }
+                text
+            }
+            crate::overlay::ActiveOverlay::LineEndingPicker => {
+                let items = ["LF (\\n)", "CRLF (\\r\\n)"];
+                let current = match buffer.line_ending {
+                    crate::editor::buffer::LineEnding::Lf => 0,
+                    crate::editor::buffer::LineEnding::CrLf => 1,
+                };
+                let mut text = String::from("Select End of Line Sequence\n\n");
+                for (i, label) in items.iter().enumerate() {
+                    let marker = if i == current { "● " } else { "  " };
+                    let sel = if i == overlay.picker_selected {
+                        "▸ "
+                    } else {
+                        "  "
+                    };
+                    text.push_str(&format!("{}{}{}\n", sel, marker, label));
+                }
+                text
+            }
+            crate::overlay::ActiveOverlay::AllTabs => {
+                let (before, after) = overlay.input.split_at(overlay.cursor_pos);
+                let mut text = format!("> {}│{}\n", before, after);
+                let query_lower = overlay.input.to_lowercase();
+                let items: Vec<(usize, String, bool)> = editor
+                    .buffers
+                    .iter()
+                    .enumerate()
+                    .map(|(i, buf)| (i, buf.display_name(), buf.dirty))
+                    .collect();
+                let filtered: Vec<&(usize, String, bool)> = if query_lower.is_empty() {
+                    items.iter().collect()
+                } else {
+                    items
                         .iter()
-                        .skip(scroll_offset)
-                        .take(max_visible)
-                        .enumerate()
-                    {
-                        let idx = scroll_offset + row_idx;
-                        let is_active = *buf_idx == editor.active_buffer;
-                        // ● marks the active tab; ○ marks dirty but inactive
-                        let status = if is_active {
-                            "● "
-                        } else if *dirty {
-                            "○ "
-                        } else {
-                            "  "
-                        };
-                        let sel = if idx == selected { "▸ " } else { "  " };
-                        let display_name: std::borrow::Cow<str> = if name.chars().count()
-                            > MAX_NAME_CHARS
-                        {
+                        .filter(|(_, name, _)| name.to_lowercase().contains(&query_lower))
+                        .collect()
+                };
+                let selected = overlay
+                    .picker_selected
+                    .min(filtered.len().saturating_sub(1));
+                let max_visible = picker_visible_items(filtered.len());
+                let scroll_offset = if selected >= max_visible {
+                    selected - max_visible + 1
+                } else {
+                    0
+                };
+                const MAX_NAME_CHARS: usize = 55;
+                for (row_idx, (buf_idx, name, dirty)) in filtered
+                    .iter()
+                    .skip(scroll_offset)
+                    .take(max_visible)
+                    .enumerate()
+                {
+                    let idx = scroll_offset + row_idx;
+                    let is_active = *buf_idx == editor.active_buffer;
+                    let status = if is_active {
+                        "● "
+                    } else if *dirty {
+                        "○ "
+                    } else {
+                        "  "
+                    };
+                    let sel = if idx == selected { "▸ " } else { "  " };
+                    let display_name: std::borrow::Cow<str> =
+                        if name.chars().count() > MAX_NAME_CHARS {
                             let truncated: String = name.chars().take(MAX_NAME_CHARS - 1).collect();
                             format!("{}…", truncated).into()
                         } else {
                             name.as_str().into()
                         };
-                        text.push_str(&format!("{}{}{}\n", sel, status, display_name));
-                    }
-                    text
+                    text.push_str(&format!("{}{}{}\n", sel, status, display_name));
                 }
-                crate::overlay::ActiveOverlay::None => String::new(),
-            };
+                text
+            }
+            crate::overlay::ActiveOverlay::None => String::new(),
+        };
 
-            set_overlay_text_buffer(
-                &mut self.font_system,
-                &mut self.overlay_buffer,
-                &overlay_text,
-            );
+        set_overlay_text_buffer(
+            &mut self.font_system,
+            &mut self.overlay_buffer,
+            &overlay_text,
+        );
+    }
+
+    fn update_results_panel_buffer(
+        &mut self,
+        overlay: &crate::overlay::OverlayState,
+        theme: &Theme,
+        results_panel_h: f32,
+    ) {
+        if !overlay.results_panel.visible {
+            return;
         }
+        let panel = &overlay.results_panel;
+        let viewport_rows = Self::results_panel_viewport_rows(results_panel_h);
+        let start = panel.scroll_offset;
+        let end = (start + viewport_rows).min(panel.results.len());
 
-        // --- Results Panel ---
-        if overlay.results_panel.visible {
-            let panel = &overlay.results_panel;
-            let viewport_rows = Self::results_panel_viewport_rows(results_panel_h);
-            let start = panel.scroll_offset;
-            let end = (start + viewport_rows).min(panel.results.len());
+        let mut text = format!(
+            "  {} — \"{}\"  [Esc to close]\n",
+            panel.status_label(),
+            panel.query
+        );
+        for i in start..end {
+            let r = &panel.results[i];
+            let marker = if i == panel.selected { "▶ " } else { "  " };
+            let line_num = r
+                .line_number
+                .map(|n| format!("{:>6}:", n + 1))
+                .unwrap_or_else(|| format!("{:>6}:", r.byte_offset));
 
-            let mut text = format!(
-                "  {} — \"{}\"  [Esc to close]\n",
-                panel.status_label(),
-                panel.query
-            );
-            for i in start..end {
-                let r = &panel.results[i];
-                let marker = if i == panel.selected { "▶ " } else { "  " };
-                let line_num = r
-                    .line_number
-                    .map(|n| format!("{:>6}:", n + 1))
-                    .unwrap_or_else(|| format!("{:>6}:", r.byte_offset));
-
-                // Show context before
-                for ctx in &r.context_before {
-                    let truncated: String = ctx.chars().take(200).collect();
-                    text.push_str(&format!("        │ {}\n", truncated));
-                }
-
-                // Match line
-                let truncated_line: String = r.line_text.chars().take(200).collect();
-                text.push_str(&format!("{}{} {}\n", marker, line_num, truncated_line));
-
-                // Show context after
-                for ctx in &r.context_after {
-                    let truncated: String = ctx.chars().take(200).collect();
-                    text.push_str(&format!("        │ {}\n", truncated));
-                }
+            for ctx in &r.context_before {
+                let truncated: String = ctx.chars().take(200).collect();
+                text.push_str(&format!("        │ {}\n", truncated));
             }
 
-            self.results_panel_buffer.set_text(
-                &mut self.font_system,
-                &text,
-                Attrs::new()
-                    .family(Family::Name("JetBrains Mono"))
-                    .color(theme.fg.to_glyphon()),
-                Shaping::Advanced,
-            );
-            self.results_panel_buffer
-                .shape_until_scroll(&mut self.font_system, false);
+            let truncated_line: String = r.line_text.chars().take(200).collect();
+            text.push_str(&format!("{}{} {}\n", marker, line_num, truncated_line));
+
+            for ctx in &r.context_after {
+                let truncated: String = ctx.chars().take(200).collect();
+                text.push_str(&format!("        │ {}\n", truncated));
+            }
         }
 
-        // --- Snackbar (tip-of-the-day) ---
+        self.results_panel_buffer.set_text(
+            &mut self.font_system,
+            &text,
+            Attrs::new()
+                .family(Family::Name("JetBrains Mono"))
+                .color(theme.fg.to_glyphon()),
+            Shaping::Advanced,
+        );
+        self.results_panel_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    fn update_snackbar_buffer(&mut self, snackbar_tip: Option<&str>, theme: &Theme) {
         if let Some(tip) = snackbar_tip {
             let snackbar_text = format_snackbar_tip(tip);
             self.snackbar_buffer
@@ -2029,6 +2061,1264 @@ impl Renderer {
 
         drop(pass);
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Build editor highlight rects: active line, cursor I-beam, selection,
+    /// bracket matching, occurrence highlights, and find match highlights.
+    #[allow(clippy::too_many_arguments)]
+    fn build_editor_highlight_rects(
+        &self,
+        buffer: &crate::editor::buffer::Buffer,
+        overlay: &crate::overlay::OverlayState,
+        theme: &Theme,
+        s: f32,
+        width: f32,
+        editor_top: f32,
+        editor_left: f32,
+        gutter_width: f32,
+        line_height: f32,
+        char_width: f32,
+        scroll_y_px: f32,
+        scroll_line: usize,
+        visible_lines: usize,
+        wrap_width: Option<f32>,
+        visible_visual_lines: &[crate::editor::buffer::VisualLine],
+    ) -> Vec<Rect> {
+        let mut rects = Vec::new();
+
+        // Active Line Highlight + Cursor I-beam (for all cursors)
+        for cursor in &buffer.cursors {
+            let (cursor_visual_line, cursor_visual_col) =
+                buffer.visual_position_of_char(cursor.position, wrap_width, char_width);
+            let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
+            if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
+                rects.push(Rect::flat(
+                    gutter_width,
+                    editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px,
+                    width - gutter_width,
+                    line_height,
+                    [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
+                ));
+            }
+
+            // Cursor I-beam (thin 2px line)
+            if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
+                let caret_height = (self.current_font_size * s).max(1.0);
+                let caret_y = editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px
+                    + ((line_height - caret_height) / 2.0).max(0.0);
+                rects.push(Rect::flat(
+                    editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s,
+                    caret_y,
+                    2.0 * s,
+                    caret_height,
+                    [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
+                ));
+            }
+        }
+
+        // Selection Highlights (for all cursors)
+        for cursor in &buffer.cursors {
+            let sel_range = cursor.selection_anchor.map(|anchor| {
+                if anchor < cursor.position {
+                    (anchor, cursor.position)
+                } else {
+                    (cursor.position, anchor)
+                }
+            });
+            if let Some((start, end)) = sel_range {
+                for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                    let sel_start = start.max(visual_line.start_char);
+                    let sel_end = end.min(visual_line.end_char);
+
+                    if sel_start < sel_end {
+                        let col_start = sel_start - visual_line.start_char;
+                        let col_end = sel_end - visual_line.start_char;
+                        rects.push(Rect::flat(
+                            editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
+                            editor_top + i as f32 * line_height - scroll_y_px,
+                            (col_end - col_start) as f32 * char_width,
+                            line_height,
+                            [
+                                theme.selection.r,
+                                theme.selection.g,
+                                theme.selection.b,
+                                theme.selection.a,
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Bracket Matching Highlight (both source and matching bracket)
+        if !buffer.is_read_only() {
+            if let Some((source_char, match_char)) = buffer.find_matching_bracket() {
+                let bracket_color = [theme.selection.r, theme.selection.g, theme.selection.b, 0.4];
+                for &bracket_pos in &[source_char, match_char] {
+                    let (bv_line, bv_col) =
+                        buffer.visual_position_of_char(bracket_pos, wrap_width, char_width);
+                    let line_in_view = bv_line as i64 - scroll_line as i64;
+                    if line_in_view >= 0 && line_in_view < visible_lines as i64 {
+                        rects.push(Rect::flat(
+                            editor_left + bv_col as f32 * char_width - buffer.scroll_x * s,
+                            editor_top + line_in_view as f32 * line_height - scroll_y_px,
+                            char_width,
+                            line_height,
+                            bracket_color,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Selection Occurrence Highlights
+        if !matches!(
+            overlay.active,
+            crate::overlay::ActiveOverlay::Find | crate::overlay::ActiveOverlay::FindReplace
+        ) && !buffer.is_large_file()
+        {
+            if let Some(anchor) = buffer.selection_anchor() {
+                let selected_start = buffer.cursor().min(anchor);
+                let selected_end = buffer.cursor().max(anchor);
+                if selected_start < selected_end {
+                    let needle: String = buffer.rope.slice(selected_start..selected_end).into();
+                    let text = buffer.rope.to_string();
+                    let excluded = Some((
+                        buffer.rope.char_to_byte(selected_start),
+                        buffer.rope.char_to_byte(selected_end),
+                    ));
+
+                    for (match_start, match_end) in find_occurrence_ranges(&text, &needle, excluded)
+                    {
+                        let match_start_char = buffer.rope.byte_to_char(match_start);
+                        let match_end_char = buffer.rope.byte_to_char(match_end);
+
+                        for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                            let clamped_start = match_start_char.max(visual_line.start_char);
+                            let clamped_end = match_end_char.min(visual_line.end_char);
+                            if clamped_start >= clamped_end {
+                                continue;
+                            }
+                            let col_start = clamped_start - visual_line.start_char;
+                            let col_end = clamped_end - visual_line.start_char;
+
+                            if col_start < col_end {
+                                rects.push(Rect::flat(
+                                    editor_left + col_start as f32 * char_width
+                                        - buffer.scroll_x * s,
+                                    editor_top + i as f32 * line_height - scroll_y_px,
+                                    (col_end - col_start) as f32 * char_width,
+                                    line_height,
+                                    [
+                                        theme.find_match.r,
+                                        theme.find_match.g,
+                                        theme.find_match.b,
+                                        theme.find_match.a,
+                                    ],
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find Match Highlights
+        if overlay.is_active() && !overlay.find.matches.is_empty() {
+            let window_start = if !buffer.large_file_edit_mode {
+                buffer
+                    .large_file
+                    .as_ref()
+                    .map(|lf| lf.window_start_byte as usize)
+            } else {
+                None
+            };
+            let window_end = if !buffer.large_file_edit_mode {
+                buffer
+                    .large_file
+                    .as_ref()
+                    .map(|lf| lf.window_end_byte as usize)
+            } else {
+                None
+            };
+
+            for (match_idx, m) in overlay.find.matches.iter().enumerate() {
+                let (rope_start, rope_end) =
+                    if let (Some(ws), Some(we)) = (window_start, window_end) {
+                        if m.end <= ws || m.start >= we {
+                            continue;
+                        }
+                        (
+                            m.start.saturating_sub(ws).min(we - ws),
+                            m.end.saturating_sub(ws).min(we - ws),
+                        )
+                    } else {
+                        (m.start, m.end)
+                    };
+
+                let rope_len = buffer.rope.len_bytes();
+                if rope_start >= rope_len || rope_end > rope_len {
+                    continue;
+                }
+
+                let match_start_char = buffer.rope.byte_to_char(rope_start);
+                let match_end_char = buffer.rope.byte_to_char(rope_end);
+
+                let is_current = match_idx == overlay.find.current_match;
+                let highlight_color = if is_current {
+                    theme.find_match_active
+                } else {
+                    theme.find_match
+                };
+
+                for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                    let clamped_start = match_start_char.max(visual_line.start_char);
+                    let clamped_end = match_end_char.min(visual_line.end_char);
+                    if clamped_start >= clamped_end {
+                        continue;
+                    }
+                    let col_start = clamped_start - visual_line.start_char;
+                    let col_end = clamped_end - visual_line.start_char;
+
+                    if col_start < col_end {
+                        rects.push(Rect::flat(
+                            editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
+                            editor_top + i as f32 * line_height - scroll_y_px,
+                            (col_end - col_start) as f32 * char_width,
+                            line_height,
+                            [
+                                highlight_color.r,
+                                highlight_color.g,
+                                highlight_color.b,
+                                highlight_color.a,
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+
+        rects
+    }
+
+    /// Build scrollbar-area rects: match tick marks and scrollbar thumb.
+    #[allow(clippy::too_many_arguments)]
+    fn build_scrollbar_rects(
+        &self,
+        buffer: &crate::editor::buffer::Buffer,
+        overlay: &crate::overlay::OverlayState,
+        theme: &Theme,
+        s: f32,
+        width: f32,
+        editor_top: f32,
+        editor_height_px: f32,
+    ) -> Vec<Rect> {
+        let mut rects = Vec::new();
+
+        // Match tick marks on scrollbar gutter (right edge)
+        if !overlay.find.matches.is_empty() {
+            let scrollbar_x = width - SCROLLBAR_WIDTH * s;
+            if let Some(lf) = buffer.large_file.as_ref() {
+                if buffer.large_file_edit_mode {
+                    let total_chars = buffer.rope.len_chars().max(1) as f32;
+                    for m in overlay.find.matches.iter().take(MATCH_TICK_LIMIT) {
+                        let char_pos = buffer
+                            .rope
+                            .byte_to_char(m.start.min(buffer.rope.len_bytes()))
+                            as f32;
+                        let ratio = char_pos / total_chars;
+                        let tick_y = editor_top + ratio * editor_height_px;
+                        rects.push(Rect::flat(
+                            scrollbar_x,
+                            tick_y,
+                            SCROLLBAR_WIDTH * s,
+                            2.0 * s,
+                            [
+                                theme.find_match_active.r,
+                                theme.find_match_active.g,
+                                theme.find_match_active.b,
+                                theme.find_match_active.a.max(0.6),
+                            ],
+                        ));
+                    }
+                } else {
+                    let file_size = lf.file_size_bytes as f32;
+                    if file_size > 0.0 {
+                        for m in overlay.find.matches.iter().take(MATCH_TICK_LIMIT) {
+                            let ratio = m.start as f32 / file_size;
+                            let tick_y = editor_top + ratio * editor_height_px;
+                            rects.push(Rect::flat(
+                                scrollbar_x,
+                                tick_y,
+                                SCROLLBAR_WIDTH * s,
+                                2.0 * s,
+                                [
+                                    theme.find_match_active.r,
+                                    theme.find_match_active.g,
+                                    theme.find_match_active.b,
+                                    theme.find_match_active.a.max(0.6),
+                                ],
+                            ));
+                        }
+                    }
+                }
+            } else {
+                let total_chars = buffer.rope.len_chars().max(1) as f32;
+                for m in overlay.find.matches.iter().take(MATCH_TICK_LIMIT) {
+                    let char_pos = buffer.rope.byte_to_char(m.start) as f32;
+                    let ratio = char_pos / total_chars;
+                    let tick_y = editor_top + ratio * editor_height_px;
+                    rects.push(Rect::flat(
+                        scrollbar_x,
+                        tick_y,
+                        SCROLLBAR_WIDTH * s,
+                        2.0 * s,
+                        [
+                            theme.find_match_active.r,
+                            theme.find_match_active.g,
+                            theme.find_match_active.b,
+                            theme.find_match_active.a.max(0.6),
+                        ],
+                    ));
+                }
+            }
+        }
+
+        // Scrollbar Thumb
+        if let Some(scrollbar) = self.scrollbar_thumb(buffer, overlay) {
+            let thumb_color = [
+                theme.scrollbar_thumb.r,
+                theme.scrollbar_thumb.g,
+                theme.scrollbar_thumb.b,
+                theme.scrollbar_thumb.a,
+            ];
+            rects.push(Rect::rounded(
+                scrollbar.thumb_x,
+                scrollbar.thumb_y,
+                scrollbar.thumb_width,
+                scrollbar.thumb_height,
+                thumb_color,
+                4.0 * s,
+            ));
+        }
+
+        rects
+    }
+
+    /// Build the rects for modal overlay backgrounds (scrim, panel, input fields, toggles).
+    #[allow(clippy::too_many_arguments)]
+    fn build_modal_overlay_rects(
+        &self,
+        overlay: &crate::overlay::OverlayState,
+        config: &crate::settings::AppConfig,
+        theme: &Theme,
+        settings_cursor: usize,
+        modal_overlay: ModalOverlayGeometry,
+        s: f32,
+        width: f32,
+        height: f32,
+        editor_top: f32,
+    ) -> Vec<Rect> {
+        let overlay_left = modal_overlay.left;
+        let overlay_top_panel = modal_overlay.top;
+        let overlay_width = modal_overlay.width;
+        let overlay_height = modal_overlay.height;
+
+        let mut rects = Vec::new();
+
+        // Scrim — dim the editor content behind the overlay
+        rects.push(Rect::flat(
+            0.0,
+            editor_top,
+            width,
+            height - editor_top,
+            [0.0, 0.0, 0.0, 0.5],
+        ));
+
+        // Background — rounded rect with shadow for desktop feel
+        let overlay_bg = [
+            theme.tab_bar_bg.r,
+            theme.tab_bar_bg.g,
+            theme.tab_bar_bg.b,
+            1.0,
+        ];
+        rects.push(Rect::rounded_shadow(
+            overlay_left,
+            overlay_top_panel,
+            overlay_width,
+            overlay_height,
+            overlay_bg,
+            8.0 * s,
+            12.0 * s,
+            [0.0, 0.0, 0.0, 0.3],
+        ));
+        // 2px top accent line in cursor color
+        let accent_color = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
+        rects.push(Rect::rounded(
+            overlay_left,
+            overlay_top_panel,
+            overlay_width,
+            2.0 * s,
+            accent_color,
+            8.0 * s,
+        ));
+
+        let overlay_char_width = OVERLAY_CHAR_WIDTH * s;
+        let overlay_line_height = OVERLAY_LINE_HEIGHT * s;
+        let selection_color = [
+            theme.selection.r,
+            theme.selection.g,
+            theme.selection.b,
+            theme.selection.a.max(0.4),
+        ];
+        let input_bg = [theme.bg.r, theme.bg.g, theme.bg.b, 0.95];
+        let input_border = [
+            theme.gutter_fg.r,
+            theme.gutter_fg.g,
+            theme.gutter_fg.b,
+            0.35,
+        ];
+        let input_focus = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 0.9];
+        let chip_border = [
+            theme.gutter_fg.r,
+            theme.gutter_fg.g,
+            theme.gutter_fg.b,
+            0.42,
+        ];
+        let chip_fill = [
+            theme.tab_bar_bg.r,
+            theme.tab_bar_bg.g,
+            theme.tab_bar_bg.b,
+            0.95,
+        ];
+        let find_layout = crate::overlay::find_overlay_layout(
+            &overlay.active,
+            overlay_left,
+            overlay_top_panel,
+            overlay_width,
+            s,
+            overlay_char_width,
+            overlay_line_height,
+        );
+
+        match overlay.active {
+            crate::overlay::ActiveOverlay::Find => {
+                let layout = find_layout.expect("find overlay layout missing");
+                rects.push(Rect::rounded(
+                    layout.find_field.x,
+                    layout.find_field.y,
+                    layout.find_field.width,
+                    layout.find_field.height,
+                    input_focus,
+                    4.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    layout.find_field.x + 1.0 * s,
+                    layout.find_field.y + 1.0 * s,
+                    layout.find_field.width - 2.0 * s,
+                    layout.find_field.height - 2.0 * s,
+                    input_bg,
+                    3.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    layout.count_rect.x,
+                    layout.count_rect.y,
+                    layout.count_rect.width,
+                    layout.count_rect.height,
+                    chip_border,
+                    4.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    layout.count_rect.x + 1.0 * s,
+                    layout.count_rect.y + 1.0 * s,
+                    layout.count_rect.width - 2.0 * s,
+                    layout.count_rect.height - 2.0 * s,
+                    chip_fill,
+                    3.0 * s,
+                ));
+
+                if let Some((start, end)) = overlay.find_selection_char_range() {
+                    rects.push(Rect::flat(
+                        layout.find_text_x + start as f32 * overlay_char_width,
+                        layout.row_text_y,
+                        (end - start) as f32 * overlay_char_width,
+                        overlay_line_height,
+                        selection_color,
+                    ));
+                }
+                let active = [
+                    theme.selection.r,
+                    theme.selection.g,
+                    theme.selection.b,
+                    0.72,
+                ];
+                let case_color = if overlay.find.case_sensitive {
+                    active
+                } else {
+                    chip_border
+                };
+                let word_color = if overlay.find.whole_word {
+                    active
+                } else {
+                    chip_border
+                };
+                let regex_color = if overlay.find.use_regex {
+                    active
+                } else {
+                    chip_border
+                };
+                for toggle in layout.toggles {
+                    let color = match toggle.kind {
+                        crate::overlay::FindToggleKind::CaseSensitive => case_color,
+                        crate::overlay::FindToggleKind::WholeWord => word_color,
+                        crate::overlay::FindToggleKind::Regex => regex_color,
+                    };
+                    rects.push(Rect::rounded(
+                        toggle.rect.x,
+                        toggle.rect.y,
+                        toggle.rect.width,
+                        toggle.rect.height,
+                        color,
+                        4.0 * s,
+                    ));
+                    rects.push(Rect::rounded(
+                        toggle.rect.x + 1.0 * s,
+                        toggle.rect.y + 1.0 * s,
+                        toggle.rect.width - 2.0 * s,
+                        toggle.rect.height - 2.0 * s,
+                        if color == active { active } else { chip_fill },
+                        3.0 * s,
+                    ));
+                }
+            }
+            crate::overlay::ActiveOverlay::FindReplace => {
+                let layout = find_layout.expect("find replace overlay layout missing");
+                let replace_field = layout
+                    .replace_field
+                    .expect("find replace layout missing replace field");
+                let find_ring = if overlay.focus_replace {
+                    input_border
+                } else {
+                    input_focus
+                };
+                let replace_ring = if overlay.focus_replace {
+                    input_focus
+                } else {
+                    input_border
+                };
+                rects.push(Rect::rounded(
+                    layout.find_field.x,
+                    layout.find_field.y,
+                    layout.find_field.width,
+                    layout.find_field.height,
+                    find_ring,
+                    4.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    layout.find_field.x + 1.0 * s,
+                    layout.find_field.y + 1.0 * s,
+                    layout.find_field.width - 2.0 * s,
+                    layout.find_field.height - 2.0 * s,
+                    input_bg,
+                    3.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    replace_field.x,
+                    replace_field.y,
+                    replace_field.width,
+                    replace_field.height,
+                    replace_ring,
+                    4.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    replace_field.x + 1.0 * s,
+                    replace_field.y + 1.0 * s,
+                    replace_field.width - 2.0 * s,
+                    replace_field.height - 2.0 * s,
+                    input_bg,
+                    3.0 * s,
+                ));
+                // "All" button — chip border/fill style
+                if let Some(btn) = layout.replace_all_btn {
+                    rects.push(Rect::rounded(
+                        btn.x,
+                        btn.y,
+                        btn.width,
+                        btn.height,
+                        chip_border,
+                        4.0 * s,
+                    ));
+                    rects.push(Rect::rounded(
+                        btn.x + 1.0 * s,
+                        btn.y + 1.0 * s,
+                        btn.width - 2.0 * s,
+                        btn.height - 2.0 * s,
+                        chip_fill,
+                        3.0 * s,
+                    ));
+                }
+                rects.push(Rect::rounded(
+                    layout.count_rect.x,
+                    layout.count_rect.y,
+                    layout.count_rect.width,
+                    layout.count_rect.height,
+                    chip_border,
+                    4.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    layout.count_rect.x + 1.0 * s,
+                    layout.count_rect.y + 1.0 * s,
+                    layout.count_rect.width - 2.0 * s,
+                    layout.count_rect.height - 2.0 * s,
+                    chip_fill,
+                    3.0 * s,
+                ));
+
+                if let Some((start, end)) = overlay.find_selection_char_range() {
+                    rects.push(Rect::flat(
+                        layout.find_text_x + start as f32 * overlay_char_width,
+                        layout.row_text_y,
+                        (end - start) as f32 * overlay_char_width,
+                        overlay_line_height,
+                        selection_color,
+                    ));
+                }
+
+                if let Some((start, end)) = overlay.replace_selection_char_range() {
+                    let replace_text_x = layout
+                        .replace_text_x
+                        .expect("find replace layout missing replace text x");
+                    let replace_text_y = layout
+                        .replace_text_y
+                        .expect("find replace layout missing replace text y");
+                    rects.push(Rect::flat(
+                        replace_text_x + start as f32 * overlay_char_width,
+                        replace_text_y,
+                        (end - start) as f32 * overlay_char_width,
+                        overlay_line_height,
+                        selection_color,
+                    ));
+                }
+                let active = [
+                    theme.selection.r,
+                    theme.selection.g,
+                    theme.selection.b,
+                    0.72,
+                ];
+                let case_color = if overlay.find.case_sensitive {
+                    active
+                } else {
+                    chip_border
+                };
+                let word_color = if overlay.find.whole_word {
+                    active
+                } else {
+                    chip_border
+                };
+                let regex_color = if overlay.find.use_regex {
+                    active
+                } else {
+                    chip_border
+                };
+                for toggle in layout.toggles {
+                    let color = match toggle.kind {
+                        crate::overlay::FindToggleKind::CaseSensitive => case_color,
+                        crate::overlay::FindToggleKind::WholeWord => word_color,
+                        crate::overlay::FindToggleKind::Regex => regex_color,
+                    };
+                    rects.push(Rect::rounded(
+                        toggle.rect.x,
+                        toggle.rect.y,
+                        toggle.rect.width,
+                        toggle.rect.height,
+                        color,
+                        4.0 * s,
+                    ));
+                    rects.push(Rect::rounded(
+                        toggle.rect.x + 1.0 * s,
+                        toggle.rect.y + 1.0 * s,
+                        toggle.rect.width - 2.0 * s,
+                        toggle.rect.height - 2.0 * s,
+                        if color == active { active } else { chip_fill },
+                        3.0 * s,
+                    ));
+                }
+            }
+            crate::overlay::ActiveOverlay::Settings => {
+                // Selected row highlight
+                let row_y = overlay_top_panel
+                    + 6.0 * s
+                    + (settings_cursor as f32 + 2.0) * overlay_line_height;
+                rects.push(Rect::rounded(
+                    overlay_left + 4.0 * s,
+                    row_y,
+                    overlay_width - 8.0 * s,
+                    overlay_line_height,
+                    [theme.selection.r, theme.selection.g, theme.selection.b, 0.2],
+                    4.0 * s,
+                ));
+
+                // Graphical controls for each settings row
+                let checkbox_size = 14.0 * s;
+                let checkbox_x = overlay_left + 8.0 * s + 24.0 * overlay_char_width;
+                let settings_bools: &[(usize, bool)] = &[
+                    (2, config.line_wrap),
+                    (3, config.auto_save),
+                    (4, config.show_line_numbers),
+                    (6, config.use_spaces),
+                    (7, config.highlight_current_line),
+                    (8, config.show_whitespace),
+                ];
+                let checkbox_border =
+                    [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5];
+                let checkbox_fill = [theme.selection.r, theme.selection.g, theme.selection.b, 1.0];
+                for &(row_idx, is_on) in settings_bools {
+                    let cy = overlay_top_panel
+                        + 6.0 * s
+                        + (row_idx as f32 + 2.0) * overlay_line_height
+                        + (overlay_line_height - checkbox_size) / 2.0;
+                    if is_on {
+                        rects.push(Rect::rounded(
+                            checkbox_x,
+                            cy,
+                            checkbox_size,
+                            checkbox_size,
+                            checkbox_fill,
+                            3.0 * s,
+                        ));
+                    } else {
+                        rects.push(Rect::rounded(
+                            checkbox_x,
+                            cy,
+                            checkbox_size,
+                            checkbox_size,
+                            checkbox_border,
+                            3.0 * s,
+                        ));
+                    }
+                }
+
+                // Value selector backgrounds for Theme (row 0), Font Size (row 1), Tab Size (row 5)
+                let selector_rows: &[usize] = &[0, 1, 5];
+                let selector_bg = [
+                    theme.gutter_fg.r,
+                    theme.gutter_fg.g,
+                    theme.gutter_fg.b,
+                    0.15,
+                ];
+                for &row_idx in selector_rows {
+                    let sy = overlay_top_panel
+                        + 6.0 * s
+                        + (row_idx as f32 + 2.0) * overlay_line_height
+                        + 1.0 * s;
+                    let sx = overlay_left + 8.0 * s + 24.0 * overlay_char_width;
+                    let sw = overlay_width - 16.0 * s - 24.0 * overlay_char_width;
+                    rects.push(Rect::rounded(
+                        sx,
+                        sy,
+                        sw,
+                        overlay_line_height - 2.0 * s,
+                        selector_bg,
+                        4.0 * s,
+                    ));
+                }
+            }
+            crate::overlay::ActiveOverlay::GotoLine => {
+                let field_x = overlay_left + 8.0 * s + 11.0 * overlay_char_width;
+                let field_y = overlay_top_panel + 4.0 * s;
+                let field_w = (overlay_left + overlay_width - 8.0 * s - field_x).max(80.0 * s);
+                let field_h = overlay_line_height + 4.0 * s;
+                rects.push(Rect::rounded(
+                    field_x,
+                    field_y,
+                    field_w,
+                    field_h,
+                    input_focus,
+                    4.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    field_x + 1.0 * s,
+                    field_y + 1.0 * s,
+                    field_w - 2.0 * s,
+                    field_h - 2.0 * s,
+                    input_bg,
+                    3.0 * s,
+                ));
+            }
+            crate::overlay::ActiveOverlay::CommandPalette
+            | crate::overlay::ActiveOverlay::LanguagePicker
+            | crate::overlay::ActiveOverlay::EncodingPicker
+            | crate::overlay::ActiveOverlay::AllTabs => {
+                let field_x = overlay_left + 6.0 * s;
+                let field_y = overlay_top_panel + 4.0 * s;
+                let field_w = overlay_width - 12.0 * s;
+                let field_h = overlay_line_height + 4.0 * s;
+                rects.push(Rect::rounded(
+                    field_x,
+                    field_y,
+                    field_w,
+                    field_h,
+                    input_focus,
+                    4.0 * s,
+                ));
+                rects.push(Rect::rounded(
+                    field_x + 1.0 * s,
+                    field_y + 1.0 * s,
+                    field_w - 2.0 * s,
+                    field_h - 2.0 * s,
+                    input_bg,
+                    3.0 * s,
+                ));
+            }
+            _ => {}
+        }
+
+        rects
+    }
+
+    /// Render the results panel composited layer.
+    #[allow(clippy::too_many_arguments)]
+    fn render_results_panel_layer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        overlay: &crate::overlay::OverlayState,
+        theme: &Theme,
+        s: f32,
+        width: f32,
+        editor_top: f32,
+        editor_height_px: f32,
+        results_panel_height_px: f32,
+    ) {
+        let panel_top = editor_top + editor_height_px;
+        let header_h = RESULTS_PANEL_HEADER_HEIGHT * s;
+        let mut results_rects = vec![
+            Rect::flat(
+                0.0,
+                panel_top,
+                width,
+                results_panel_height_px,
+                [
+                    theme.tab_bar_bg.r,
+                    theme.tab_bar_bg.g,
+                    theme.tab_bar_bg.b,
+                    1.0,
+                ],
+            ),
+            Rect::flat(
+                0.0,
+                panel_top,
+                width,
+                header_h,
+                [
+                    theme.status_bar_bg.r,
+                    theme.status_bar_bg.g,
+                    theme.status_bar_bg.b,
+                    1.0,
+                ],
+            ),
+            Rect::flat(
+                0.0,
+                panel_top,
+                width,
+                1.0 * s,
+                [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5],
+            ),
+        ];
+
+        let panel = &overlay.results_panel;
+        if panel.selected >= panel.scroll_offset {
+            let mut visual_row = 0usize;
+            for i in panel.scroll_offset..panel.selected.min(panel.results.len()) {
+                let result = &panel.results[i];
+                visual_row += result.context_before.len() + 1 + result.context_after.len();
+            }
+            let selected_y =
+                panel_top + header_h + visual_row as f32 * RESULTS_PANEL_ROW_HEIGHT * s;
+            let selected_h = RESULTS_PANEL_ROW_HEIGHT * s;
+            if selected_y + selected_h < panel_top + results_panel_height_px {
+                results_rects.push(Rect::flat(
+                    0.0,
+                    selected_y,
+                    width,
+                    selected_h,
+                    [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
+                ));
+            }
+        }
+
+        let results_text = vec![TextArea {
+            buffer: &self.results_panel_buffer,
+            left: 8.0 * s,
+            top: panel_top + 4.0 * s,
+            scale: s,
+            bounds: TextBounds {
+                left: 0,
+                top: panel_top as i32,
+                right: width as i32,
+                bottom: (panel_top + results_panel_height_px) as i32,
+            },
+            default_color: theme.fg.to_glyphon(),
+            custom_glyphs: &[],
+        }];
+
+        Self::render_layer(
+            device,
+            queue,
+            view,
+            &mut self.text_renderer,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            &mut self.swash_cache,
+            &self.shape_renderer,
+            self.width,
+            self.height,
+            &results_rects,
+            results_text,
+            wgpu::LoadOp::Load,
+            "NotepadX Results Panel Encoder",
+            "NotepadX Results Panel Pass",
+            "Failed to prepare results panel text rendering",
+            "Failed to render results panel text",
+        );
+    }
+
+    /// Render the snackbar composited layer.
+    fn render_snackbar_layer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        theme: &Theme,
+        width: f32,
+        status_top: f32,
+        s: f32,
+    ) {
+        let snackbar = snackbar_geometry(width, status_top, s);
+
+        self.snackbar_bounds = Some((snackbar.x, snackbar.y, snackbar.width, snackbar.height));
+        self.snackbar_dismiss_bounds = Some(snackbar.dismiss_bounds);
+        self.snackbar_dismiss_forever_bounds = Some(snackbar.dismiss_forever_bounds);
+        self.snackbar_next_tip_bounds = Some(snackbar.next_tip_bounds);
+
+        let mut snackbar_rects = vec![
+            Rect::rounded_shadow(
+                snackbar.x,
+                snackbar.y,
+                snackbar.width,
+                snackbar.height,
+                [
+                    theme.tab_bar_bg.r,
+                    theme.tab_bar_bg.g,
+                    theme.tab_bar_bg.b,
+                    0.97,
+                ],
+                8.0 * s,
+                10.0 * s,
+                [0.0, 0.0, 0.0, 0.35],
+            ),
+            Rect::rounded(
+                snackbar.x,
+                snackbar.y,
+                snackbar.width,
+                2.0 * s,
+                [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
+                8.0 * s,
+            ),
+        ];
+
+        if let Some(hovered) = self.hovered_snackbar_button {
+            let (hover_x, hover_y, hover_w, hover_h) = match hovered {
+                SnackbarButton::Dismiss => self.snackbar_dismiss_bounds.unwrap_or_default(),
+                SnackbarButton::DontShowAgain => {
+                    self.snackbar_dismiss_forever_bounds.unwrap_or_default()
+                }
+                SnackbarButton::NextTip => self.snackbar_next_tip_bounds.unwrap_or_default(),
+            };
+            snackbar_rects.push(Rect::rounded(
+                hover_x - 4.0 * s,
+                hover_y,
+                hover_w + 8.0 * s,
+                hover_h,
+                [
+                    theme.selection.r,
+                    theme.selection.g,
+                    theme.selection.b,
+                    0.25,
+                ],
+                4.0 * s,
+            ));
+        }
+
+        snackbar_rects.push(Rect::flat(
+            snackbar.x + 12.0 * s,
+            snackbar.separator_y,
+            snackbar.width - 24.0 * s,
+            1.0 * s,
+            [
+                theme.gutter_fg.r,
+                theme.gutter_fg.g,
+                theme.gutter_fg.b,
+                0.25,
+            ],
+        ));
+
+        let snackbar_text = vec![TextArea {
+            buffer: &self.snackbar_buffer,
+            left: snackbar.x + 8.0 * s,
+            top: snackbar.y + 6.0 * s,
+            scale: s,
+            bounds: TextBounds {
+                left: snackbar.x as i32,
+                top: snackbar.y as i32,
+                right: (snackbar.x + snackbar.width) as i32,
+                bottom: (snackbar.y + snackbar.height) as i32,
+            },
+            default_color: theme.fg.to_glyphon(),
+            custom_glyphs: &[],
+        }];
+
+        Self::render_layer(
+            device,
+            queue,
+            view,
+            &mut self.text_renderer,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            &mut self.swash_cache,
+            &self.shape_renderer,
+            self.width,
+            self.height,
+            &snackbar_rects,
+            snackbar_text,
+            wgpu::LoadOp::Load,
+            "NotepadX Snackbar Encoder",
+            "NotepadX Snackbar Pass",
+            "Failed to prepare snackbar text rendering",
+            "Failed to render snackbar text",
+        );
+    }
+
+    /// Render the modal overlay composited layer.
+    #[allow(clippy::too_many_arguments)]
+    fn render_modal_overlay_layer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        overlay: &crate::overlay::OverlayState,
+        theme: &Theme,
+        modal_overlay: ModalOverlayGeometry,
+        overlay_rects: &[Rect],
+        s: f32,
+    ) {
+        let mut overlay_text_areas = Vec::with_capacity(modal_overlay_text_pass_layers().len());
+        for text_layer in modal_overlay_text_pass_layers() {
+            match text_layer {
+                ModalOverlayTextPassLayer::OverlayPanel => {
+                    if let Some(layout) = crate::overlay::find_overlay_layout(
+                        &overlay.active,
+                        modal_overlay.left,
+                        modal_overlay.top,
+                        modal_overlay.width,
+                        s,
+                        OVERLAY_CHAR_WIDTH * s,
+                        OVERLAY_LINE_HEIGHT * s,
+                    ) {
+                        overlay_text_areas.push(TextArea {
+                            buffer: &self.overlay_find_label_buffer,
+                            left: layout.find_label_x,
+                            top: layout.row_text_y,
+                            scale: s,
+                            bounds: TextBounds {
+                                left: layout.find_label_x as i32,
+                                top: layout.row_text_y as i32,
+                                right: layout.find_field.x as i32,
+                                bottom: (layout.row_text_y + OVERLAY_LINE_HEIGHT * s) as i32,
+                            },
+                            default_color: theme.fg.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                        overlay_text_areas.push(TextArea {
+                            buffer: &self.overlay_find_input_buffer,
+                            left: layout.find_text_x,
+                            top: layout.row_text_y,
+                            scale: s,
+                            bounds: TextBounds {
+                                left: layout.find_text_x as i32,
+                                top: layout.find_field.y as i32,
+                                right: (layout.find_field.x + layout.find_field.width
+                                    - crate::overlay::FIND_OVERLAY_INPUT_PADDING_X * s)
+                                    as i32,
+                                bottom: (layout.find_field.y + layout.find_field.height) as i32,
+                            },
+                            default_color: theme.fg.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                        overlay_text_areas.push(TextArea {
+                            buffer: &self.overlay_count_buffer,
+                            left: layout.count_text_x,
+                            top: layout.row_text_y,
+                            scale: s,
+                            bounds: TextBounds {
+                                left: layout.count_rect.x as i32,
+                                top: layout.count_rect.y as i32,
+                                right: (layout.count_rect.x + layout.count_rect.width) as i32,
+                                bottom: (layout.count_rect.y + layout.count_rect.height) as i32,
+                            },
+                            default_color: theme.fg.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                        if let (Some(replace_label_x), Some(replace_label_y)) =
+                            (layout.replace_label_x, layout.replace_label_y)
+                        {
+                            overlay_text_areas.push(TextArea {
+                                buffer: &self.overlay_replace_label_buffer,
+                                left: replace_label_x,
+                                top: replace_label_y,
+                                scale: s,
+                                bounds: TextBounds {
+                                    left: replace_label_x as i32,
+                                    top: replace_label_y as i32,
+                                    right: layout.replace_field.expect("replace field missing").x
+                                        as i32,
+                                    bottom: (replace_label_y + OVERLAY_LINE_HEIGHT * s) as i32,
+                                },
+                                default_color: theme.fg.to_glyphon(),
+                                custom_glyphs: &[],
+                            });
+                        }
+                        if let (Some(replace_field), Some(replace_text_x), Some(replace_text_y)) = (
+                            layout.replace_field,
+                            layout.replace_text_x,
+                            layout.replace_text_y,
+                        ) {
+                            overlay_text_areas.push(TextArea {
+                                buffer: &self.overlay_replace_input_buffer,
+                                left: replace_text_x,
+                                top: replace_text_y,
+                                scale: s,
+                                bounds: TextBounds {
+                                    left: replace_text_x as i32,
+                                    top: replace_field.y as i32,
+                                    right: (replace_field.x + replace_field.width
+                                        - crate::overlay::FIND_OVERLAY_INPUT_PADDING_X * s)
+                                        as i32,
+                                    bottom: (replace_field.y + replace_field.height) as i32,
+                                },
+                                default_color: theme.fg.to_glyphon(),
+                                custom_glyphs: &[],
+                            });
+                            if let Some(btn) = layout.replace_all_btn {
+                                let btn_label_w = 3.0 * OVERLAY_CHAR_WIDTH * s;
+                                let btn_text_x = btn.x + (btn.width - btn_label_w) / 2.0;
+                                let btn_text_y = btn.y + 2.0 * s;
+                                overlay_text_areas.push(TextArea {
+                                    buffer: &self.overlay_replace_all_btn_buffer,
+                                    left: btn_text_x,
+                                    top: btn_text_y,
+                                    scale: s,
+                                    bounds: TextBounds {
+                                        left: btn.x as i32,
+                                        top: btn.y as i32,
+                                        right: (btn.x + btn.width) as i32,
+                                        bottom: (btn.y + btn.height) as i32,
+                                    },
+                                    default_color: theme.fg.to_glyphon(),
+                                    custom_glyphs: &[],
+                                });
+                            }
+                        }
+                        for (toggle, buffer) in [
+                            (
+                                layout.toggle(crate::overlay::FindToggleKind::CaseSensitive),
+                                &self.overlay_case_toggle_buffer,
+                            ),
+                            (
+                                layout.toggle(crate::overlay::FindToggleKind::WholeWord),
+                                &self.overlay_word_toggle_buffer,
+                            ),
+                            (
+                                layout.toggle(crate::overlay::FindToggleKind::Regex),
+                                &self.overlay_regex_toggle_buffer,
+                            ),
+                        ] {
+                            overlay_text_areas.push(TextArea {
+                                buffer,
+                                left: toggle.text_x,
+                                top: toggle.text_y,
+                                scale: s,
+                                bounds: TextBounds {
+                                    left: toggle.rect.x as i32,
+                                    top: toggle.rect.y as i32,
+                                    right: (toggle.rect.x + toggle.rect.width) as i32,
+                                    bottom: (toggle.rect.y + toggle.rect.height) as i32,
+                                },
+                                default_color: theme.fg.to_glyphon(),
+                                custom_glyphs: &[],
+                            });
+                        }
+                        if overlay.find.regex_error.is_some() {
+                            overlay_text_areas.push(TextArea {
+                                buffer: &self.overlay_error_buffer,
+                                left: layout.error_text_x,
+                                top: layout.error_text_y,
+                                scale: s,
+                                bounds: TextBounds {
+                                    left: layout.error_text_x as i32,
+                                    top: layout.error_text_y as i32,
+                                    right: (modal_overlay.left + modal_overlay.width
+                                        - crate::overlay::FIND_OVERLAY_CONTENT_PADDING_X * s)
+                                        as i32,
+                                    bottom: (layout.error_text_y + OVERLAY_LINE_HEIGHT * s) as i32,
+                                },
+                                default_color: theme.fg.to_glyphon(),
+                                custom_glyphs: &[],
+                            });
+                        }
+                    } else {
+                        overlay_text_areas.push(TextArea {
+                            buffer: &self.overlay_buffer,
+                            left: modal_overlay.left + 8.0 * s,
+                            top: modal_overlay.top + 6.0 * s,
+                            scale: s,
+                            bounds: TextBounds {
+                                left: (modal_overlay.left + 8.0 * s) as i32,
+                                top: (modal_overlay.top + 6.0 * s) as i32,
+                                right: (modal_overlay.left + modal_overlay.width - 8.0 * s) as i32,
+                                bottom: (modal_overlay.top + modal_overlay.height) as i32,
+                            },
+                            default_color: theme.fg.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
+            }
+        }
+
+        Self::render_layer(
+            device,
+            queue,
+            view,
+            &mut self.text_renderer,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            &mut self.swash_cache,
+            &self.shape_renderer,
+            self.width,
+            self.height,
+            overlay_rects,
+            overlay_text_areas,
+            wgpu::LoadOp::Load,
+            "NotepadX Overlay Encoder",
+            "NotepadX Overlay Pass",
+            "Failed to prepare overlay text rendering",
+            "Failed to render overlay text",
+        );
     }
 
     /// Render everything to the screen
@@ -2242,223 +3532,24 @@ impl Renderer {
             ],
         ));
 
-        // 3. Active Line Highlight + 4. Cursor I-beam (for all cursors)
-        for cursor in &buffer.cursors {
-            let (cursor_visual_line, cursor_visual_col) =
-                buffer.visual_position_of_char(cursor.position, wrap_width, char_width);
-            let cursor_line_in_view = cursor_visual_line as i64 - scroll_line as i64;
-            if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-                base_rects.push(Rect::flat(
-                    gutter_width,
-                    editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px,
-                    width - gutter_width,
-                    line_height,
-                    [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
-                ));
-            }
-
-            // Cursor I-beam (thin 2px line)
-            if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
-                let caret_height = (self.current_font_size * s).max(1.0);
-                let caret_y = editor_top + cursor_line_in_view as f32 * line_height - scroll_y_px
-                    + ((line_height - caret_height) / 2.0).max(0.0);
-                base_rects.push(Rect::flat(
-                    editor_left + cursor_visual_col as f32 * char_width - buffer.scroll_x * s,
-                    caret_y,
-                    2.0 * s,
-                    caret_height,
-                    [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
-                ));
-            }
-        }
-
-        // 5. Selection Highlights (for all cursors)
-        for cursor in &buffer.cursors {
-            let sel_range = cursor.selection_anchor.map(|anchor| {
-                if anchor < cursor.position {
-                    (anchor, cursor.position)
-                } else {
-                    (cursor.position, anchor)
-                }
-            });
-            if let Some((start, end)) = sel_range {
-                for (i, visual_line) in visible_visual_lines.iter().enumerate() {
-                    let sel_start = start.max(visual_line.start_char);
-                    let sel_end = end.min(visual_line.end_char);
-
-                    if sel_start < sel_end {
-                        let col_start = sel_start - visual_line.start_char;
-                        let col_end = sel_end - visual_line.start_char;
-                        base_rects.push(Rect::flat(
-                            editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
-                            editor_top + i as f32 * line_height - scroll_y_px,
-                            (col_end - col_start) as f32 * char_width,
-                            line_height,
-                            [
-                                theme.selection.r,
-                                theme.selection.g,
-                                theme.selection.b,
-                                theme.selection.a,
-                            ],
-                        ));
-                    }
-                }
-            }
-        }
-
-        // 4. Bracket Matching Highlight (both source and matching bracket)
-        if !buffer.is_read_only() {
-            if let Some((source_char, match_char)) = buffer.find_matching_bracket() {
-                let bracket_color = [theme.selection.r, theme.selection.g, theme.selection.b, 0.4];
-                for &bracket_pos in &[source_char, match_char] {
-                    let (bv_line, bv_col) =
-                        buffer.visual_position_of_char(bracket_pos, wrap_width, char_width);
-                    let line_in_view = bv_line as i64 - scroll_line as i64;
-                    if line_in_view >= 0 && line_in_view < visible_lines as i64 {
-                        base_rects.push(Rect::flat(
-                            editor_left + bv_col as f32 * char_width - buffer.scroll_x * s,
-                            editor_top + line_in_view as f32 * line_height - scroll_y_px,
-                            char_width,
-                            line_height,
-                            bracket_color,
-                        ));
-                    }
-                }
-            }
-        }
-
-        // 5b. Selection Occurrence Highlights
-        if !matches!(
-            overlay.active,
-            crate::overlay::ActiveOverlay::Find | crate::overlay::ActiveOverlay::FindReplace
-        ) && !buffer.is_large_file()
-        {
-            if let Some(anchor) = buffer.selection_anchor() {
-                let selected_start = buffer.cursor().min(anchor);
-                let selected_end = buffer.cursor().max(anchor);
-                if selected_start < selected_end {
-                    let needle: String = buffer.rope.slice(selected_start..selected_end).into();
-                    let text = buffer.rope.to_string();
-                    let excluded = Some((
-                        buffer.rope.char_to_byte(selected_start),
-                        buffer.rope.char_to_byte(selected_end),
-                    ));
-
-                    for (match_start, match_end) in find_occurrence_ranges(&text, &needle, excluded)
-                    {
-                        let match_start_char = buffer.rope.byte_to_char(match_start);
-                        let match_end_char = buffer.rope.byte_to_char(match_end);
-
-                        for (i, visual_line) in visible_visual_lines.iter().enumerate() {
-                            let clamped_start = match_start_char.max(visual_line.start_char);
-                            let clamped_end = match_end_char.min(visual_line.end_char);
-                            if clamped_start >= clamped_end {
-                                continue;
-                            }
-                            let col_start = clamped_start - visual_line.start_char;
-                            let col_end = clamped_end - visual_line.start_char;
-
-                            if col_start < col_end {
-                                base_rects.push(Rect::flat(
-                                    editor_left + col_start as f32 * char_width
-                                        - buffer.scroll_x * s,
-                                    editor_top + i as f32 * line_height - scroll_y_px,
-                                    (col_end - col_start) as f32 * char_width,
-                                    line_height,
-                                    [
-                                        theme.find_match.r,
-                                        theme.find_match.g,
-                                        theme.find_match.b,
-                                        theme.find_match.a,
-                                    ],
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 5c. Find Match Highlights
-        if overlay.is_active() && !overlay.find.matches.is_empty() {
-            // For large files the rope only holds a window; translate file-level
-            // byte offsets to window-relative offsets and skip out-of-range matches.
-            // In edit mode the full file is in the rope so no translation is needed.
-            let window_start = if !buffer.large_file_edit_mode {
-                buffer
-                    .large_file
-                    .as_ref()
-                    .map(|lf| lf.window_start_byte as usize)
-            } else {
-                None
-            };
-            let window_end = if !buffer.large_file_edit_mode {
-                buffer
-                    .large_file
-                    .as_ref()
-                    .map(|lf| lf.window_end_byte as usize)
-            } else {
-                None
-            };
-
-            for (match_idx, m) in overlay.find.matches.iter().enumerate() {
-                // Compute rope-relative byte offsets
-                let (rope_start, rope_end) =
-                    if let (Some(ws), Some(we)) = (window_start, window_end) {
-                        // Skip matches entirely outside the loaded window
-                        if m.end <= ws || m.start >= we {
-                            continue;
-                        }
-                        (
-                            m.start.saturating_sub(ws).min(we - ws),
-                            m.end.saturating_sub(ws).min(we - ws),
-                        )
-                    } else {
-                        (m.start, m.end)
-                    };
-
-                let rope_len = buffer.rope.len_bytes();
-                if rope_start >= rope_len || rope_end > rope_len {
-                    continue;
-                }
-
-                // find matches store byte offsets; convert to char indices
-                let match_start_char = buffer.rope.byte_to_char(rope_start);
-                let match_end_char = buffer.rope.byte_to_char(rope_end);
-
-                let is_current = match_idx == overlay.find.current_match;
-                let highlight_color = if is_current {
-                    theme.find_match_active
-                } else {
-                    theme.find_match
-                };
-
-                for (i, visual_line) in visible_visual_lines.iter().enumerate() {
-                    let clamped_start = match_start_char.max(visual_line.start_char);
-                    let clamped_end = match_end_char.min(visual_line.end_char);
-                    if clamped_start >= clamped_end {
-                        continue;
-                    }
-                    let col_start = clamped_start - visual_line.start_char;
-                    let col_end = clamped_end - visual_line.start_char;
-
-                    if col_start < col_end {
-                        base_rects.push(Rect::flat(
-                            editor_left + col_start as f32 * char_width - buffer.scroll_x * s,
-                            editor_top + i as f32 * line_height - scroll_y_px,
-                            (col_end - col_start) as f32 * char_width,
-                            line_height,
-                            [
-                                highlight_color.r,
-                                highlight_color.g,
-                                highlight_color.b,
-                                highlight_color.a,
-                            ],
-                        ));
-                    }
-                }
-            }
-        }
+        // 3-5. Editor highlight rects (cursor, selection, brackets, find matches)
+        base_rects.extend(self.build_editor_highlight_rects(
+            buffer,
+            overlay,
+            theme,
+            s,
+            width,
+            editor_top,
+            editor_left,
+            gutter_width,
+            line_height,
+            char_width,
+            scroll_y_px,
+            scroll_line,
+            visible_lines,
+            wrap_width,
+            &visible_visual_lines,
+        ));
 
         // 6. Status Bar Background
         base_rects.push(Rect::flat(
@@ -2498,550 +3589,30 @@ impl Renderer {
             }
         }
 
-        // 6b. Match tick marks on scrollbar gutter (right edge)
-        if !overlay.find.matches.is_empty() {
-            let scrollbar_x = width - SCROLLBAR_WIDTH * s;
-            if let Some(lf) = buffer.large_file.as_ref() {
-                if buffer.large_file_edit_mode {
-                    // In edit mode the rope has the full file; use char-based ratios.
-                    let total_chars = buffer.rope.len_chars().max(1) as f32;
-                    for m in overlay.find.matches.iter().take(500) {
-                        let char_pos = buffer
-                            .rope
-                            .byte_to_char(m.start.min(buffer.rope.len_bytes()))
-                            as f32;
-                        let ratio = char_pos / total_chars;
-                        let tick_y = editor_top + ratio * editor_height_px;
-                        base_rects.push(Rect::flat(
-                            scrollbar_x,
-                            tick_y,
-                            SCROLLBAR_WIDTH * s,
-                            2.0 * s,
-                            [
-                                theme.find_match_active.r,
-                                theme.find_match_active.g,
-                                theme.find_match_active.b,
-                                theme.find_match_active.a.max(0.6),
-                            ],
-                        ));
-                    }
-                } else {
-                    let file_size = lf.file_size_bytes as f32;
-                    if file_size > 0.0 {
-                        for m in overlay.find.matches.iter().take(500) {
-                            let ratio = m.start as f32 / file_size;
-                            let tick_y = editor_top + ratio * editor_height_px;
-                            base_rects.push(Rect::flat(
-                                scrollbar_x,
-                                tick_y,
-                                SCROLLBAR_WIDTH * s,
-                                2.0 * s,
-                                [
-                                    theme.find_match_active.r,
-                                    theme.find_match_active.g,
-                                    theme.find_match_active.b,
-                                    theme.find_match_active.a.max(0.6),
-                                ],
-                            ));
-                        }
-                    }
-                }
-            } else {
-                let total_chars = buffer.rope.len_chars().max(1) as f32;
-                for m in overlay.find.matches.iter().take(500) {
-                    let char_pos = buffer.rope.byte_to_char(m.start) as f32;
-                    let ratio = char_pos / total_chars;
-                    let tick_y = editor_top + ratio * editor_height_px;
-                    base_rects.push(Rect::flat(
-                        scrollbar_x,
-                        tick_y,
-                        SCROLLBAR_WIDTH * s,
-                        2.0 * s,
-                        [
-                            theme.find_match_active.r,
-                            theme.find_match_active.g,
-                            theme.find_match_active.b,
-                            theme.find_match_active.a.max(0.6),
-                        ],
-                    ));
-                }
-            }
-        }
-
-        // 7. Scrollbar Thumb
-        if let Some(scrollbar) = self.scrollbar_thumb(buffer, overlay) {
-            let thumb_color = [
-                theme.scrollbar_thumb.r,
-                theme.scrollbar_thumb.g,
-                theme.scrollbar_thumb.b,
-                theme.scrollbar_thumb.a,
-            ];
-            base_rects.push(Rect::rounded(
-                scrollbar.thumb_x,
-                scrollbar.thumb_y,
-                scrollbar.thumb_width,
-                scrollbar.thumb_height,
-                thumb_color,
-                4.0 * s,
-            ));
-        }
+        // 6b. Scrollbar area: match tick marks + thumb
+        base_rects.extend(self.build_scrollbar_rects(
+            buffer,
+            overlay,
+            theme,
+            s,
+            width,
+            editor_top,
+            editor_height_px,
+        ));
 
         // 5. Modal Overlay Backgrounds
         if let Some(modal_overlay) = modal_overlay {
-            let overlay_left = modal_overlay.left;
-            let overlay_top_panel = modal_overlay.top;
-            let overlay_width = modal_overlay.width;
-            let overlay_height = modal_overlay.height;
-
-            // Scrim — dim the editor content behind the overlay
-            overlay_rects.push(Rect::flat(
-                0.0,
-                editor_top,
-                width,
-                height - editor_top,
-                [0.0, 0.0, 0.0, 0.5],
-            ));
-
-            // Background — rounded rect with shadow for desktop feel
-            let overlay_bg = [
-                theme.tab_bar_bg.r,
-                theme.tab_bar_bg.g,
-                theme.tab_bar_bg.b,
-                1.0,
-            ];
-            overlay_rects.push(Rect::rounded_shadow(
-                overlay_left,
-                overlay_top_panel,
-                overlay_width,
-                overlay_height,
-                overlay_bg,
-                8.0 * s,
-                12.0 * s,
-                [0.0, 0.0, 0.0, 0.3],
-            ));
-            // 2px top accent line in cursor color
-            let accent_color = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
-            overlay_rects.push(Rect::rounded(
-                overlay_left,
-                overlay_top_panel,
-                overlay_width,
-                2.0 * s,
-                accent_color,
-                8.0 * s,
-            ));
-
-            let overlay_char_width = OVERLAY_CHAR_WIDTH * s;
-            let overlay_line_height = OVERLAY_LINE_HEIGHT * s;
-            let selection_color = [
-                theme.selection.r,
-                theme.selection.g,
-                theme.selection.b,
-                theme.selection.a.max(0.4),
-            ];
-            let input_bg = [theme.bg.r, theme.bg.g, theme.bg.b, 0.95];
-            let input_border = [
-                theme.gutter_fg.r,
-                theme.gutter_fg.g,
-                theme.gutter_fg.b,
-                0.35,
-            ];
-            let input_focus = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 0.9];
-            let chip_border = [
-                theme.gutter_fg.r,
-                theme.gutter_fg.g,
-                theme.gutter_fg.b,
-                0.42,
-            ];
-            let chip_fill = [
-                theme.tab_bar_bg.r,
-                theme.tab_bar_bg.g,
-                theme.tab_bar_bg.b,
-                0.95,
-            ];
-            let find_layout = crate::overlay::find_overlay_layout(
-                &overlay.active,
-                overlay_left,
-                overlay_top_panel,
-                overlay_width,
+            overlay_rects = self.build_modal_overlay_rects(
+                overlay,
+                config,
+                theme,
+                settings_cursor,
+                modal_overlay,
                 s,
-                overlay_char_width,
-                overlay_line_height,
+                width,
+                height,
+                editor_top,
             );
-
-            match overlay.active {
-                crate::overlay::ActiveOverlay::Find => {
-                    let layout = find_layout.expect("find overlay layout missing");
-                    overlay_rects.push(Rect::rounded(
-                        layout.find_field.x,
-                        layout.find_field.y,
-                        layout.find_field.width,
-                        layout.find_field.height,
-                        input_focus,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        layout.find_field.x + 1.0 * s,
-                        layout.find_field.y + 1.0 * s,
-                        layout.find_field.width - 2.0 * s,
-                        layout.find_field.height - 2.0 * s,
-                        input_bg,
-                        3.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        layout.count_rect.x,
-                        layout.count_rect.y,
-                        layout.count_rect.width,
-                        layout.count_rect.height,
-                        chip_border,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        layout.count_rect.x + 1.0 * s,
-                        layout.count_rect.y + 1.0 * s,
-                        layout.count_rect.width - 2.0 * s,
-                        layout.count_rect.height - 2.0 * s,
-                        chip_fill,
-                        3.0 * s,
-                    ));
-
-                    if let Some((start, end)) = overlay.find_selection_char_range() {
-                        overlay_rects.push(Rect::flat(
-                            layout.find_text_x + start as f32 * overlay_char_width,
-                            layout.row_text_y,
-                            (end - start) as f32 * overlay_char_width,
-                            overlay_line_height,
-                            selection_color,
-                        ));
-                    }
-                    let active = [
-                        theme.selection.r,
-                        theme.selection.g,
-                        theme.selection.b,
-                        0.72,
-                    ];
-                    let case_color = if overlay.find.case_sensitive {
-                        active
-                    } else {
-                        chip_border
-                    };
-                    let word_color = if overlay.find.whole_word {
-                        active
-                    } else {
-                        chip_border
-                    };
-                    let regex_color = if overlay.find.use_regex {
-                        active
-                    } else {
-                        chip_border
-                    };
-                    for toggle in layout.toggles {
-                        let color = match toggle.kind {
-                            crate::overlay::FindToggleKind::CaseSensitive => case_color,
-                            crate::overlay::FindToggleKind::WholeWord => word_color,
-                            crate::overlay::FindToggleKind::Regex => regex_color,
-                        };
-                        overlay_rects.push(Rect::rounded(
-                            toggle.rect.x,
-                            toggle.rect.y,
-                            toggle.rect.width,
-                            toggle.rect.height,
-                            color,
-                            4.0 * s,
-                        ));
-                        overlay_rects.push(Rect::rounded(
-                            toggle.rect.x + 1.0 * s,
-                            toggle.rect.y + 1.0 * s,
-                            toggle.rect.width - 2.0 * s,
-                            toggle.rect.height - 2.0 * s,
-                            if color == active { active } else { chip_fill },
-                            3.0 * s,
-                        ));
-                    }
-                }
-                crate::overlay::ActiveOverlay::FindReplace => {
-                    let layout = find_layout.expect("find replace overlay layout missing");
-                    let replace_field = layout
-                        .replace_field
-                        .expect("find replace layout missing replace field");
-                    let find_ring = if overlay.focus_replace {
-                        input_border
-                    } else {
-                        input_focus
-                    };
-                    let replace_ring = if overlay.focus_replace {
-                        input_focus
-                    } else {
-                        input_border
-                    };
-                    overlay_rects.push(Rect::rounded(
-                        layout.find_field.x,
-                        layout.find_field.y,
-                        layout.find_field.width,
-                        layout.find_field.height,
-                        find_ring,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        layout.find_field.x + 1.0 * s,
-                        layout.find_field.y + 1.0 * s,
-                        layout.find_field.width - 2.0 * s,
-                        layout.find_field.height - 2.0 * s,
-                        input_bg,
-                        3.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        replace_field.x,
-                        replace_field.y,
-                        replace_field.width,
-                        replace_field.height,
-                        replace_ring,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        replace_field.x + 1.0 * s,
-                        replace_field.y + 1.0 * s,
-                        replace_field.width - 2.0 * s,
-                        replace_field.height - 2.0 * s,
-                        input_bg,
-                        3.0 * s,
-                    ));
-                    // "All" button — chip border/fill style
-                    if let Some(btn) = layout.replace_all_btn {
-                        overlay_rects.push(Rect::rounded(
-                            btn.x,
-                            btn.y,
-                            btn.width,
-                            btn.height,
-                            chip_border,
-                            4.0 * s,
-                        ));
-                        overlay_rects.push(Rect::rounded(
-                            btn.x + 1.0 * s,
-                            btn.y + 1.0 * s,
-                            btn.width - 2.0 * s,
-                            btn.height - 2.0 * s,
-                            chip_fill,
-                            3.0 * s,
-                        ));
-                    }
-                    overlay_rects.push(Rect::rounded(
-                        layout.count_rect.x,
-                        layout.count_rect.y,
-                        layout.count_rect.width,
-                        layout.count_rect.height,
-                        chip_border,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        layout.count_rect.x + 1.0 * s,
-                        layout.count_rect.y + 1.0 * s,
-                        layout.count_rect.width - 2.0 * s,
-                        layout.count_rect.height - 2.0 * s,
-                        chip_fill,
-                        3.0 * s,
-                    ));
-
-                    if let Some((start, end)) = overlay.find_selection_char_range() {
-                        overlay_rects.push(Rect::flat(
-                            layout.find_text_x + start as f32 * overlay_char_width,
-                            layout.row_text_y,
-                            (end - start) as f32 * overlay_char_width,
-                            overlay_line_height,
-                            selection_color,
-                        ));
-                    }
-
-                    if let Some((start, end)) = overlay.replace_selection_char_range() {
-                        let replace_text_x = layout
-                            .replace_text_x
-                            .expect("find replace layout missing replace text x");
-                        let replace_text_y = layout
-                            .replace_text_y
-                            .expect("find replace layout missing replace text y");
-                        overlay_rects.push(Rect::flat(
-                            replace_text_x + start as f32 * overlay_char_width,
-                            replace_text_y,
-                            (end - start) as f32 * overlay_char_width,
-                            overlay_line_height,
-                            selection_color,
-                        ));
-                    }
-                    let active = [
-                        theme.selection.r,
-                        theme.selection.g,
-                        theme.selection.b,
-                        0.72,
-                    ];
-                    let case_color = if overlay.find.case_sensitive {
-                        active
-                    } else {
-                        chip_border
-                    };
-                    let word_color = if overlay.find.whole_word {
-                        active
-                    } else {
-                        chip_border
-                    };
-                    let regex_color = if overlay.find.use_regex {
-                        active
-                    } else {
-                        chip_border
-                    };
-                    for toggle in layout.toggles {
-                        let color = match toggle.kind {
-                            crate::overlay::FindToggleKind::CaseSensitive => case_color,
-                            crate::overlay::FindToggleKind::WholeWord => word_color,
-                            crate::overlay::FindToggleKind::Regex => regex_color,
-                        };
-                        overlay_rects.push(Rect::rounded(
-                            toggle.rect.x,
-                            toggle.rect.y,
-                            toggle.rect.width,
-                            toggle.rect.height,
-                            color,
-                            4.0 * s,
-                        ));
-                        overlay_rects.push(Rect::rounded(
-                            toggle.rect.x + 1.0 * s,
-                            toggle.rect.y + 1.0 * s,
-                            toggle.rect.width - 2.0 * s,
-                            toggle.rect.height - 2.0 * s,
-                            if color == active { active } else { chip_fill },
-                            3.0 * s,
-                        ));
-                    }
-                }
-                crate::overlay::ActiveOverlay::Settings => {
-                    // Selected row highlight
-                    // Settings text: line 0 = header, line 1 = blank, lines 2-9 = setting rows
-                    let row_y = overlay_top_panel
-                        + 6.0 * s
-                        + (settings_cursor as f32 + 2.0) * overlay_line_height;
-                    overlay_rects.push(Rect::rounded(
-                        overlay_left + 4.0 * s,
-                        row_y,
-                        overlay_width - 8.0 * s,
-                        overlay_line_height,
-                        [theme.selection.r, theme.selection.g, theme.selection.b, 0.2],
-                        4.0 * s,
-                    ));
-
-                    // Graphical controls for each settings row
-                    let checkbox_size = 14.0 * s;
-                    let checkbox_x = overlay_left + 8.0 * s + 24.0 * overlay_char_width;
-                    let settings_bools: &[(usize, bool)] = &[
-                        (2, config.line_wrap),
-                        (3, config.auto_save),
-                        (4, config.show_line_numbers),
-                        (6, config.use_spaces),
-                        (7, config.highlight_current_line),
-                        (8, config.show_whitespace),
-                    ];
-                    let checkbox_border =
-                        [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5];
-                    let checkbox_fill =
-                        [theme.selection.r, theme.selection.g, theme.selection.b, 1.0];
-                    for &(row_idx, is_on) in settings_bools {
-                        let cy = overlay_top_panel
-                            + 6.0 * s
-                            + (row_idx as f32 + 2.0) * overlay_line_height
-                            + (overlay_line_height - checkbox_size) / 2.0;
-                        if is_on {
-                            overlay_rects.push(Rect::rounded(
-                                checkbox_x,
-                                cy,
-                                checkbox_size,
-                                checkbox_size,
-                                checkbox_fill,
-                                3.0 * s,
-                            ));
-                        } else {
-                            // Border only for unchecked — render as a slightly transparent rect
-                            overlay_rects.push(Rect::rounded(
-                                checkbox_x,
-                                cy,
-                                checkbox_size,
-                                checkbox_size,
-                                checkbox_border,
-                                3.0 * s,
-                            ));
-                        }
-                    }
-
-                    // Value selector backgrounds for Theme (row 0), Font Size (row 1), Tab Size (row 5)
-                    let selector_rows: &[usize] = &[0, 1, 5];
-                    let selector_bg = [
-                        theme.gutter_fg.r,
-                        theme.gutter_fg.g,
-                        theme.gutter_fg.b,
-                        0.15,
-                    ];
-                    for &row_idx in selector_rows {
-                        let sy = overlay_top_panel
-                            + 6.0 * s
-                            + (row_idx as f32 + 2.0) * overlay_line_height
-                            + 1.0 * s;
-                        let sx = overlay_left + 8.0 * s + 24.0 * overlay_char_width;
-                        let sw = overlay_width - 16.0 * s - 24.0 * overlay_char_width;
-                        overlay_rects.push(Rect::rounded(
-                            sx,
-                            sy,
-                            sw,
-                            overlay_line_height - 2.0 * s,
-                            selector_bg,
-                            4.0 * s,
-                        ));
-                    }
-                }
-                crate::overlay::ActiveOverlay::GotoLine => {
-                    let field_x = overlay_left + 8.0 * s + 11.0 * overlay_char_width;
-                    let field_y = overlay_top_panel + 4.0 * s;
-                    let field_w = (overlay_left + overlay_width - 8.0 * s - field_x).max(80.0 * s);
-                    let field_h = overlay_line_height + 4.0 * s;
-                    overlay_rects.push(Rect::rounded(
-                        field_x,
-                        field_y,
-                        field_w,
-                        field_h,
-                        input_focus,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        field_x + 1.0 * s,
-                        field_y + 1.0 * s,
-                        field_w - 2.0 * s,
-                        field_h - 2.0 * s,
-                        input_bg,
-                        3.0 * s,
-                    ));
-                }
-                crate::overlay::ActiveOverlay::CommandPalette
-                | crate::overlay::ActiveOverlay::LanguagePicker
-                | crate::overlay::ActiveOverlay::EncodingPicker
-                | crate::overlay::ActiveOverlay::AllTabs => {
-                    let field_x = overlay_left + 6.0 * s;
-                    let field_y = overlay_top_panel + 4.0 * s;
-                    let field_w = overlay_width - 12.0 * s;
-                    let field_h = overlay_line_height + 4.0 * s;
-                    overlay_rects.push(Rect::rounded(
-                        field_x,
-                        field_y,
-                        field_w,
-                        field_h,
-                        input_focus,
-                        4.0 * s,
-                    ));
-                    overlay_rects.push(Rect::rounded(
-                        field_x + 1.0 * s,
-                        field_y + 1.0 * s,
-                        field_w - 2.0 * s,
-                        field_h - 2.0 * s,
-                        input_bg,
-                        3.0 * s,
-                    ));
-                }
-                _ => {}
-            }
         }
         let editor_height = height - tab_bar_height - status_bar_height - results_panel_height_px;
 
@@ -3054,13 +3625,16 @@ impl Renderer {
             },
         );
 
-        // Build base text areas (excluding overlay)
-        let mut base_text_areas: Vec<TextArea> = Vec::new();
+        if !snackbar_visible {
+            self.snackbar_bounds = None;
+            self.snackbar_dismiss_bounds = None;
+            self.snackbar_dismiss_forever_bounds = None;
+            self.snackbar_next_tip_bounds = None;
+        }
 
-        // Tab bar text - single buffer with padding-based alignment
-        let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0; // vertically center (line_height 16)
-                                                              // Tab text is clipped to the strip between any visible arrow buttons,
-                                                              // so labels never bleed into the ‹ / › / ⌄ zones.
+        // Build base text areas
+        let scroll_x_px = buffer.scroll_x * s;
+        let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0;
         let tab_text_clip_left = if self.tab_overflow && self.tab_scroll_offset > 0.5 {
             (TAB_ARROW_WIDTH * s) as i32
         } else {
@@ -3076,7 +3650,7 @@ impl Renderer {
         } else {
             width as i32
         };
-        base_text_areas.push(TextArea {
+        let mut base_text_areas: Vec<TextArea> = vec![TextArea {
             buffer: &self.tab_bar_buffer,
             left: -(self.tab_scroll_offset * s),
             top: tab_text_top,
@@ -3089,10 +3663,8 @@ impl Renderer {
             },
             default_color: theme.tab_active_fg.to_glyphon(),
             custom_glyphs: &[],
-        });
-        // Tab control button text (arrows + ⌄)
+        }];
         if self.tab_overflow {
-            // ‹ left arrow
             if self.tab_scroll_offset > 0.5 {
                 base_text_areas.push(TextArea {
                     buffer: &self.tab_arrow_left_buffer,
@@ -3109,7 +3681,6 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            // › right arrow
             if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
                 let rx_left = width - ALL_TABS_BTN_WIDTH * s - TAB_ARROW_WIDTH * s;
                 base_text_areas.push(TextArea {
@@ -3127,7 +3698,6 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            // ⌄ all-tabs button
             base_text_areas.push(TextArea {
                 buffer: &self.tab_all_btn_buffer,
                 left: (width - ALL_TABS_BTN_WIDTH * s) + 9.0 * s,
@@ -3143,8 +3713,6 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-
-        // Gutter text
         base_text_areas.push(TextArea {
             buffer: &self.gutter_buffer,
             left: 0.0,
@@ -3159,9 +3727,6 @@ impl Renderer {
             default_color: theme.gutter_fg.to_glyphon(),
             custom_glyphs: &[],
         });
-
-        // Editor text
-        let scroll_x_px = buffer.scroll_x * s;
         base_text_areas.push(TextArea {
             buffer: &self.editor_buffer,
             left: editor_left - scroll_x_px,
@@ -3176,8 +3741,6 @@ impl Renderer {
             default_color: theme.fg.to_glyphon(),
             custom_glyphs: &[],
         });
-
-        // Status bar text (vertically centered)
         let status_text_top = status_top + (status_bar_height - self.current_font_size * s) / 2.0;
         base_text_areas.push(TextArea {
             buffer: &self.status_buffer,
@@ -3193,15 +3756,6 @@ impl Renderer {
             default_color: theme.status_bar_fg.to_glyphon(),
             custom_glyphs: &[],
         });
-
-        // Cursor I-beam is rendered as a rect only; no text overlay needed
-
-        if !snackbar_visible {
-            self.snackbar_bounds = None;
-            self.snackbar_dismiss_bounds = None;
-            self.snackbar_dismiss_forever_bounds = None;
-            self.snackbar_next_tip_bounds = None;
-        }
 
         Self::render_layer(
             device,
@@ -3231,443 +3785,33 @@ impl Renderer {
         ) {
             match layer {
                 CompositedLayer::ResultsPanel => {
-                    let panel_top = editor_top + editor_height_px;
-                    let header_h = RESULTS_PANEL_HEADER_HEIGHT * s;
-                    let mut results_rects = vec![
-                        Rect::flat(
-                            0.0,
-                            panel_top,
-                            width,
-                            results_panel_height_px,
-                            [
-                                theme.tab_bar_bg.r,
-                                theme.tab_bar_bg.g,
-                                theme.tab_bar_bg.b,
-                                1.0,
-                            ],
-                        ),
-                        Rect::flat(
-                            0.0,
-                            panel_top,
-                            width,
-                            header_h,
-                            [
-                                theme.status_bar_bg.r,
-                                theme.status_bar_bg.g,
-                                theme.status_bar_bg.b,
-                                1.0,
-                            ],
-                        ),
-                        Rect::flat(
-                            0.0,
-                            panel_top,
-                            width,
-                            1.0 * s,
-                            [theme.gutter_fg.r, theme.gutter_fg.g, theme.gutter_fg.b, 0.5],
-                        ),
-                    ];
-
-                    let panel = &overlay.results_panel;
-                    if panel.selected >= panel.scroll_offset {
-                        let mut visual_row = 0usize;
-                        for i in panel.scroll_offset..panel.selected.min(panel.results.len()) {
-                            let result = &panel.results[i];
-                            visual_row +=
-                                result.context_before.len() + 1 + result.context_after.len();
-                        }
-                        let selected_y =
-                            panel_top + header_h + visual_row as f32 * RESULTS_PANEL_ROW_HEIGHT * s;
-                        let selected_h = RESULTS_PANEL_ROW_HEIGHT * s;
-                        if selected_y + selected_h < panel_top + results_panel_height_px {
-                            results_rects.push(Rect::flat(
-                                0.0,
-                                selected_y,
-                                width,
-                                selected_h,
-                                [theme.selection.r, theme.selection.g, theme.selection.b, 0.3],
-                            ));
-                        }
-                    }
-
-                    let results_text = vec![TextArea {
-                        buffer: &self.results_panel_buffer,
-                        left: 8.0 * s,
-                        top: panel_top + 4.0 * s,
-                        scale: s,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: panel_top as i32,
-                            right: width as i32,
-                            bottom: (panel_top + results_panel_height_px) as i32,
-                        },
-                        default_color: theme.fg.to_glyphon(),
-                        custom_glyphs: &[],
-                    }];
-
-                    Self::render_layer(
+                    self.render_results_panel_layer(
                         device,
                         queue,
                         view,
-                        &mut self.text_renderer,
-                        &mut self.font_system,
-                        &mut self.atlas,
-                        &self.viewport,
-                        &mut self.swash_cache,
-                        &self.shape_renderer,
-                        self.width,
-                        self.height,
-                        &results_rects,
-                        results_text,
-                        wgpu::LoadOp::Load,
-                        "NotepadX Results Panel Encoder",
-                        "NotepadX Results Panel Pass",
-                        "Failed to prepare results panel text rendering",
-                        "Failed to render results panel text",
+                        overlay,
+                        theme,
+                        s,
+                        width,
+                        editor_top,
+                        editor_height_px,
+                        results_panel_height_px,
                     );
                 }
                 CompositedLayer::Snackbar => {
-                    let snackbar = snackbar_geometry(width, status_top, s);
-
-                    self.snackbar_bounds =
-                        Some((snackbar.x, snackbar.y, snackbar.width, snackbar.height));
-                    self.snackbar_dismiss_bounds = Some(snackbar.dismiss_bounds);
-                    self.snackbar_dismiss_forever_bounds = Some(snackbar.dismiss_forever_bounds);
-                    self.snackbar_next_tip_bounds = Some(snackbar.next_tip_bounds);
-
-                    let mut snackbar_rects = vec![
-                        Rect::rounded_shadow(
-                            snackbar.x,
-                            snackbar.y,
-                            snackbar.width,
-                            snackbar.height,
-                            [
-                                theme.tab_bar_bg.r,
-                                theme.tab_bar_bg.g,
-                                theme.tab_bar_bg.b,
-                                0.97,
-                            ],
-                            8.0 * s,
-                            10.0 * s,
-                            [0.0, 0.0, 0.0, 0.35],
-                        ),
-                        Rect::rounded(
-                            snackbar.x,
-                            snackbar.y,
-                            snackbar.width,
-                            2.0 * s,
-                            [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0],
-                            8.0 * s,
-                        ),
-                    ];
-
-                    if let Some(hovered) = self.hovered_snackbar_button {
-                        let (hover_x, hover_y, hover_w, hover_h) = match hovered {
-                            SnackbarButton::Dismiss => {
-                                self.snackbar_dismiss_bounds.unwrap_or_default()
-                            }
-                            SnackbarButton::DontShowAgain => {
-                                self.snackbar_dismiss_forever_bounds.unwrap_or_default()
-                            }
-                            SnackbarButton::NextTip => {
-                                self.snackbar_next_tip_bounds.unwrap_or_default()
-                            }
-                        };
-                        snackbar_rects.push(Rect::rounded(
-                            hover_x - 4.0 * s,
-                            hover_y,
-                            hover_w + 8.0 * s,
-                            hover_h,
-                            [
-                                theme.selection.r,
-                                theme.selection.g,
-                                theme.selection.b,
-                                0.25,
-                            ],
-                            4.0 * s,
-                        ));
-                    }
-
-                    snackbar_rects.push(Rect::flat(
-                        snackbar.x + 12.0 * s,
-                        snackbar.separator_y,
-                        snackbar.width - 24.0 * s,
-                        1.0 * s,
-                        [
-                            theme.gutter_fg.r,
-                            theme.gutter_fg.g,
-                            theme.gutter_fg.b,
-                            0.25,
-                        ],
-                    ));
-
-                    let snackbar_text = vec![TextArea {
-                        buffer: &self.snackbar_buffer,
-                        left: snackbar.x + 8.0 * s,
-                        top: snackbar.y + 6.0 * s,
-                        scale: s,
-                        bounds: TextBounds {
-                            left: snackbar.x as i32,
-                            top: snackbar.y as i32,
-                            right: (snackbar.x + snackbar.width) as i32,
-                            bottom: (snackbar.y + snackbar.height) as i32,
-                        },
-                        default_color: theme.fg.to_glyphon(),
-                        custom_glyphs: &[],
-                    }];
-
-                    Self::render_layer(
-                        device,
-                        queue,
-                        view,
-                        &mut self.text_renderer,
-                        &mut self.font_system,
-                        &mut self.atlas,
-                        &self.viewport,
-                        &mut self.swash_cache,
-                        &self.shape_renderer,
-                        self.width,
-                        self.height,
-                        &snackbar_rects,
-                        snackbar_text,
-                        wgpu::LoadOp::Load,
-                        "NotepadX Snackbar Encoder",
-                        "NotepadX Snackbar Pass",
-                        "Failed to prepare snackbar text rendering",
-                        "Failed to render snackbar text",
-                    );
+                    self.render_snackbar_layer(device, queue, view, theme, width, status_top, s);
                 }
                 CompositedLayer::ModalOverlay => {
-                    let modal_overlay =
-                        modal_overlay.expect("modal overlay layer requires geometry");
-                    let mut overlay_text_areas =
-                        Vec::with_capacity(modal_overlay_text_pass_layers().len());
-                    for text_layer in modal_overlay_text_pass_layers() {
-                        match text_layer {
-                            ModalOverlayTextPassLayer::OverlayPanel => {
-                                if let Some(layout) = crate::overlay::find_overlay_layout(
-                                    &overlay.active,
-                                    modal_overlay.left,
-                                    modal_overlay.top,
-                                    modal_overlay.width,
-                                    s,
-                                    OVERLAY_CHAR_WIDTH * s,
-                                    OVERLAY_LINE_HEIGHT * s,
-                                ) {
-                                    overlay_text_areas.push(TextArea {
-                                        buffer: &self.overlay_find_label_buffer,
-                                        left: layout.find_label_x,
-                                        top: layout.row_text_y,
-                                        scale: s,
-                                        bounds: TextBounds {
-                                            left: layout.find_label_x as i32,
-                                            top: layout.row_text_y as i32,
-                                            right: layout.find_field.x as i32,
-                                            bottom: (layout.row_text_y + OVERLAY_LINE_HEIGHT * s)
-                                                as i32,
-                                        },
-                                        default_color: theme.fg.to_glyphon(),
-                                        custom_glyphs: &[],
-                                    });
-                                    overlay_text_areas.push(TextArea {
-                                        buffer: &self.overlay_find_input_buffer,
-                                        left: layout.find_text_x,
-                                        top: layout.row_text_y,
-                                        scale: s,
-                                        bounds: TextBounds {
-                                            left: layout.find_text_x as i32,
-                                            top: layout.find_field.y as i32,
-                                            right: (layout.find_field.x + layout.find_field.width
-                                                - crate::overlay::FIND_OVERLAY_INPUT_PADDING_X * s)
-                                                as i32,
-                                            bottom: (layout.find_field.y + layout.find_field.height)
-                                                as i32,
-                                        },
-                                        default_color: theme.fg.to_glyphon(),
-                                        custom_glyphs: &[],
-                                    });
-                                    overlay_text_areas.push(TextArea {
-                                        buffer: &self.overlay_count_buffer,
-                                        left: layout.count_text_x,
-                                        top: layout.row_text_y,
-                                        scale: s,
-                                        bounds: TextBounds {
-                                            left: layout.count_rect.x as i32,
-                                            top: layout.count_rect.y as i32,
-                                            right: (layout.count_rect.x + layout.count_rect.width)
-                                                as i32,
-                                            bottom: (layout.count_rect.y + layout.count_rect.height)
-                                                as i32,
-                                        },
-                                        default_color: theme.fg.to_glyphon(),
-                                        custom_glyphs: &[],
-                                    });
-                                    if let (Some(replace_label_x), Some(replace_label_y)) =
-                                        (layout.replace_label_x, layout.replace_label_y)
-                                    {
-                                        overlay_text_areas.push(TextArea {
-                                            buffer: &self.overlay_replace_label_buffer,
-                                            left: replace_label_x,
-                                            top: replace_label_y,
-                                            scale: s,
-                                            bounds: TextBounds {
-                                                left: replace_label_x as i32,
-                                                top: replace_label_y as i32,
-                                                right: layout
-                                                    .replace_field
-                                                    .expect("replace field missing")
-                                                    .x
-                                                    as i32,
-                                                bottom: (replace_label_y + OVERLAY_LINE_HEIGHT * s)
-                                                    as i32,
-                                            },
-                                            default_color: theme.fg.to_glyphon(),
-                                            custom_glyphs: &[],
-                                        });
-                                    }
-                                    if let (
-                                        Some(replace_field),
-                                        Some(replace_text_x),
-                                        Some(replace_text_y),
-                                    ) = (
-                                        layout.replace_field,
-                                        layout.replace_text_x,
-                                        layout.replace_text_y,
-                                    ) {
-                                        overlay_text_areas.push(TextArea {
-                                            buffer: &self.overlay_replace_input_buffer,
-                                            left: replace_text_x,
-                                            top: replace_text_y,
-                                            scale: s,
-                                            bounds: TextBounds {
-                                                left: replace_text_x as i32,
-                                                top: replace_field.y as i32,
-                                                right: (replace_field.x + replace_field.width
-                                                    - crate::overlay::FIND_OVERLAY_INPUT_PADDING_X
-                                                        * s)
-                                                    as i32,
-                                                bottom: (replace_field.y + replace_field.height)
-                                                    as i32,
-                                            },
-                                            default_color: theme.fg.to_glyphon(),
-                                            custom_glyphs: &[],
-                                        });
-                                        // "All" button label — horizontally centred in the button rect
-                                        if let Some(btn) = layout.replace_all_btn {
-                                            let btn_label_w = 3.0 * OVERLAY_CHAR_WIDTH * s; // "All" = 3 chars
-                                            let btn_text_x =
-                                                btn.x + (btn.width - btn_label_w) / 2.0;
-                                            let btn_text_y = btn.y + 2.0 * s;
-                                            overlay_text_areas.push(TextArea {
-                                                buffer: &self.overlay_replace_all_btn_buffer,
-                                                left: btn_text_x,
-                                                top: btn_text_y,
-                                                scale: s,
-                                                bounds: TextBounds {
-                                                    left: btn.x as i32,
-                                                    top: btn.y as i32,
-                                                    right: (btn.x + btn.width) as i32,
-                                                    bottom: (btn.y + btn.height) as i32,
-                                                },
-                                                default_color: theme.fg.to_glyphon(),
-                                                custom_glyphs: &[],
-                                            });
-                                        }
-                                    }
-                                    for (toggle, buffer) in [
-                                        (
-                                            layout.toggle(
-                                                crate::overlay::FindToggleKind::CaseSensitive,
-                                            ),
-                                            &self.overlay_case_toggle_buffer,
-                                        ),
-                                        (
-                                            layout
-                                                .toggle(crate::overlay::FindToggleKind::WholeWord),
-                                            &self.overlay_word_toggle_buffer,
-                                        ),
-                                        (
-                                            layout.toggle(crate::overlay::FindToggleKind::Regex),
-                                            &self.overlay_regex_toggle_buffer,
-                                        ),
-                                    ] {
-                                        overlay_text_areas.push(TextArea {
-                                            buffer,
-                                            left: toggle.text_x,
-                                            top: toggle.text_y,
-                                            scale: s,
-                                            bounds: TextBounds {
-                                                left: toggle.rect.x as i32,
-                                                top: toggle.rect.y as i32,
-                                                right: (toggle.rect.x + toggle.rect.width) as i32,
-                                                bottom: (toggle.rect.y + toggle.rect.height) as i32,
-                                            },
-                                            default_color: theme.fg.to_glyphon(),
-                                            custom_glyphs: &[],
-                                        });
-                                    }
-                                    if overlay.find.regex_error.is_some() {
-                                        overlay_text_areas.push(TextArea {
-                                            buffer: &self.overlay_error_buffer,
-                                            left: layout.error_text_x,
-                                            top: layout.error_text_y,
-                                            scale: s,
-                                            bounds: TextBounds {
-                                                left: layout.error_text_x as i32,
-                                                top: layout.error_text_y as i32,
-                                                right: (modal_overlay.left + modal_overlay.width
-                                                    - crate::overlay::FIND_OVERLAY_CONTENT_PADDING_X
-                                                        * s)
-                                                    as i32,
-                                                bottom: (layout.error_text_y
-                                                    + OVERLAY_LINE_HEIGHT * s)
-                                                    as i32,
-                                            },
-                                            default_color: theme.fg.to_glyphon(),
-                                            custom_glyphs: &[],
-                                        });
-                                    }
-                                } else {
-                                    overlay_text_areas.push(TextArea {
-                                        buffer: &self.overlay_buffer,
-                                        left: modal_overlay.left + 8.0 * s,
-                                        top: modal_overlay.top + 6.0 * s,
-                                        scale: s,
-                                        bounds: TextBounds {
-                                            left: (modal_overlay.left + 8.0 * s) as i32,
-                                            top: (modal_overlay.top + 6.0 * s) as i32,
-                                            right: (modal_overlay.left + modal_overlay.width
-                                                - 8.0 * s)
-                                                as i32,
-                                            bottom: (modal_overlay.top + modal_overlay.height)
-                                                as i32,
-                                        },
-                                        default_color: theme.fg.to_glyphon(),
-                                        custom_glyphs: &[],
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    Self::render_layer(
+                    let modal_geom = modal_overlay.expect("modal overlay layer requires geometry");
+                    self.render_modal_overlay_layer(
                         device,
                         queue,
                         view,
-                        &mut self.text_renderer,
-                        &mut self.font_system,
-                        &mut self.atlas,
-                        &self.viewport,
-                        &mut self.swash_cache,
-                        &self.shape_renderer,
-                        self.width,
-                        self.height,
+                        overlay,
+                        theme,
+                        modal_geom,
                         &overlay_rects,
-                        overlay_text_areas,
-                        wgpu::LoadOp::Load,
-                        "NotepadX Overlay Encoder",
-                        "NotepadX Overlay Pass",
-                        "Failed to prepare overlay text rendering",
-                        "Failed to render overlay text",
+                        s,
                     );
                 }
             }
