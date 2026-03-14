@@ -490,8 +490,8 @@ fn set_tab_control_buffer(
     buffer.shape_until_scroll(font_system, false);
 }
 
-/// Persistent text buffers for glyphon rendering
-pub struct Renderer {
+/// Glyphon text rasterization engine (font system, glyph cache, atlas, viewport).
+pub struct TextEngine {
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
     #[allow(dead_code)]
@@ -499,21 +499,54 @@ pub struct Renderer {
     pub atlas: TextAtlas,
     pub viewport: Viewport,
     pub text_renderer: TextRenderer,
+}
+
+/// Tab bar rendering state: buffers, hit-test positions, scroll state.
+pub struct TabBarState {
+    pub buffer: GlyphonBuffer,
+    /// (x, width) for each tab in scaled pixels
+    pub positions: Vec<(f32, f32)>,
+    /// Current horizontal scroll of the tab strip (logical px)
+    pub scroll_offset: f32,
+    /// Maximum scroll value (0 when no overflow)
+    pub scroll_max: f32,
+    /// True when tabs don't fit and scrolling is active
+    pub overflow: bool,
+    pub arrow_left_buffer: GlyphonBuffer,
+    pub arrow_right_buffer: GlyphonBuffer,
+    pub all_btn_buffer: GlyphonBuffer,
+    /// Tab drag insertion indicator: logical x of the drop line (None = no drag)
+    pub drag_indicator_x: Option<f32>,
+}
+
+/// Snackbar (tip-of-the-day) rendering state and hit-test bounds.
+pub struct SnackbarRenderState {
+    pub buffer: GlyphonBuffer,
+    /// Bounding box in physical pixels: (x, y, w, h)
+    pub bounds: Option<(f32, f32, f32, f32)>,
+    /// "[×] Dismiss" button bounds in physical pixels
+    pub dismiss_bounds: Option<(f32, f32, f32, f32)>,
+    /// "Don't show again" link bounds in physical pixels
+    pub dismiss_forever_bounds: Option<(f32, f32, f32, f32)>,
+    /// ">" next-tip button bounds in physical pixels
+    pub next_tip_bounds: Option<(f32, f32, f32, f32)>,
+    /// Currently hovered snackbar button (set from main.rs)
+    pub hovered_button: Option<SnackbarButton>,
+}
+
+/// Persistent text buffers for glyphon rendering
+pub struct Renderer {
+    pub text: TextEngine,
     pub shape_renderer: ShapeRenderer,
     pub queue: Arc<wgpu::Queue>,
     pub width: u32,
     pub height: u32,
     pub scale_factor: f32,
 
+    // Tab bar
+    pub tabs: TabBarState,
+
     // Persistent glyphon buffers
-    pub tab_bar_buffer: GlyphonBuffer,
-    pub tab_positions: Vec<(f32, f32)>, // (x, width) for each tab in scaled pixels
-    pub tab_scroll_offset: f32,         // current horizontal scroll of the tab strip (logical px)
-    pub tab_scroll_max: f32,            // maximum scroll value (0 when no overflow)
-    pub tab_overflow: bool,             // true when tabs don't fit and scrolling is active
-    pub tab_arrow_left_buffer: GlyphonBuffer,
-    pub tab_arrow_right_buffer: GlyphonBuffer,
-    pub tab_all_btn_buffer: GlyphonBuffer,
     pub gutter_buffer: GlyphonBuffer,
     pub editor_buffer: GlyphonBuffer,
     pub status_buffer: GlyphonBuffer,
@@ -545,24 +578,11 @@ pub struct Renderer {
     // Currently hovered status bar segment (set from main.rs)
     pub hovered_status_segment: Option<StatusBarSegment>,
 
-    /// Tab drag insertion indicator: logical x position of the drop line (None = no drag)
-    pub tab_drag_indicator_x: Option<f32>,
-
     /// Effective gutter width (0 when line numbers are hidden)
     pub effective_gutter_width: f32,
 
-    // Snackbar (tip-of-the-day)
-    pub snackbar_buffer: GlyphonBuffer,
-    /// Snackbar bounding box in physical pixels: (x, y, w, h) — used for hit-testing
-    pub snackbar_bounds: Option<(f32, f32, f32, f32)>,
-    /// Snackbar "[×] Dismiss" button bounds in physical pixels
-    pub snackbar_dismiss_bounds: Option<(f32, f32, f32, f32)>,
-    /// Snackbar "Don't show again" link bounds in physical pixels
-    pub snackbar_dismiss_forever_bounds: Option<(f32, f32, f32, f32)>,
-    /// Snackbar ">" next-tip button bounds in physical pixels
-    pub snackbar_next_tip_bounds: Option<(f32, f32, f32, f32)>,
-    /// Currently hovered snackbar button (set from main.rs)
-    pub hovered_snackbar_button: Option<SnackbarButton>,
+    // Snackbar
+    pub snackbar: SnackbarRenderState,
 }
 
 impl Renderer {
@@ -637,24 +657,29 @@ impl Renderer {
         );
 
         Self {
-            font_system,
-            swash_cache,
-            cache,
-            atlas,
-            viewport,
-            text_renderer,
+            text: TextEngine {
+                font_system,
+                swash_cache,
+                cache,
+                atlas,
+                viewport,
+                text_renderer,
+            },
             shape_renderer,
             width,
             height,
             queue,
-            tab_bar_buffer,
-            tab_positions: Vec::new(),
-            tab_scroll_offset: 0.0,
-            tab_scroll_max: 0.0,
-            tab_overflow: false,
-            tab_arrow_left_buffer,
-            tab_arrow_right_buffer,
-            tab_all_btn_buffer,
+            tabs: TabBarState {
+                buffer: tab_bar_buffer,
+                positions: Vec::new(),
+                scroll_offset: 0.0,
+                scroll_max: 0.0,
+                overflow: false,
+                arrow_left_buffer: tab_arrow_left_buffer,
+                arrow_right_buffer: tab_arrow_right_buffer,
+                all_btn_buffer: tab_all_btn_buffer,
+                drag_indicator_x: None,
+            },
             gutter_buffer,
             editor_buffer,
             status_buffer,
@@ -677,14 +702,15 @@ impl Renderer {
             current_font_size: FONT_SIZE,
             status_segments: Vec::new(),
             hovered_status_segment: None,
-            tab_drag_indicator_x: None,
             effective_gutter_width: GUTTER_WIDTH,
-            snackbar_buffer,
-            snackbar_bounds: None,
-            snackbar_dismiss_bounds: None,
-            snackbar_dismiss_forever_bounds: None,
-            snackbar_next_tip_bounds: None,
-            hovered_snackbar_button: None,
+            snackbar: SnackbarRenderState {
+                buffer: snackbar_buffer,
+                bounds: None,
+                dismiss_bounds: None,
+                dismiss_forever_bounds: None,
+                next_tip_bounds: None,
+                hovered_button: None,
+            },
         }
     }
 
@@ -692,7 +718,8 @@ impl Renderer {
         self.width = width;
         self.height = height;
         self.scale_factor = scale_factor;
-        self.viewport
+        self.text
+            .viewport
             .update(&self.queue, Resolution { width, height });
     }
 
@@ -749,24 +776,24 @@ impl Renderer {
     /// Adjust `tab_scroll_offset` so the tab at `active_idx` is fully visible.
     /// Call this after changing `editor.active_buffer`.
     pub fn scroll_active_tab_into_view(&mut self, active_idx: usize) {
-        if !self.tab_overflow {
+        if !self.tabs.overflow {
             return;
         }
-        let Some(&(tx, tw)) = self.tab_positions.get(active_idx) else {
+        let Some(&(tx, tw)) = self.tabs.positions.get(active_idx) else {
             return;
         };
         let win_w = self.width as f32 / self.scale_factor;
         let tab_area_width = win_w - ALL_TABS_BTN_WIDTH;
         // Scroll left so the tab's left edge is visible
-        if tx < self.tab_scroll_offset {
-            self.tab_scroll_offset = tx;
+        if tx < self.tabs.scroll_offset {
+            self.tabs.scroll_offset = tx;
         }
         // Scroll right so the tab's right edge is visible
         let tab_right = tx + tw;
-        if tab_right > self.tab_scroll_offset + tab_area_width {
-            self.tab_scroll_offset = tab_right - tab_area_width;
+        if tab_right > self.tabs.scroll_offset + tab_area_width {
+            self.tabs.scroll_offset = tab_right - tab_area_width;
         }
-        self.tab_scroll_offset = self.tab_scroll_offset.clamp(0.0, self.tab_scroll_max);
+        self.tabs.scroll_offset = self.tabs.scroll_offset.clamp(0.0, self.tabs.scroll_max);
     }
 
     pub fn scrollbar_thumb(
@@ -859,12 +886,18 @@ impl Renderer {
         self.current_font_size = font_size;
         self.effective_gutter_width = effective_gutter_width(config.show_line_numbers);
 
-        self.editor_buffer
-            .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
-        self.gutter_buffer
-            .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
-        self.cursor_buffer
-            .set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
+        self.editor_buffer.set_metrics(
+            &mut self.text.font_system,
+            Metrics::new(font_size, line_height),
+        );
+        self.gutter_buffer.set_metrics(
+            &mut self.text.font_system,
+            Metrics::new(font_size, line_height),
+        );
+        self.cursor_buffer.set_metrics(
+            &mut self.text.font_system,
+            Metrics::new(font_size, line_height),
+        );
 
         let buffer = editor.active();
         let width = self.width as f32 / self.scale_factor.max(1.0);
@@ -905,15 +938,16 @@ impl Renderer {
         theme: &Theme,
         width: f32,
     ) {
-        self.tab_bar_buffer
-            .set_size(&mut self.font_system, None, Some(TAB_BAR_HEIGHT));
+        self.tabs
+            .buffer
+            .set_size(&mut self.text.font_system, None, Some(TAB_BAR_HEIGHT));
 
         let tab_char_w = TAB_CHAR_WIDTH;
         let tab_pad = TAB_PADDING_H;
         let tab_gap = 3.0;
         let tab_gap_chars = (tab_gap / tab_char_w).ceil() as usize;
         let tab_gap_text_w = tab_gap_chars as f32 * tab_char_w;
-        self.tab_positions.clear();
+        self.tabs.positions.clear();
         let mut tab_x = 0.0f32;
         let mut tab_spans: Vec<(String, Attrs)> = Vec::new();
         let base_tab_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
@@ -964,7 +998,7 @@ impl Renderer {
             let full_label = format!("{left_pad}{label}{right_pad}");
             tab_spans.push((full_label, attrs));
 
-            self.tab_positions.push((tab_x, tw));
+            self.tabs.positions.push((tab_x, tw));
             tab_x += tw;
 
             if i + 1 < tab_count {
@@ -977,51 +1011,53 @@ impl Renderer {
 
         let rich_spans: Vec<(&str, Attrs)> =
             tab_spans.iter().map(|(s, a)| (s.as_str(), *a)).collect();
-        self.tab_bar_buffer.set_rich_text(
-            &mut self.font_system,
+        self.tabs.buffer.set_rich_text(
+            &mut self.text.font_system,
             rich_spans,
             base_tab_attrs.color(theme.tab_active_fg.to_glyphon()),
             Shaping::Advanced,
         );
-        self.tab_bar_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        self.tabs
+            .buffer
+            .shape_until_scroll(&mut self.text.font_system, false);
 
         let tab_content_width = tab_x;
-        self.tab_overflow = tab_content_width > tab_area_width;
-        self.tab_scroll_max = if self.tab_overflow {
+        self.tabs.overflow = tab_content_width > tab_area_width;
+        self.tabs.scroll_max = if self.tabs.overflow {
             (tab_content_width - tab_area_width).max(0.0)
         } else {
             0.0
         };
-        self.tab_scroll_offset = self.tab_scroll_offset.clamp(0.0, self.tab_scroll_max);
+        self.tabs.scroll_offset = self.tabs.scroll_offset.clamp(0.0, self.tabs.scroll_max);
 
         let active_col = theme.tab_active_fg.to_glyphon();
         let inactive_col = theme.tab_inactive_fg.to_glyphon();
-        let left_col = if self.tab_scroll_offset > 0.5 {
+        let left_col = if self.tabs.scroll_offset > 0.5 {
             active_col
         } else {
             inactive_col
         };
-        let right_col = if self.tab_overflow && self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
-            active_col
-        } else {
-            inactive_col
-        };
+        let right_col =
+            if self.tabs.overflow && self.tabs.scroll_offset < self.tabs.scroll_max - 0.5 {
+                active_col
+            } else {
+                inactive_col
+            };
         set_tab_control_buffer(
-            &mut self.font_system,
-            &mut self.tab_arrow_left_buffer,
+            &mut self.text.font_system,
+            &mut self.tabs.arrow_left_buffer,
             "\u{2039}",
             left_col,
         );
         set_tab_control_buffer(
-            &mut self.font_system,
-            &mut self.tab_arrow_right_buffer,
+            &mut self.text.font_system,
+            &mut self.tabs.arrow_right_buffer,
             "\u{203a}",
             right_col,
         );
         set_tab_control_buffer(
-            &mut self.font_system,
-            &mut self.tab_all_btn_buffer,
+            &mut self.text.font_system,
+            &mut self.tabs.all_btn_buffer,
             "\u{2304}",
             active_col,
         );
@@ -1041,7 +1077,7 @@ impl Renderer {
     ) {
         let gutter_w = self.effective_gutter_width;
         self.gutter_buffer.set_size(
-            &mut self.font_system,
+            &mut self.text.font_system,
             Some(gutter_w.max(1.0)),
             Some(editor_height),
         );
@@ -1076,7 +1112,7 @@ impl Renderer {
                 gutter_text.push_str("   ~\n");
             }
             self.gutter_buffer.set_text(
-                &mut self.font_system,
+                &mut self.text.font_system,
                 &gutter_text,
                 Attrs::new()
                     .family(Family::Name("JetBrains Mono"))
@@ -1085,18 +1121,18 @@ impl Renderer {
             );
         } else {
             self.gutter_buffer.set_text(
-                &mut self.font_system,
+                &mut self.text.font_system,
                 "",
                 Attrs::new().family(Family::Name("JetBrains Mono")),
                 Shaping::Advanced,
             );
         }
         self.gutter_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+            .shape_until_scroll(&mut self.text.font_system, false);
 
         // Editor text (with syntax highlighting)
         self.editor_buffer
-            .set_size(&mut self.font_system, buf_width, Some(editor_height));
+            .set_size(&mut self.text.font_system, buf_width, Some(editor_height));
 
         let mut visible_text = String::new();
         for (i, visual_line) in visible_visual_lines.iter().enumerate() {
@@ -1155,14 +1191,14 @@ impl Renderer {
                     })
                     .collect();
                 self.editor_buffer.set_rich_text(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     rich_spans,
                     base_attrs,
                     Shaping::Advanced,
                 );
             } else {
                 self.editor_buffer.set_text(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &rendered_visible_text,
                     base_attrs,
                     Shaping::Advanced,
@@ -1170,14 +1206,14 @@ impl Renderer {
             }
         } else {
             self.editor_buffer.set_text(
-                &mut self.font_system,
+                &mut self.text.font_system,
                 &rendered_visible_text,
                 base_attrs,
                 Shaping::Advanced,
             );
         }
         self.editor_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+            .shape_until_scroll(&mut self.text.font_system, false);
 
         // Cursor
         let (cursor_visual_line, _cursor_visual_col) =
@@ -1186,12 +1222,12 @@ impl Renderer {
         if cursor_line_in_view >= 0 && cursor_line_in_view < visible_lines as i64 {
             let caret_height = font_size.max(1.0);
             self.cursor_buffer.set_size(
-                &mut self.font_system,
+                &mut self.text.font_system,
                 Some(char_width * 2.0),
                 Some(caret_height),
             );
             self.cursor_buffer.set_text(
-                &mut self.font_system,
+                &mut self.text.font_system,
                 "│",
                 Attrs::new()
                     .family(Family::Name("JetBrains Mono"))
@@ -1199,7 +1235,7 @@ impl Renderer {
                 Shaping::Advanced,
             );
             self.cursor_buffer
-                .shape_until_scroll(&mut self.font_system, false);
+                .shape_until_scroll(&mut self.text.font_system, false);
         }
     }
 
@@ -1211,8 +1247,11 @@ impl Renderer {
         theme: &Theme,
         width: f32,
     ) {
-        self.status_buffer
-            .set_size(&mut self.font_system, Some(width), Some(STATUS_BAR_HEIGHT));
+        self.status_buffer.set_size(
+            &mut self.text.font_system,
+            Some(width),
+            Some(STATUS_BAR_HEIGHT),
+        );
         let line = buffer.display_cursor_line() + 1;
         let col = buffer.cursor_col() + 1;
         let encoding = buffer.encoding;
@@ -1415,7 +1454,7 @@ impl Renderer {
         }
 
         self.status_buffer.set_text(
-            &mut self.font_system,
+            &mut self.text.font_system,
             &status_text,
             Attrs::new()
                 .family(Family::Name("JetBrains Mono"))
@@ -1423,7 +1462,7 @@ impl Renderer {
             Shaping::Advanced,
         );
         self.status_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+            .shape_until_scroll(&mut self.text.font_system, false);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1475,52 +1514,52 @@ impl Renderer {
             crate::overlay::ActiveOverlay::Find => {
                 let (before, after) = overlay.input.split_at(overlay.cursor_pos);
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_find_label_buffer,
                     "Find:",
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_find_input_buffer,
                     &format!("{}│{}", before, after),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_count_buffer,
                     &overlay.find.match_count_label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_case_toggle_buffer,
                     crate::overlay::FindToggleKind::CaseSensitive.label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_word_toggle_buffer,
                     crate::overlay::FindToggleKind::WholeWord.label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_regex_toggle_buffer,
                     crate::overlay::FindToggleKind::Regex.label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_replace_label_buffer,
                     "",
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_replace_input_buffer,
                     "",
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_replace_all_btn_buffer,
                     "",
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_error_buffer,
                     &overlay
                         .find
@@ -1553,52 +1592,52 @@ impl Renderer {
                     replace_before.to_string()
                 };
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_find_label_buffer,
                     "Find:",
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_replace_label_buffer,
                     "Replace:",
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_find_input_buffer,
                     &find_display,
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_replace_input_buffer,
                     &replace_display,
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_count_buffer,
                     &overlay.find.match_count_label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_case_toggle_buffer,
                     crate::overlay::FindToggleKind::CaseSensitive.label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_word_toggle_buffer,
                     crate::overlay::FindToggleKind::WholeWord.label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_regex_toggle_buffer,
                     crate::overlay::FindToggleKind::Regex.label(),
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_replace_all_btn_buffer,
                     "All",
                 );
                 set_overlay_text_buffer(
-                    &mut self.font_system,
+                    &mut self.text.font_system,
                     &mut self.overlay_error_buffer,
                     &overlay
                         .find
@@ -1919,7 +1958,7 @@ impl Renderer {
         };
 
         set_overlay_text_buffer(
-            &mut self.font_system,
+            &mut self.text.font_system,
             &mut self.overlay_buffer,
             &overlay_text,
         );
@@ -1967,7 +2006,7 @@ impl Renderer {
         }
 
         self.results_panel_buffer.set_text(
-            &mut self.font_system,
+            &mut self.text.font_system,
             &text,
             Attrs::new()
                 .family(Family::Name("JetBrains Mono"))
@@ -1975,24 +2014,26 @@ impl Renderer {
             Shaping::Advanced,
         );
         self.results_panel_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+            .shape_until_scroll(&mut self.text.font_system, false);
     }
 
     fn update_snackbar_buffer(&mut self, snackbar_tip: Option<&str>, theme: &Theme) {
         if let Some(tip) = snackbar_tip {
             let snackbar_text = format_snackbar_tip(tip);
-            self.snackbar_buffer
-                .set_size(&mut self.font_system, Some(400.0), Some(120.0));
-            self.snackbar_buffer.set_text(
-                &mut self.font_system,
+            self.snackbar
+                .buffer
+                .set_size(&mut self.text.font_system, Some(400.0), Some(120.0));
+            self.snackbar.buffer.set_text(
+                &mut self.text.font_system,
                 &snackbar_text,
                 Attrs::new()
                     .family(Family::Name("JetBrains Mono"))
                     .color(theme.fg.to_glyphon()),
                 Shaping::Advanced,
             );
-            self.snackbar_buffer
-                .shape_until_scroll(&mut self.font_system, false);
+            self.snackbar
+                .buffer
+                .shape_until_scroll(&mut self.text.font_system, false);
         }
     }
 
@@ -2967,11 +3008,11 @@ impl Renderer {
             device,
             queue,
             view,
-            &mut self.text_renderer,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            &mut self.swash_cache,
+            &mut self.text.text_renderer,
+            &mut self.text.font_system,
+            &mut self.text.atlas,
+            &self.text.viewport,
+            &mut self.text.swash_cache,
             &self.shape_renderer,
             self.width,
             self.height,
@@ -2998,10 +3039,10 @@ impl Renderer {
     ) {
         let snackbar = snackbar_geometry(width, status_top, s);
 
-        self.snackbar_bounds = Some((snackbar.x, snackbar.y, snackbar.width, snackbar.height));
-        self.snackbar_dismiss_bounds = Some(snackbar.dismiss_bounds);
-        self.snackbar_dismiss_forever_bounds = Some(snackbar.dismiss_forever_bounds);
-        self.snackbar_next_tip_bounds = Some(snackbar.next_tip_bounds);
+        self.snackbar.bounds = Some((snackbar.x, snackbar.y, snackbar.width, snackbar.height));
+        self.snackbar.dismiss_bounds = Some(snackbar.dismiss_bounds);
+        self.snackbar.dismiss_forever_bounds = Some(snackbar.dismiss_forever_bounds);
+        self.snackbar.next_tip_bounds = Some(snackbar.next_tip_bounds);
 
         let mut snackbar_rects = vec![
             Rect::rounded_shadow(
@@ -3029,13 +3070,13 @@ impl Renderer {
             ),
         ];
 
-        if let Some(hovered) = self.hovered_snackbar_button {
+        if let Some(hovered) = self.snackbar.hovered_button {
             let (hover_x, hover_y, hover_w, hover_h) = match hovered {
-                SnackbarButton::Dismiss => self.snackbar_dismiss_bounds.unwrap_or_default(),
+                SnackbarButton::Dismiss => self.snackbar.dismiss_bounds.unwrap_or_default(),
                 SnackbarButton::DontShowAgain => {
-                    self.snackbar_dismiss_forever_bounds.unwrap_or_default()
+                    self.snackbar.dismiss_forever_bounds.unwrap_or_default()
                 }
-                SnackbarButton::NextTip => self.snackbar_next_tip_bounds.unwrap_or_default(),
+                SnackbarButton::NextTip => self.snackbar.next_tip_bounds.unwrap_or_default(),
             };
             snackbar_rects.push(Rect::rounded(
                 hover_x - 4.0 * s,
@@ -3066,7 +3107,7 @@ impl Renderer {
         ));
 
         let snackbar_text = vec![TextArea {
-            buffer: &self.snackbar_buffer,
+            buffer: &self.snackbar.buffer,
             left: snackbar.x + 8.0 * s,
             top: snackbar.y + 6.0 * s,
             scale: s,
@@ -3084,11 +3125,11 @@ impl Renderer {
             device,
             queue,
             view,
-            &mut self.text_renderer,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            &mut self.swash_cache,
+            &mut self.text.text_renderer,
+            &mut self.text.font_system,
+            &mut self.text.atlas,
+            &self.text.viewport,
+            &mut self.text.swash_cache,
             &self.shape_renderer,
             self.width,
             self.height,
@@ -3303,11 +3344,11 @@ impl Renderer {
             device,
             queue,
             view,
-            &mut self.text_renderer,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            &mut self.swash_cache,
+            &mut self.text.text_renderer,
+            &mut self.text.font_system,
+            &mut self.text.atlas,
+            &self.text.viewport,
+            &mut self.text.swash_cache,
             &self.shape_renderer,
             self.width,
             self.height,
@@ -3390,13 +3431,13 @@ impl Renderer {
         // Left edge grows by TAB_ARROW_WIDTH when the ‹ arrow is visible;
         // right edge shrinks by TAB_ARROW_WIDTH when the › arrow is visible,
         // and always shrinks by ALL_TABS_BTN_WIDTH when overflow is active.
-        let tab_clip_left_px = if self.tab_overflow && self.tab_scroll_offset > 0.5 {
+        let tab_clip_left_px = if self.tabs.overflow && self.tabs.scroll_offset > 0.5 {
             TAB_ARROW_WIDTH * s
         } else {
             0.0
         };
-        let tab_clip_right_px = if self.tab_overflow {
-            let right_arrow_w = if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+        let tab_clip_right_px = if self.tabs.overflow {
+            let right_arrow_w = if self.tabs.scroll_offset < self.tabs.scroll_max - 0.5 {
                 TAB_ARROW_WIDTH
             } else {
                 0.0
@@ -3405,8 +3446,8 @@ impl Renderer {
         } else {
             width
         };
-        for (i, &(tx, tw)) in self.tab_positions.iter().enumerate() {
-            let tx_s = (tx - self.tab_scroll_offset) * s;
+        for (i, &(tx, tw)) in self.tabs.positions.iter().enumerate() {
+            let tx_s = (tx - self.tabs.scroll_offset) * s;
             let tw_s = tw * s;
 
             // Skip tabs entirely outside the visible tab strip.
@@ -3452,8 +3493,8 @@ impl Renderer {
         }
 
         // 2a. Tab drag insertion indicator
-        if let Some(indicator_x) = self.tab_drag_indicator_x {
-            let ix = (indicator_x - self.tab_scroll_offset) * s;
+        if let Some(indicator_x) = self.tabs.drag_indicator_x {
+            let ix = (indicator_x - self.tabs.scroll_offset) * s;
             let accent = [theme.cursor.r, theme.cursor.g, theme.cursor.b, 1.0];
             base_rects.push(Rect::flat(
                 ix - 1.0 * s,
@@ -3465,7 +3506,7 @@ impl Renderer {
         }
 
         // 2b. Tab bar control buttons (arrows + ⌄ all-tabs) — drawn on top of tab backgrounds
-        if self.tab_overflow {
+        if self.tabs.overflow {
             let btn_bg = [
                 theme.tab_bar_bg.r,
                 theme.tab_bar_bg.g,
@@ -3495,7 +3536,7 @@ impl Renderer {
                 sep_col,
             ));
             // ‹ left arrow (shown when scrolled right)
-            if self.tab_scroll_offset > 0.5 {
+            if self.tabs.scroll_offset > 0.5 {
                 base_rects.push(Rect::flat(
                     0.0,
                     0.0,
@@ -3505,7 +3546,7 @@ impl Renderer {
                 ));
             }
             // › right arrow (shown when more tabs are off-screen to the right)
-            if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+            if self.tabs.scroll_offset < self.tabs.scroll_max - 0.5 {
                 base_rects.push(Rect::flat(
                     width - ALL_TABS_BTN_WIDTH * s - TAB_ARROW_WIDTH * s,
                     0.0,
@@ -3617,7 +3658,7 @@ impl Renderer {
         let editor_height = height - tab_bar_height - status_bar_height - results_panel_height_px;
 
         // Update viewport
-        self.viewport.update(
+        self.text.viewport.update(
             queue,
             Resolution {
                 width: self.width,
@@ -3626,22 +3667,22 @@ impl Renderer {
         );
 
         if !snackbar_visible {
-            self.snackbar_bounds = None;
-            self.snackbar_dismiss_bounds = None;
-            self.snackbar_dismiss_forever_bounds = None;
-            self.snackbar_next_tip_bounds = None;
+            self.snackbar.bounds = None;
+            self.snackbar.dismiss_bounds = None;
+            self.snackbar.dismiss_forever_bounds = None;
+            self.snackbar.next_tip_bounds = None;
         }
 
         // Build base text areas
         let scroll_x_px = buffer.scroll_x * s;
         let tab_text_top = (tab_bar_height - 16.0 * s) / 2.0;
-        let tab_text_clip_left = if self.tab_overflow && self.tab_scroll_offset > 0.5 {
+        let tab_text_clip_left = if self.tabs.overflow && self.tabs.scroll_offset > 0.5 {
             (TAB_ARROW_WIDTH * s) as i32
         } else {
             0
         };
-        let tab_text_clip_right = if self.tab_overflow {
-            let right_arrow_w = if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+        let tab_text_clip_right = if self.tabs.overflow {
+            let right_arrow_w = if self.tabs.scroll_offset < self.tabs.scroll_max - 0.5 {
                 TAB_ARROW_WIDTH
             } else {
                 0.0
@@ -3651,8 +3692,8 @@ impl Renderer {
             width as i32
         };
         let mut base_text_areas: Vec<TextArea> = vec![TextArea {
-            buffer: &self.tab_bar_buffer,
-            left: -(self.tab_scroll_offset * s),
+            buffer: &self.tabs.buffer,
+            left: -(self.tabs.scroll_offset * s),
             top: tab_text_top,
             scale: s,
             bounds: TextBounds {
@@ -3664,10 +3705,10 @@ impl Renderer {
             default_color: theme.tab_active_fg.to_glyphon(),
             custom_glyphs: &[],
         }];
-        if self.tab_overflow {
-            if self.tab_scroll_offset > 0.5 {
+        if self.tabs.overflow {
+            if self.tabs.scroll_offset > 0.5 {
                 base_text_areas.push(TextArea {
-                    buffer: &self.tab_arrow_left_buffer,
+                    buffer: &self.tabs.arrow_left_buffer,
                     left: 7.0 * s,
                     top: tab_text_top,
                     scale: s,
@@ -3681,10 +3722,10 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            if self.tab_scroll_offset < self.tab_scroll_max - 0.5 {
+            if self.tabs.scroll_offset < self.tabs.scroll_max - 0.5 {
                 let rx_left = width - ALL_TABS_BTN_WIDTH * s - TAB_ARROW_WIDTH * s;
                 base_text_areas.push(TextArea {
-                    buffer: &self.tab_arrow_right_buffer,
+                    buffer: &self.tabs.arrow_right_buffer,
                     left: rx_left + 7.0 * s,
                     top: tab_text_top,
                     scale: s,
@@ -3699,7 +3740,7 @@ impl Renderer {
                 });
             }
             base_text_areas.push(TextArea {
-                buffer: &self.tab_all_btn_buffer,
+                buffer: &self.tabs.all_btn_buffer,
                 left: (width - ALL_TABS_BTN_WIDTH * s) + 9.0 * s,
                 top: tab_text_top,
                 scale: s,
@@ -3761,11 +3802,11 @@ impl Renderer {
             device,
             queue,
             view,
-            &mut self.text_renderer,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            &mut self.swash_cache,
+            &mut self.text.text_renderer,
+            &mut self.text.font_system,
+            &mut self.text.atlas,
+            &self.text.viewport,
+            &mut self.text.swash_cache,
             &self.shape_renderer,
             self.width,
             self.height,
@@ -3818,7 +3859,7 @@ impl Renderer {
         }
 
         // Trim atlas to free unused glyph space
-        self.atlas.trim();
+        self.text.atlas.trim();
     }
 }
 

@@ -152,6 +152,69 @@ const TIPS: &[&str] = &[
     "Drop a file onto the window to open it in a new tab.",
 ];
 
+/// Mouse interaction state: click detection, drag tracking.
+struct MouseState {
+    /// Timestamp of last click (for double/triple-click detection)
+    last_click_time: std::time::Instant,
+    /// Position of last click (for double/triple-click distance check)
+    last_click_pos: (f64, f64),
+    /// Current click count (1 = single, 2 = double, 3 = triple)
+    click_count: u8,
+    /// Suppress drag selection after multi-click
+    suppress_drag: bool,
+    /// Anchor char index for in-progress block selection drag
+    block_drag_anchor: Option<usize>,
+    /// Tab drag-to-reorder state
+    tab_drag: Option<TabDrag>,
+    /// Scrollbar thumb drag state
+    scrollbar_drag: Option<ScrollbarDrag>,
+}
+
+impl MouseState {
+    fn new() -> Self {
+        Self {
+            last_click_time: std::time::Instant::now(),
+            last_click_pos: (0.0, 0.0),
+            click_count: 0,
+            suppress_drag: false,
+            block_drag_anchor: None,
+            tab_drag: None,
+            scrollbar_drag: None,
+        }
+    }
+
+    /// Register a click at the given position. Returns the detected click count (1/2/3).
+    fn register_click(
+        &mut self,
+        pos: (f64, f64),
+        double_click_time_ms: u128,
+        double_click_distance: f64,
+    ) -> u8 {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_click_time);
+        let dist = ((pos.0 - self.last_click_pos.0).powi(2)
+            + (pos.1 - self.last_click_pos.1).powi(2))
+        .sqrt();
+        let is_multi = elapsed.as_millis() < double_click_time_ms && dist < double_click_distance;
+        if is_multi {
+            self.click_count = (self.click_count + 1).min(3);
+        } else {
+            self.click_count = 1;
+        }
+        self.suppress_drag = self.click_count >= 2;
+        self.last_click_time = now;
+        self.last_click_pos = pos;
+        self.click_count
+    }
+
+    /// Clear drag state on mouse release.
+    fn release(&mut self) {
+        self.suppress_drag = false;
+        self.block_drag_anchor = None;
+        self.scrollbar_drag = None;
+    }
+}
+
 struct App {
     // Core state
     editor: Editor,
@@ -180,18 +243,8 @@ struct App {
     mouse_pos: (f64, f64),
     is_mouse_down: bool,
 
-    // Multi-click detection (double / triple)
-    last_click_time: std::time::Instant,
-    last_click_pos: (f64, f64),
-    click_count: u8,
-    // Suppress drag selection after double/triple-click
-    suppress_drag: bool,
-    // Anchor char index for an in-progress block selection drag
-    block_drag_anchor: Option<usize>,
-    // Tab drag-to-reorder state
-    tab_drag: Option<TabDrag>,
-    // Scrollbar thumb drag state
-    scrollbar_drag: Option<ScrollbarDrag>,
+    // Mouse interaction
+    mouse: MouseState,
 
     // Animation
     needs_redraw: bool,
@@ -308,13 +361,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             mouse_pos: (0.0, 0.0),
             is_mouse_down: false,
-            last_click_time: std::time::Instant::now(),
-            last_click_pos: (0.0, 0.0),
-            click_count: 0,
-            suppress_drag: false,
-            block_drag_anchor: None,
-            tab_drag: None,
-            scrollbar_drag: None,
+            mouse: MouseState::new(),
             needs_redraw: true,
             last_large_file_index_version: None,
             pending_find_jump: false,
@@ -607,12 +654,12 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Update tab drag indicator for rendering
-        if let Some(ref drag) = self.tab_drag {
+        if let Some(ref drag) = self.mouse.tab_drag {
             if drag.is_dragging {
                 // Compute the insertion indicator x position (in buffer space)
-                let scroll = renderer.tab_scroll_offset;
+                let scroll = renderer.tabs.scroll_offset;
                 let mut indicator_x = 0.0f32;
-                for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
+                for (i, &(tx, tw)) in renderer.tabs.positions.iter().enumerate() {
                     if drag.current_x + scroll < tx + tw / 2.0 {
                         indicator_x = tx;
                         break;
@@ -620,12 +667,12 @@ impl App {
                     indicator_x = tx + tw;
                     let _ = i;
                 }
-                renderer.tab_drag_indicator_x = Some(indicator_x);
+                renderer.tabs.drag_indicator_x = Some(indicator_x);
             } else {
-                renderer.tab_drag_indicator_x = None;
+                renderer.tabs.drag_indicator_x = None;
             }
         } else {
-            renderer.tab_drag_indicator_x = None;
+            renderer.tabs.drag_indicator_x = None;
         }
 
         renderer.render(
@@ -706,7 +753,7 @@ impl App {
 
         // Tab Bar
         if y < TAB_BAR_HEIGHT as f64 {
-            self.suppress_drag = true;
+            self.mouse.suppress_drag = true;
             self.handle_tab_bar_click(x as f32);
         }
         // Snackbar (tip-of-the-day) — intercept clicks on the floating card so
@@ -717,7 +764,7 @@ impl App {
                 let s = r.scale_factor;
                 let px = x as f32 * s;
                 let py = y as f32 * s;
-                r.snackbar_bounds.is_some_and(|(sx, sy, sw, sh)| {
+                r.snackbar.bounds.is_some_and(|(sx, sy, sw, sh)| {
                     px >= sx && px <= sx + sw && py >= sy && py <= sy + sh
                 })
             })
@@ -726,7 +773,7 @@ impl App {
         }
         // Status Bar
         else if y >= status_top {
-            self.suppress_drag = true;
+            self.mouse.suppress_drag = true;
             self.handle_status_bar_click(x as f32);
         }
         // Editor Area
@@ -740,7 +787,7 @@ impl App {
         let (tab_scroll, tab_overflow, tab_scroll_max) = self
             .renderer
             .as_ref()
-            .map(|r| (r.tab_scroll_offset, r.tab_overflow, r.tab_scroll_max))
+            .map(|r| (r.tabs.scroll_offset, r.tabs.overflow, r.tabs.scroll_max))
             .unwrap_or((0.0, false, 0.0));
         let win_w_log = self.logical_window_size().0 as f32;
 
@@ -754,7 +801,7 @@ impl App {
         // ‹ left scroll arrow
         if tab_overflow && click_x < renderer::TAB_ARROW_WIDTH {
             if let Some(r) = &mut self.renderer {
-                r.tab_scroll_offset = (tab_scroll - renderer::TAB_SCROLL_STEP).max(0.0);
+                r.tabs.scroll_offset = (tab_scroll - renderer::TAB_SCROLL_STEP).max(0.0);
             }
             self.needs_redraw = true;
             return;
@@ -763,7 +810,7 @@ impl App {
         let right_arr_x = win_w_log - renderer::ALL_TABS_BTN_WIDTH - renderer::TAB_ARROW_WIDTH;
         if tab_overflow && click_x >= right_arr_x && tab_scroll < tab_scroll_max - 0.5 {
             if let Some(r) = &mut self.renderer {
-                r.tab_scroll_offset = (tab_scroll + renderer::TAB_SCROLL_STEP).min(tab_scroll_max);
+                r.tabs.scroll_offset = (tab_scroll + renderer::TAB_SCROLL_STEP).min(tab_scroll_max);
             }
             self.needs_redraw = true;
             return;
@@ -773,7 +820,7 @@ impl App {
         let tab_positions: Vec<(f32, f32)> = self
             .renderer
             .as_ref()
-            .map(|r| r.tab_positions.clone())
+            .map(|r| r.tabs.positions.clone())
             .unwrap_or_default();
         let content_x = click_x + tab_scroll; // convert screen → buffer space
         for (i, (tx, tw)) in tab_positions.iter().enumerate() {
@@ -798,7 +845,7 @@ impl App {
                         self.editor.close_tab(i);
                     }
                 } else {
-                    self.tab_drag = Some(TabDrag {
+                    self.mouse.tab_drag = Some(TabDrag {
                         from: i,
                         start_x: click_x,
                         current_x: click_x,
@@ -821,42 +868,42 @@ impl App {
             let py = y * s;
 
             // Check "Don't show again" link
-            if let Some((lx, ly, lw, lh)) = renderer.snackbar_dismiss_forever_bounds {
+            if let Some((lx, ly, lw, lh)) = renderer.snackbar.dismiss_forever_bounds {
                 if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
                     self.snackbar_tip = None;
                     self.config.show_tips = false;
                     self.config.save();
-                    self.suppress_drag = true;
+                    self.mouse.suppress_drag = true;
                     self.needs_redraw = true;
                     return;
                 }
             }
 
             // Check [×] Dismiss button
-            if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
+            if let Some((dx, dy, dw, dh)) = renderer.snackbar.dismiss_bounds {
                 if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
                     self.snackbar_tip = None;
-                    self.suppress_drag = true;
+                    self.mouse.suppress_drag = true;
                     self.needs_redraw = true;
                     return;
                 }
             }
 
             // Check [>] Next tip button
-            if let Some((nx, ny, nw, nh)) = renderer.snackbar_next_tip_bounds {
+            if let Some((nx, ny, nw, nh)) = renderer.snackbar.next_tip_bounds {
                 if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
                     let idx = self.config.next_tip_index % TIPS.len();
                     self.snackbar_tip = Some(TIPS[idx].to_string());
                     self.config.next_tip_index = (idx + 1) % TIPS.len();
                     self.config.save();
-                    self.suppress_drag = true;
+                    self.mouse.suppress_drag = true;
                     self.needs_redraw = true;
                     return;
                 }
             }
         }
         // Click on card but not on a button — consume it and suppress drag
-        self.suppress_drag = true;
+        self.mouse.suppress_drag = true;
     }
 
     fn handle_editor_area_click(&mut self, x: f32, y: f32, gutter_w: f32, click_count: u8) {
@@ -903,13 +950,13 @@ impl App {
             buffer.clear_extra_cursors();
             buffer.set_selection_anchor(None);
             buffer.set_cursor(new_pos);
-            self.block_drag_anchor = Some(new_pos);
+            self.mouse.block_drag_anchor = Some(new_pos);
         } else if (alt || cmd) && !shift && click_count == 1 {
             buffer.add_cursor(new_pos);
-            self.suppress_drag = true;
-            self.block_drag_anchor = None;
+            self.mouse.suppress_drag = true;
+            self.mouse.block_drag_anchor = None;
         } else if shift {
-            self.block_drag_anchor = None;
+            self.mouse.block_drag_anchor = None;
             if buffer.selection_anchor().is_none() {
                 buffer.set_selection_anchor(Some(buffer.cursor()));
             }
@@ -918,7 +965,7 @@ impl App {
             buffer.clear_extra_cursors();
             buffer.set_selection_anchor(None);
             buffer.set_cursor(new_pos);
-            self.block_drag_anchor = None;
+            self.mouse.block_drag_anchor = None;
         }
 
         if click_count == 2 {
@@ -994,15 +1041,15 @@ impl App {
             scrollbar.thumb_height * 0.5
         };
 
-        self.scrollbar_drag = Some(ScrollbarDrag { grab_offset_y });
-        self.suppress_drag = true;
-        self.block_drag_anchor = None;
+        self.mouse.scrollbar_drag = Some(ScrollbarDrag { grab_offset_y });
+        self.mouse.suppress_drag = true;
+        self.mouse.block_drag_anchor = None;
         self.drag_scrollbar_to(y * s);
         true
     }
 
     fn drag_scrollbar_to(&mut self, physical_y: f32) {
-        let Some(drag) = self.scrollbar_drag.as_ref() else {
+        let Some(drag) = self.mouse.scrollbar_drag.as_ref() else {
             return;
         };
         let Some(scrollbar) = self
@@ -1042,7 +1089,7 @@ impl App {
     }
 
     fn handle_mouse_drag(&mut self) {
-        if self.scrollbar_drag.is_some() {
+        if self.mouse.scrollbar_drag.is_some() {
             let y = self.mouse_pos.1 as f32;
             self.drag_scrollbar_to(y);
             return;
@@ -1096,7 +1143,7 @@ impl App {
                 wrap_width,
             );
 
-            let block_anchor = self.block_drag_anchor;
+            let block_anchor = self.mouse.block_drag_anchor;
             let buffer = self.editor.active_mut();
             if let Some(anchor) = block_anchor {
                 buffer.set_block_selection(anchor, new_pos);
@@ -2621,7 +2668,7 @@ impl App {
                 .unwrap_or(600.0);
             let status_top = (win_h - renderer::STATUS_BAR_HEIGHT) as f64;
             use renderer::TAB_BAR_HEIGHT;
-            let over_scrollbar = self.scrollbar_drag.is_some()
+            let over_scrollbar = self.mouse.scrollbar_drag.is_some()
                 || self
                     .renderer
                     .as_ref()
@@ -2636,15 +2683,15 @@ impl App {
                 let px = position.x as f32;
                 let py = position.y as f32;
                 if let Some(renderer) = &self.renderer {
-                    if let Some((dx, dy, dw, dh)) = renderer.snackbar_dismiss_bounds {
+                    if let Some((dx, dy, dw, dh)) = renderer.snackbar.dismiss_bounds {
                         if px >= dx && px <= dx + dw && py >= dy && py <= dy + dh {
                             Some(renderer::SnackbarButton::Dismiss)
                         } else if let Some((lx, ly, lw, lh)) =
-                            renderer.snackbar_dismiss_forever_bounds
+                            renderer.snackbar.dismiss_forever_bounds
                         {
                             if px >= lx && px <= lx + lw && py >= ly && py <= ly + lh {
                                 Some(renderer::SnackbarButton::DontShowAgain)
-                            } else if let Some((nx, ny, nw, nh)) = renderer.snackbar_next_tip_bounds
+                            } else if let Some((nx, ny, nw, nh)) = renderer.snackbar.next_tip_bounds
                             {
                                 if px >= nx && px <= nx + nw && py >= ny && py <= ny + nh {
                                     Some(renderer::SnackbarButton::NextTip)
@@ -2667,8 +2714,8 @@ impl App {
                 None
             };
             if let Some(renderer) = &mut self.renderer {
-                if renderer.hovered_snackbar_button != snackbar_hover {
-                    renderer.hovered_snackbar_button = snackbar_hover;
+                if renderer.snackbar.hovered_button != snackbar_hover {
+                    renderer.snackbar.hovered_button = snackbar_hover;
                     self.needs_redraw = true;
                 }
             }
@@ -2723,13 +2770,13 @@ impl App {
             self.handle_overlay_drag();
         } else if self.is_mouse_down
             && !self.overlay.is_active()
-            && (self.scrollbar_drag.is_some() || !self.suppress_drag)
+            && (self.mouse.scrollbar_drag.is_some() || !self.mouse.suppress_drag)
         {
             self.handle_mouse_drag();
         }
 
         // Tab drag tracking
-        if let Some(ref mut drag) = self.tab_drag {
+        if let Some(ref mut drag) = self.mouse.tab_drag {
             let scale = self
                 .window
                 .as_ref()
@@ -2750,35 +2797,22 @@ impl App {
             if self.is_mouse_down && self.overlay.is_active() {
                 self.handle_overlay_click();
             } else if self.is_mouse_down && !self.overlay.is_active() {
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(self.last_click_time);
-                let (cx, cy) = self.mouse_pos;
-                let dist = ((cx - self.last_click_pos.0).powi(2)
-                    + (cy - self.last_click_pos.1).powi(2))
-                .sqrt();
-                let is_multi = elapsed.as_millis() < Self::DOUBLE_CLICK_TIME_MS
-                    && dist < Self::DOUBLE_CLICK_DISTANCE;
-                if is_multi {
-                    self.click_count = (self.click_count + 1).min(3);
-                } else {
-                    self.click_count = 1;
-                }
-                self.suppress_drag = self.click_count >= 2;
-                self.handle_mouse_click(self.click_count);
-                self.last_click_time = now;
-                self.last_click_pos = (cx, cy);
+                let click_count = self.mouse.register_click(
+                    self.mouse_pos,
+                    Self::DOUBLE_CLICK_TIME_MS,
+                    Self::DOUBLE_CLICK_DISTANCE,
+                );
+                self.handle_mouse_click(click_count);
             } else if !self.is_mouse_down {
-                self.suppress_drag = false;
-                self.block_drag_anchor = None;
-                self.scrollbar_drag = None;
+                self.mouse.release();
 
                 // Resolve tab drag-to-reorder
-                if let Some(drag) = self.tab_drag.take() {
+                if let Some(drag) = self.mouse.tab_drag.take() {
                     if drag.is_dragging {
                         if let Some(renderer) = &self.renderer {
-                            let scroll = renderer.tab_scroll_offset;
-                            let mut target = renderer.tab_positions.len().saturating_sub(1);
-                            for (i, &(tx, tw)) in renderer.tab_positions.iter().enumerate() {
+                            let scroll = renderer.tabs.scroll_offset;
+                            let mut target = renderer.tabs.positions.len().saturating_sub(1);
+                            for (i, &(tx, tw)) in renderer.tabs.positions.iter().enumerate() {
                                 if drag.current_x + scroll < tx + tw / 2.0 {
                                     target = i;
                                     break;
@@ -2806,7 +2840,7 @@ impl App {
             let (tab_scroll, tab_scroll_max) = self
                 .renderer
                 .as_ref()
-                .map(|r| (r.tab_scroll_offset, r.tab_scroll_max))
+                .map(|r| (r.tabs.scroll_offset, r.tabs.scroll_max))
                 .unwrap_or((0.0, 0.0));
             let dx = match delta {
                 MouseScrollDelta::LineDelta(x, y) => {
@@ -2822,7 +2856,7 @@ impl App {
                 }
             };
             if let Some(r) = &mut self.renderer {
-                r.tab_scroll_offset = (tab_scroll + dx).clamp(0.0, tab_scroll_max);
+                r.tabs.scroll_offset = (tab_scroll + dx).clamp(0.0, tab_scroll_max);
             }
             self.needs_redraw = true;
             return;
@@ -3371,8 +3405,8 @@ impl ApplicationHandler for App {
                 // Reset mouse state when the window loses focus (e.g. taskbar click)
                 // so that stale press/drag state does not produce unwanted selections.
                 self.is_mouse_down = false;
-                self.suppress_drag = false;
-                self.tab_drag = None;
+                self.mouse.suppress_drag = false;
+                self.mouse.tab_drag = None;
 
                 // Auto-save dirty buffers on focus loss
                 if self.config.auto_save {

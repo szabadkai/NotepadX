@@ -26,14 +26,49 @@ pub struct Match {
     pub captures: Vec<Option<String>>,
 }
 
+/// Background search worker handle — lifecycle control for async large-file searches.
+struct SearchWorkerHandle {
+    generation: u64,
+    receiver: Option<mpsc::Receiver<SearchWorkerResult>>,
+    cancel: Option<Arc<AtomicBool>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SearchWorkerHandle {
+    fn new() -> Self {
+        Self {
+            generation: 0,
+            receiver: None,
+            cancel: None,
+            thread: None,
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.receiver = None;
+        if self
+            .thread
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            if let Some(handle) = self.thread.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 /// Find & Replace state
-#[allow(dead_code)]
 pub struct FindState {
     pub matches: Vec<Match>,
     pub current_match: usize,
     pub case_sensitive: bool,
     pub use_regex: bool,
     pub whole_word: bool,
+    #[allow(dead_code)] // Planned for find-and-replace feature
     pub replace_text: String,
     pub regex_error: Option<String>,
     pub total_matches: Option<usize>,
@@ -44,10 +79,7 @@ pub struct FindState {
     pub search_file_size: u64,
     /// Incremental results sink shared with the search worker.
     incremental_results: Arc<Mutex<Vec<SearchMatch>>>,
-    search_generation: u64,
-    search_receiver: Option<mpsc::Receiver<SearchWorkerResult>>,
-    search_cancel: Option<Arc<AtomicBool>>,
-    search_thread: Option<JoinHandle<()>>,
+    worker: SearchWorkerHandle,
 }
 
 impl Default for FindState {
@@ -71,10 +103,7 @@ impl FindState {
             bytes_scanned: Arc::new(AtomicU64::new(0)),
             search_file_size: 0,
             incremental_results: Arc::new(Mutex::new(Vec::new())),
-            search_generation: 0,
-            search_receiver: None,
-            search_cancel: None,
-            search_thread: None,
+            worker: SearchWorkerHandle::new(),
         }
     }
 
@@ -85,19 +114,7 @@ impl FindState {
     }
 
     fn stop_search_worker(&mut self) {
-        if let Some(cancel) = self.search_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        self.search_receiver = None;
-        if self
-            .search_thread
-            .as_ref()
-            .is_some_and(|handle| handle.is_finished())
-        {
-            if let Some(handle) = self.search_thread.take() {
-                let _ = handle.join();
-            }
-        }
+        self.worker.stop();
     }
 
     pub fn reset(&mut self) {
@@ -252,8 +269,8 @@ impl FindState {
                         max_scan_bytes
                     };
 
-                let generation = self.search_generation.wrapping_add(1);
-                self.search_generation = generation;
+                let generation = self.worker.generation.wrapping_add(1);
+                self.worker.generation = generation;
                 let (sender, receiver) = mpsc::channel();
                 let cancel = Arc::new(AtomicBool::new(false));
                 let progress = Arc::new(AtomicU64::new(0));
@@ -301,9 +318,9 @@ impl FindState {
                     });
                 });
 
-                self.search_receiver = Some(receiver);
-                self.search_cancel = Some(cancel);
-                self.search_thread = Some(handle);
+                self.worker.receiver = Some(receiver);
+                self.worker.cancel = Some(cancel);
+                self.worker.thread = Some(handle);
                 return;
             }
         }
@@ -334,9 +351,9 @@ impl FindState {
             }
         }
 
-        if let Some(receiver) = self.search_receiver.as_ref() {
+        if let Some(receiver) = self.worker.receiver.as_ref() {
             while let Ok(result) = receiver.try_recv() {
-                if result.generation == self.search_generation {
+                if result.generation == self.worker.generation {
                     newest_result = Some(result.result);
                 }
             }
@@ -357,19 +374,20 @@ impl FindState {
             if self.current_match >= self.matches.len() {
                 self.current_match = 0;
             }
-            self.search_receiver = None;
+            self.worker.receiver = None;
             changed = true;
         }
 
         if self
-            .search_thread
+            .worker
+            .thread
             .as_ref()
             .is_some_and(|handle| handle.is_finished())
         {
-            if let Some(handle) = self.search_thread.take() {
+            if let Some(handle) = self.worker.thread.take() {
                 let _ = handle.join();
             }
-            self.search_cancel = None;
+            self.worker.cancel = None;
         }
 
         changed
@@ -477,7 +495,7 @@ impl FindState {
 impl Drop for FindState {
     fn drop(&mut self) {
         self.stop_search_worker();
-        if let Some(handle) = self.search_thread.take() {
+        if let Some(handle) = self.worker.thread.take() {
             let _ = handle.join();
         }
     }
