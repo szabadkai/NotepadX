@@ -578,6 +578,10 @@ pub struct Renderer {
     // Currently hovered status bar segment (set from main.rs)
     pub hovered_status_segment: Option<StatusBarSegment>,
 
+    /// Hovered markdown anchor link char range (start, end) in buffer coordinates.
+    /// Set from main.rs on mouse move; used for blue+underline rendering.
+    pub hovered_md_anchor: Option<(usize, usize)>,
+
     /// Effective gutter width (0 when line numbers are hidden)
     pub effective_gutter_width: f32,
 
@@ -702,6 +706,7 @@ impl Renderer {
             current_font_size: FONT_SIZE,
             status_segments: Vec::new(),
             hovered_status_segment: None,
+            hovered_md_anchor: None,
             effective_gutter_width: GUTTER_WIDTH,
             snackbar: SnackbarRenderState {
                 buffer: snackbar_buffer,
@@ -1159,6 +1164,46 @@ impl Renderer {
             .family(Family::Name("JetBrains Mono"))
             .color(theme.fg.to_glyphon());
 
+        // Compute hovered anchor byte range in visible_text for blue text rendering
+        let hover_byte_range: Option<(usize, usize)> =
+            self.hovered_md_anchor.and_then(|(hc_start, hc_end)| {
+                let mut byte_start: Option<usize> = None;
+                let mut byte_end: Option<usize> = None;
+                let mut byte_off = 0usize;
+                for (i, vl) in visible_visual_lines.iter().enumerate() {
+                    let line_slice = buffer.rope.slice(vl.start_char..vl.end_char);
+                    let line_str = line_slice.to_string();
+                    let line_byte_len = line_str.len();
+                    if byte_start.is_none()
+                        && hc_start >= vl.start_char
+                        && hc_start < vl.end_char
+                    {
+                        let prefix: String = line_slice.chars().take(hc_start - vl.start_char).collect();
+                        byte_start = Some(byte_off + prefix.len());
+                    }
+                    if byte_end.is_none()
+                        && hc_end >= vl.start_char
+                        && hc_end <= vl.end_char
+                    {
+                        let prefix: String = line_slice.chars().take(hc_end - vl.start_char).collect();
+                        byte_end = Some(byte_off + prefix.len());
+                    }
+                    byte_off += line_byte_len;
+                    if i + 1 < visible_visual_lines.len() {
+                        byte_off += 1; // \n separator
+                    }
+                    if byte_start.is_some() && byte_end.is_some() {
+                        break;
+                    }
+                }
+                match (byte_start, byte_end) {
+                    (Some(s), Some(e)) if s < e => Some((s, e)),
+                    _ => None,
+                }
+            });
+
+        let link_blue = glyphon::Color::rgb(0x56, 0x9C, 0xD6);
+
         if let Some(lang_idx) = buffer.language_index {
             let mut hasher = DefaultHasher::new();
             visible_text.hash(&mut hasher);
@@ -1170,26 +1215,60 @@ impl Renderer {
             }
 
             if !self.cached_spans.is_empty() {
-                let rich_spans: Vec<(&str, Attrs)> = self
-                    .cached_spans
-                    .iter()
-                    .filter_map(|span| {
-                        if span.start < rendered_visible_text.len()
-                            && span.end <= rendered_visible_text.len()
+                let rich_spans: Vec<(&str, Attrs)> = if let Some((h_start, h_end)) = hover_byte_range {
+                    // Split and recolor spans overlapping with the hovered anchor
+                    let mut spans = Vec::new();
+                    for span in &self.cached_spans {
+                        if span.start >= rendered_visible_text.len()
+                            || span.end > rendered_visible_text.len()
                         {
-                            let text_slice = &rendered_visible_text[span.start..span.end];
-                            let attrs = match span.highlight_index {
-                                Some(idx) => {
-                                    base_attrs.color(crate::syntax::highlight_color(idx, theme))
-                                }
-                                None => base_attrs,
-                            };
-                            Some((text_slice, attrs))
-                        } else {
-                            None
+                            continue;
                         }
-                    })
-                    .collect();
+                        let attrs = match span.highlight_index {
+                            Some(idx) => {
+                                base_attrs.color(crate::syntax::highlight_color(idx, theme))
+                            }
+                            None => base_attrs,
+                        };
+                        let s = span.start;
+                        let e = span.end;
+                        if h_start >= e || h_end <= s {
+                            spans.push((&rendered_visible_text[s..e], attrs));
+                        } else {
+                            if s < h_start {
+                                spans.push((&rendered_visible_text[s..h_start], attrs));
+                            }
+                            let os = s.max(h_start);
+                            let oe = e.min(h_end);
+                            spans.push((&rendered_visible_text[os..oe], base_attrs.color(link_blue)));
+                            if e > h_end {
+                                spans.push((&rendered_visible_text[h_end..e], attrs));
+                            }
+                        }
+                    }
+                    spans
+                } else {
+                    self.cached_spans
+                        .iter()
+                        .filter_map(|span| {
+                            if span.start < rendered_visible_text.len()
+                                && span.end <= rendered_visible_text.len()
+                            {
+                                let text_slice = &rendered_visible_text[span.start..span.end];
+                                let attrs = match span.highlight_index {
+                                    Some(idx) => {
+                                        base_attrs
+                                            .color(crate::syntax::highlight_color(idx, theme))
+                                    }
+                                    None => base_attrs,
+                                };
+                                Some((text_slice, attrs))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
                 self.editor_buffer.set_rich_text(
                     &mut self.text.font_system,
                     rich_spans,
@@ -1205,12 +1284,37 @@ impl Renderer {
                 );
             }
         } else {
-            self.editor_buffer.set_text(
-                &mut self.text.font_system,
-                &rendered_visible_text,
-                base_attrs,
-                Shaping::Advanced,
-            );
+            // No syntax highlighting — handle hover coloring for plain text
+            if let Some((h_start, h_end)) = hover_byte_range {
+                let h_start = h_start.min(rendered_visible_text.len());
+                let h_end = h_end.min(rendered_visible_text.len());
+                let mut rich_spans: Vec<(&str, Attrs)> = Vec::new();
+                if h_start > 0 {
+                    rich_spans.push((&rendered_visible_text[..h_start], base_attrs));
+                }
+                if h_start < h_end {
+                    rich_spans.push((
+                        &rendered_visible_text[h_start..h_end],
+                        base_attrs.color(link_blue),
+                    ));
+                }
+                if h_end < rendered_visible_text.len() {
+                    rich_spans.push((&rendered_visible_text[h_end..], base_attrs));
+                }
+                self.editor_buffer.set_rich_text(
+                    &mut self.text.font_system,
+                    rich_spans,
+                    base_attrs,
+                    Shaping::Advanced,
+                );
+            } else {
+                self.editor_buffer.set_text(
+                    &mut self.text.font_system,
+                    &rendered_visible_text,
+                    base_attrs,
+                    Shaping::Advanced,
+                );
+            }
         }
         self.editor_buffer
             .shape_until_scroll(&mut self.text.font_system, false);
@@ -2335,6 +2439,34 @@ impl Renderer {
                             ],
                         ));
                     }
+                }
+            }
+        }
+
+        // Hovered markdown anchor underline
+        if let Some((hc_start, hc_end)) = self.hovered_md_anchor {
+            let underline_thickness = 1.0 * s;
+            let link_color = [0.337, 0.612, 0.839, 1.0]; // #569CD6
+            for (i, visual_line) in visible_visual_lines.iter().enumerate() {
+                let clamped_start = hc_start.max(visual_line.start_char);
+                let clamped_end = hc_end.min(visual_line.end_char);
+                if clamped_start >= clamped_end {
+                    continue;
+                }
+                let col_start = clamped_start - visual_line.start_char;
+                let col_end = clamped_end - visual_line.start_char;
+                if col_start < col_end {
+                    let x = editor_left + col_start as f32 * char_width - buffer.scroll_x * s;
+                    let y = editor_top + (i as f32 + 1.0) * line_height
+                        - scroll_y_px
+                        - underline_thickness;
+                    rects.push(Rect::flat(
+                        x,
+                        y,
+                        (col_end - col_start) as f32 * char_width,
+                        underline_thickness,
+                        link_color,
+                    ));
                 }
             }
         }

@@ -943,6 +943,24 @@ impl App {
             wrap_width,
         );
 
+        // Markdown anchor navigation: clicking on [text](#anchor) jumps to heading
+        if click_count == 1 && !self.modifiers.shift_key() && buffer.is_markdown() {
+            if let Some((anchor, _, _)) = buffer.md_anchor_at_char(new_pos) {
+                if let Some(target_line) = buffer.find_heading_line_for_anchor(&anchor) {
+                    let _ = buffer.goto_line_zero_based(
+                        target_line,
+                        self.config.large_file_preview_bytes(),
+                    );
+                    if let Some(renderer) = &self.renderer {
+                        let visible = renderer.visible_lines();
+                        buffer.ensure_cursor_visible(visible, wrap_width, char_width);
+                    }
+                    self.needs_redraw = true;
+                    return;
+                }
+            }
+        }
+
         let alt = self.modifiers.alt_key();
         let cmd = self.modifiers.super_key();
 
@@ -2722,6 +2740,12 @@ impl App {
 
             if snackbar_hover.is_some() {
                 window.set_cursor(winit::window::CursorIcon::Pointer);
+                if let Some(renderer) = &mut self.renderer {
+                    if renderer.hovered_md_anchor.is_some() {
+                        renderer.hovered_md_anchor = None;
+                        self.needs_redraw = true;
+                    }
+                }
             } else if y >= status_top {
                 let new_seg = self
                     .renderer
@@ -2738,6 +2762,10 @@ impl App {
                         renderer.hovered_status_segment = new_seg;
                         self.needs_redraw = true;
                     }
+                    if renderer.hovered_md_anchor.is_some() {
+                        renderer.hovered_md_anchor = None;
+                        self.needs_redraw = true;
+                    }
                 }
             } else if over_scrollbar {
                 window.set_cursor(winit::window::CursorIcon::Pointer);
@@ -2746,9 +2774,70 @@ impl App {
                         renderer.hovered_status_segment = None;
                         self.needs_redraw = true;
                     }
+                    if renderer.hovered_md_anchor.is_some() {
+                        renderer.hovered_md_anchor = None;
+                        self.needs_redraw = true;
+                    }
                 }
             } else if y >= TAB_BAR_HEIGHT as f64 {
-                window.set_cursor(winit::window::CursorIcon::Text);
+                // Check for markdown anchor hover
+                let mut anchor_hovered = false;
+                {
+                    let buffer = self.editor.active();
+                    if buffer.is_markdown() {
+                        let gutter_w =
+                            renderer::effective_gutter_width(self.config.show_line_numbers);
+                        let editor_y = (y as f32 - renderer::TAB_BAR_HEIGHT).max(0.0);
+                        let lh = self.config.font_size * 1.44;
+                        let cw = self.config.font_size * 0.6;
+                        let wrap_w = if buffer.wrap_enabled {
+                            let win_w = self
+                                .renderer
+                                .as_ref()
+                                .map(|r| r.width as f32 / r.scale_factor.max(1.0))
+                                .unwrap_or(800.0);
+                            Some(
+                                (win_w
+                                    - gutter_w
+                                    - renderer::LINE_PADDING_LEFT
+                                    - renderer::SCROLLBAR_WIDTH)
+                                    .max(100.0),
+                            )
+                        } else {
+                            None
+                        };
+                        let pos = buffer.char_at_pos(
+                            x as f32,
+                            editor_y,
+                            gutter_w + renderer::LINE_PADDING_LEFT,
+                            lh,
+                            cw,
+                            wrap_w,
+                        );
+                        if let Some((_anchor, start, end)) = buffer.md_anchor_at_char(pos) {
+                            anchor_hovered = true;
+                            if let Some(renderer) = &mut self.renderer {
+                                if renderer.hovered_md_anchor != Some((start, end)) {
+                                    renderer.hovered_md_anchor = Some((start, end));
+                                    self.needs_redraw = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !anchor_hovered {
+                    if let Some(renderer) = &mut self.renderer {
+                        if renderer.hovered_md_anchor.is_some() {
+                            renderer.hovered_md_anchor = None;
+                            self.needs_redraw = true;
+                        }
+                    }
+                }
+                window.set_cursor(if anchor_hovered {
+                    winit::window::CursorIcon::Pointer
+                } else {
+                    winit::window::CursorIcon::Text
+                });
                 if let Some(renderer) = &mut self.renderer {
                     if renderer.hovered_status_segment.is_some() {
                         renderer.hovered_status_segment = None;
@@ -2760,6 +2849,10 @@ impl App {
                 if let Some(renderer) = &mut self.renderer {
                     if renderer.hovered_status_segment.is_some() {
                         renderer.hovered_status_segment = None;
+                        self.needs_redraw = true;
+                    }
+                    if renderer.hovered_md_anchor.is_some() {
+                        renderer.hovered_md_anchor = None;
                         self.needs_redraw = true;
                     }
                 }

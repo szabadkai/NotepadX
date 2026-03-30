@@ -2884,6 +2884,123 @@ impl Buffer {
         self.scroll_x_target = self.scroll_x;
     }
 
+    /// Returns true if this buffer's file has a markdown extension (.md, .markdown).
+    pub fn is_markdown(&self) -> bool {
+        self.file_path
+            .as_ref()
+            .and_then(|p| p.extension())
+            .map(|ext| {
+                let e = ext.to_string_lossy().to_lowercase();
+                e == "md" || e == "markdown"
+            })
+            .unwrap_or(false)
+    }
+
+    /// If `char_idx` falls inside a markdown anchor link `[text](#anchor)`,
+    /// return `(anchor_fragment, link_char_start, link_char_end)` in buffer char coords.
+    pub fn md_anchor_at_char(&self, char_idx: usize) -> Option<(String, usize, usize)> {
+        let line_idx = self.rope.char_to_line(char_idx);
+        let line_start = self.rope.line_to_char(line_idx);
+        let line_text: String = self.rope.line(line_idx).into();
+        let col = char_idx - line_start;
+
+        // Scan for all [...](#...) patterns using char offsets
+        let chars: Vec<char> = line_text.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        while i < len {
+            if chars[i] != '[' {
+                i += 1;
+                continue;
+            }
+            let link_start = i;
+            i += 1;
+            let mut depth = 1u32;
+            while i < len && depth > 0 {
+                if chars[i] == '[' {
+                    depth += 1;
+                } else if chars[i] == ']' {
+                    depth -= 1;
+                }
+                i += 1;
+            }
+            if depth != 0 || i >= len || chars[i] != '(' {
+                continue;
+            }
+            i += 1; // skip '('
+            let href_start = i;
+            let mut paren_depth = 1u32;
+            while i < len && paren_depth > 0 {
+                if chars[i] == '(' {
+                    paren_depth += 1;
+                } else if chars[i] == ')' {
+                    paren_depth -= 1;
+                }
+                i += 1;
+            }
+            if paren_depth != 0 {
+                continue;
+            }
+            let link_end = i; // one past ')'
+            let href: String = chars[href_start..link_end - 1].iter().collect();
+            if let Some(anchor) = href.strip_prefix('#') {
+                if col >= link_start && col < link_end {
+                    return Some((
+                        anchor.to_string(),
+                        line_start + link_start,
+                        line_start + link_end,
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Find the first heading whose slugified text matches `anchor`.
+    /// Returns a 0-based line index.
+    pub fn find_heading_line_for_anchor(&self, anchor: &str) -> Option<usize> {
+        let total = self.line_count();
+        for line_idx in 0..total {
+            let line_text: String = self.rope.line(line_idx).into();
+            let trimmed = line_text.trim_start();
+            if !trimmed.starts_with('#') {
+                continue;
+            }
+            // Strip leading '#' characters and the space after them
+            let after_hashes = trimmed.trim_start_matches('#');
+            if !after_hashes.starts_with(' ') && !after_hashes.is_empty() {
+                continue; // e.g. `#notaheading` — no space after hashes
+            }
+            let heading_text = after_hashes.trim();
+            if Self::slugify(heading_text) == anchor {
+                return Some(line_idx);
+            }
+        }
+        None
+    }
+
+    /// GitHub-style heading slug: lowercase, spaces → `-`, strip non-alphanumeric except `-`.
+    fn slugify(text: &str) -> String {
+        let mut slug = String::with_capacity(text.len());
+        for ch in text.chars() {
+            if ch.is_alphanumeric() {
+                for lower in ch.to_lowercase() {
+                    slug.push(lower);
+                }
+            } else if ch == ' ' || ch == '-' {
+                if !slug.ends_with('-') {
+                    slug.push('-');
+                }
+            }
+            // other characters are stripped
+        }
+        // Trim trailing dash
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+        slug
+    }
+
     /// Ensure cursor is visible on screen
     pub fn ensure_cursor_visible(
         &mut self,
