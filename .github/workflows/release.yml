@@ -150,6 +150,49 @@ jobs:
           name: NotepadX-${{ matrix.target }}${{ matrix.suffix }}.app
           path: NotepadX-${{ matrix.target }}${{ matrix.suffix }}.zip
 
+      # Linux: create .deb package
+      - name: Create Linux .deb package
+        if: runner.os == 'Linux'
+        run: |
+          PKG_ROOT="deb-build/notepadx_${VERSION}_amd64"
+          mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/usr/bin" "$PKG_ROOT/usr/share/applications" "$PKG_ROOT/usr/share/pixmaps"
+          cp target/${{ matrix.target }}/release/notepadx "$PKG_ROOT/usr/bin/notepadx"
+          cp assets/logo.png "$PKG_ROOT/usr/share/pixmaps/notepadx.png"
+          cat > "$PKG_ROOT/DEBIAN/control" <<CTRL
+          Package: notepadx
+          Version: $VERSION
+          Section: editors
+          Priority: optional
+          Architecture: amd64
+          Maintainer: NotepadX Team <maintainers@notepadx.dev>
+          Depends: libgtk-3-0, libglib2.0-0, libxdo3
+          Description: Fast native text editor with GPU rendering
+           NotepadX is a Rust-built native text editor focused on performance,
+           modern UX, and large-file editing workflows.
+          CTRL
+          sed -i 's/^          //' "$PKG_ROOT/DEBIAN/control"
+          cat > "$PKG_ROOT/usr/share/applications/notepadx.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=NotepadX
+          Comment=Fast native text editor
+          Exec=notepadx
+          Icon=notepadx
+          Terminal=false
+          Categories=Utility;TextEditor;Development;
+          StartupNotify=true
+          DESKTOP
+          sed -i 's/^          //' "$PKG_ROOT/usr/share/applications/notepadx.desktop"
+          chmod 755 "$PKG_ROOT/usr/bin/notepadx"
+          dpkg-deb --build --root-owner-group "$PKG_ROOT" "notepadx_${VERSION}_amd64${{ matrix.suffix }}.deb"
+
+      - name: Upload .deb package
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notepadx-deb${{ matrix.suffix }}
+          path: notepadx_${{ env.VERSION }}_amd64${{ matrix.suffix }}.deb
+
       # Linux / Windows: upload raw binary
       - name: Upload binary
         if: runner.os != 'macOS'
@@ -212,6 +255,14 @@ jobs:
           # Move Windows binary (minimal)
           if [ -f artifacts/notepadx-x86_64-pc-windows-msvc-minimal/notepadx.exe ]; then
             mv artifacts/notepadx-x86_64-pc-windows-msvc-minimal/notepadx.exe release-assets/notepadx-windows-x86_64-minimal.exe
+          fi
+          # Move Linux .deb (full)
+          if [ -f artifacts/notepadx-deb/notepadx_*_amd64.deb ]; then
+            cp artifacts/notepadx-deb/notepadx_*_amd64.deb release-assets/
+          fi
+          # Move Linux .deb (minimal)
+          if [ -f artifacts/notepadx-deb-minimal/notepadx_*_amd64-minimal.deb ]; then
+            cp artifacts/notepadx-deb-minimal/notepadx_*_amd64-minimal.deb release-assets/
           fi
           ls -la release-assets/
 

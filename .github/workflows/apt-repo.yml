@@ -1,0 +1,143 @@
+name: Update APT Repository
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+jobs:
+  update-repo:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install repo tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev gpg
+
+      - name: Resolve version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="$(gh release list --limit 1 --json tagName -q '.[0].tagName')"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download .deb from release
+        run: |
+          mkdir -p debs
+          gh release download "$TAG" --pattern '*.deb' --dir debs || true
+          ls -la debs/
+          if [ -z "$(ls -A debs/*.deb 2>/dev/null)" ]; then
+            echo "No .deb files found in release $TAG"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import GPG signing key
+        if: env.APT_GPG_PRIVATE_KEY != ''
+        run: |
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> $GITHUB_ENV
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+
+      - name: Build APT repository structure
+        run: |
+          REPO_DIR="apt-repo"
+          POOL_DIR="$REPO_DIR/pool/main"
+          DIST_DIR="$REPO_DIR/dists/stable/main/binary-amd64"
+
+          mkdir -p "$POOL_DIR" "$DIST_DIR"
+
+          # Copy .deb files into pool
+          cp debs/*.deb "$POOL_DIR/"
+
+          # Generate Packages index
+          cd "$REPO_DIR"
+          dpkg-scanpackages --multiversion pool/ > "dists/stable/main/binary-amd64/Packages"
+          gzip -k "dists/stable/main/binary-amd64/Packages"
+
+          # Generate Release file
+          cat > "dists/stable/Release" <<EOF
+          Origin: NotepadX
+          Label: NotepadX
+          Suite: stable
+          Codename: stable
+          Architectures: amd64
+          Components: main
+          Description: NotepadX APT Repository
+          EOF
+          sed -i 's/^          //' "dists/stable/Release"
+
+          # Add checksums to Release
+          cd dists/stable
+          {
+            echo "MD5Sum:"
+            find main -name 'Packages*' -exec sh -c 'echo " $(md5sum "$1" | cut -d" " -f1) $(wc -c < "$1") $1"' _ {} \;
+            echo "SHA256:"
+            find main -name 'Packages*' -exec sh -c 'echo " $(sha256sum "$1" | cut -d" " -f1) $(wc -c < "$1") $1"' _ {} \;
+          } >> Release
+
+          # Sign Release if GPG key is available
+          if [ -n "${GPG_KEY_ID:-}" ]; then
+            gpg --batch --yes --armor --detach-sign --output Release.gpg Release
+            gpg --batch --yes --armor --clearsign --output InRelease Release
+          fi
+          cd ../../..
+
+          # Create install instructions page
+          cat > "$REPO_DIR/index.html" <<'HTMLEOF'
+          <!DOCTYPE html>
+          <html>
+          <head><title>NotepadX APT Repository</title></head>
+          <body>
+          <h1>NotepadX APT Repository</h1>
+          <h2>Quick Install</h2>
+          <pre><code># Add the repository
+          echo "deb [arch=amd64] https://YOUR_ORG.github.io/notepadx stable main" | sudo tee /etc/apt/sources.list.d/notepadx.list
+
+          # Update and install
+          sudo apt update
+          sudo apt install notepadx
+          </code></pre>
+          <p>If GPG signing is enabled, also import the public key first:</p>
+          <pre><code>curl -fsSL https://YOUR_ORG.github.io/notepadx/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/notepadx.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/notepadx.gpg] https://YOUR_ORG.github.io/notepadx stable main" | sudo tee /etc/apt/sources.list.d/notepadx.list
+          </code></pre>
+          </body>
+          </html>
+          HTMLEOF
+          sed -i 's/^          //' "$REPO_DIR/index.html"
+
+          # Export public GPG key if available
+          if [ -n "${GPG_KEY_ID:-}" ]; then
+            gpg --armor --export "$GPG_KEY_ID" > "$REPO_DIR/gpg-key.asc"
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt-repo
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
