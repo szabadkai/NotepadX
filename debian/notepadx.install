@@ -1,0 +1,2 @@
+target/release/notepadx usr/bin
+debian/notepadx.desktop usr/share/applications

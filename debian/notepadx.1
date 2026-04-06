@@ -1,0 +1,87 @@
+.TH NOTEPADX 1 "April 2026" "notepadx 1.3.2" "User Commands"
+.SH NAME
+notepadx \- fast native text editor with GPU rendering
+.SH SYNOPSIS
+.B notepadx
+.RI [ file .\|.\|.]
+.SH DESCRIPTION
+.B NotepadX
+is a Rust-built text editor focused on making everyday editing feel
+immediate, even on large files, without shipping a browser runtime.
+.PP
+It uses wgpu for GPU-accelerated rendering, ropey for scalable text
+storage, and tree-sitter for syntax highlighting across 20 programming
+languages.
+.SH OPTIONS
+.TP
+.I file
+Open the specified file(s) in tabs on launch. If no files are given,
+NotepadX starts with the previous session restored or an empty buffer.
+.SH KEYBOARD SHORTCUTS
+All shortcuts use Ctrl on Linux (Cmd on macOS).
+.TP
+.B Ctrl+N
+New tab
+.TP
+.B Ctrl+O
+Open file
+.TP
+.B Ctrl+S
+Save
+.TP
+.B Ctrl+Shift+S
+Save as
+.TP
+.B Ctrl+W
+Close tab
+.TP
+.B Ctrl+Z
+Undo
+.TP
+.B Ctrl+Shift+Z
+Redo
+.TP
+.B Ctrl+F
+Find
+.TP
+.B Ctrl+Alt+F
+Find & Replace
+.TP
+.B Ctrl+G
+Go to line
+.TP
+.B Ctrl+Shift+P
+Command palette
+.TP
+.B Ctrl+,
+Settings
+.TP
+.B Ctrl+D
+Select next occurrence
+.TP
+.B Ctrl+/
+Toggle comment
+.TP
+.B F1
+Show keyboard shortcuts
+.SH FILES
+.TP
+.I ~/.config/notepadx/config.json
+User settings (theme, font size, tab size, etc.)
+.TP
+.I ~/.config/notepadx/session.json
+Session state (open tabs, cursor positions, scroll offsets)
+.SH ENVIRONMENT
+.B NotepadX
+requires a GPU-capable display server (X11 or Wayland) with Vulkan
+or OpenGL support.
+.SH BUGS
+Report bugs at https://github.com/szabadkai/NotepadX/issues
+.SH AUTHOR
+Levente Szabadkai <levente@szabadkai.com>
+.SH LICENSE
+MIT License
+.SH SEE ALSO
+.BR vim (1),
+.BR nano (1),
+.BR code (1)

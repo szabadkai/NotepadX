@@ -1,0 +1,44 @@
+Source: notepadx
+Section: editors
+Priority: optional
+Maintainer: Levente Szabadkai <levente@szabadkai.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cargo,
+ rustc,
+ pkg-config,
+ libgtk-3-dev,
+ libglib2.0-dev,
+ libgdk-pixbuf-2.0-dev,
+ libpango1.0-dev,
+ libcairo2-dev,
+ libatk1.0-dev,
+ libxdo-dev,
+ libwayland-dev,
+ libxkbcommon-dev,
+ libxrandr-dev,
+ libxinerama-dev,
+ libxcursor-dev,
+ libxi-dev,
+ libx11-dev,
+Standards-Version: 4.7.0
+Homepage: https://github.com/szabadkai/NotepadX
+Vcs-Git: https://github.com/szabadkai/NotepadX.git
+Vcs-Browser: https://github.com/szabadkai/NotepadX
+Rules-Requires-Root: no
+
+Package: notepadx
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ fonts-jetbrains-mono,
+Description: Fast native text editor with GPU rendering
+ NotepadX is a Rust-built text editor focused on making everyday editing
+ feel immediate, even on large files, without shipping a browser runtime.
+ .
+ Features include GPU-accelerated text rendering via wgpu, rope-based buffer
+ for scalable editing, multi-cursor support, find/replace with regex,
+ tree-sitter syntax highlighting for 20 languages, session persistence,
+ memory-mapped large-file mode with background search, and 20 built-in
+ color themes.

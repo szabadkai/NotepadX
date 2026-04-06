@@ -1,0 +1,18 @@
+Package: notepadx
+Version: 1.3.2-1
+Architecture: amd64
+Maintainer: Levente Szabadkai <levente@szabadkai.com>
+Installed-Size: 23053
+Depends: libc6 (>= 2.39), libgcc-s1 (>= 4.2), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.54.0), libgtk-3-0t64 (>= 3.5.18), libxdo3 (>= 1:3.20130104.1), fonts-jetbrains-mono
+Section: editors
+Priority: optional
+Homepage: https://github.com/szabadkai/NotepadX
+Description: Fast native text editor with GPU rendering
+ NotepadX is a Rust-built text editor focused on making everyday editing
+ feel immediate, even on large files, without shipping a browser runtime.
+ .
+ Features include GPU-accelerated text rendering via wgpu, rope-based buffer
+ for scalable editing, multi-cursor support, find/replace with regex,
+ tree-sitter syntax highlighting for 20 languages, session persistence,
+ memory-mapped large-file mode with background search, and 20 built-in
+ color themes.

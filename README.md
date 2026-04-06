@@ -59,11 +59,42 @@ Full syntax bundle (feature flag) includes:
 
 ## Install / Build
 
+### Homebrew (macOS)
+
+```bash
+brew tap szabadkai/notepadx
+
+# Install pre-built .app (recommended)
+brew install --cask notepadx
+
+# Or build from source
+brew install szabadkai/notepadx/notepadx
+```
+
+### APT (Ubuntu / Debian)
+
+```bash
+# Import the signing key
+curl -fsSL https://szabadkai.github.io/NotepadX/gpg-key.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/notepadx.gpg --yes
+
+# Add the repository
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/notepadx.gpg] https://szabadkai.github.io/NotepadX stable main" \
+  | sudo tee /etc/apt/sources.list.d/notepadx.list
+
+# Install
+sudo apt update && sudo apt install notepadx
+```
+
+### Download from GitHub Releases
+
+Pre-built binaries and `.deb` packages for Linux, macOS (.app), and Windows are available on the [Releases page](https://github.com/szabadkai/NotepadX/releases).
+
 ### From source
 
 ```bash
-git clone https://github.com/<your-org>/notepadx.git
-cd notepadx
+git clone https://github.com/szabadkai/NotepadX.git
+cd NotepadX
 cargo build --release
 ```
 

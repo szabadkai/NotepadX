@@ -274,3 +274,36 @@ jobs:
           draft: false
           tag_name: ${{ env.TAG }}
           prerelease: ${{ contains(env.TAG, '-alpha') || contains(env.TAG, '-beta') || contains(env.TAG, '-rc') }}
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.ref_name, '-alpha') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-rc') }}
+    steps:
+      - name: Resolve tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Download macOS release assets and compute SHA256
+        run: |
+          curl -fSL -o intel.zip "https://github.com/szabadkai/NotepadX/releases/download/${TAG}/NotepadX-macos-x86_64.zip"
+          curl -fSL -o arm.zip "https://github.com/szabadkai/NotepadX/releases/download/${TAG}/NotepadX-macos-arm64.zip"
+          curl -fSL -o source.tar.gz "https://github.com/szabadkai/NotepadX/archive/refs/tags/${TAG}.tar.gz"
+          echo "INTEL_SHA256=$(sha256sum intel.zip | awk '{print $1}')" >> $GITHUB_ENV
+          echo "ARM_SHA256=$(sha256sum arm.zip | awk '{print $1}')" >> $GITHUB_ENV
+          echo "SOURCE_SHA256=$(sha256sum source.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+
+      - name: Dispatch to Homebrew tap
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: szabadkai/homebrew-notepadx
+          event-type: release-published
+          client-payload: '{"version": "${{ env.VERSION }}", "intel_sha256": "${{ env.INTEL_SHA256 }}", "arm_sha256": "${{ env.ARM_SHA256 }}", "source_sha256": "${{ env.SOURCE_SHA256 }}"}'
