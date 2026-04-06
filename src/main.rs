@@ -3603,6 +3603,12 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && (args[1] == "--version" || args[1] == "-V") {
+        println!("notepadx {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     env_logger::init();
 
     let event_loop = EventLoop::new()?;
