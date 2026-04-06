@@ -2,3 +2,11 @@
 NotepadX.app/
 .DS_Store
 homebrew-tap/
+debian/cargo_home/
+debian/.debhelper/
+debian/files
+debian/notepadx/
+debian/notepadx-dbgsym/
+debian/*.debhelper.log
+debian/*.substvars
+debian/debhelper-build-stamp
