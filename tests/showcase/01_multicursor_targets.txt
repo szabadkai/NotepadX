@@ -1,0 +1,20 @@
+# Multi-cursor targets
+
+user_001 role=viewer enabled=true
+user_002 role=viewer enabled=true
+user_003 role=viewer enabled=true
+user_004 role=viewer enabled=true
+user_005 role=viewer enabled=true
+user_006 role=viewer enabled=true
+user_007 role=viewer enabled=true
+user_008 role=viewer enabled=true
+
+region=us-east-1 env=dev service=api retries=3
+region=us-east-1 env=dev service=worker retries=3
+region=us-east-1 env=dev service=web retries=3
+region=us-east-1 env=dev service=jobs retries=3
+
+change_me=VALUE_A
+change_me=VALUE_A
+change_me=VALUE_A
+change_me=VALUE_A

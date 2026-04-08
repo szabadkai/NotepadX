@@ -915,7 +915,7 @@ impl App {
         }
 
         let shift = self.modifiers.shift_key();
-        let editor_y = (y - TAB_BAR_HEIGHT as f32).max(0.0);
+        let editor_y = (y - TAB_BAR_HEIGHT).max(0.0);
         let line_height = self.config.font_size * 1.44;
         let char_width = self.config.font_size * 0.6;
 
@@ -947,10 +947,8 @@ impl App {
         if click_count == 1 && !self.modifiers.shift_key() && buffer.is_markdown() {
             if let Some((anchor, _, _)) = buffer.md_anchor_at_char(new_pos) {
                 if let Some(target_line) = buffer.find_heading_line_for_anchor(&anchor) {
-                    let _ = buffer.goto_line_zero_based(
-                        target_line,
-                        self.config.large_file_preview_bytes(),
-                    );
+                    let _ = buffer
+                        .goto_line_zero_based(target_line, self.config.large_file_preview_bytes());
                     if let Some(renderer) = &self.renderer {
                         let visible = renderer.visible_lines();
                         buffer.ensure_cursor_visible(visible, wrap_width, char_width);

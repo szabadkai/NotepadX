@@ -1,0 +1,25 @@
+# Find and replace playground
+
+Error: connection timeout after 1200ms
+ERROR: connection timeout after 1300ms
+error: connection timeout after 1100ms
+
+build-step-01 complete
+build-step-02 complete
+build-step-03 failed
+build-step-04 complete
+
+invoice_id=INV-2026-0001 amount=1299 status=paid
+invoice_id=INV-2026-0002 amount=349 status=pending
+invoice_id=INV-2026-0003 amount=880 status=failed
+invoice_id=INV-2026-0004 amount=420 status=pending
+
+paths:
+/src/editor/buffer.rs
+/src/overlay/find.rs
+/src/overlay/palette.rs
+
+regex targets:
+- hex values: 0x1A2B 0x00FF 0xBEEF
+- emails: alex@example.com dev.team@example.org
+- ipv4: 10.1.2.3 192.168.1.10

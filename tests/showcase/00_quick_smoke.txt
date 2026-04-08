@@ -1,0 +1,14 @@
+NotepadX quick smoke checklist
+
+- Edit this line and undo it.
+- Duplicate this line and remove the duplicate.
+- Toggle comment on this line if language mode supports it.
+- Add a bracket pair here: [] {} () ""
+
+Tokens to edit quickly:
+alpha beta gamma delta epsilon
+
+Expected:
+- undo/redo is responsive
+- cursor movement stays smooth
+- save writes file cleanly

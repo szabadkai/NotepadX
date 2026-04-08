@@ -1,0 +1,26 @@
+{
+  "project": "notepadx-showcase",
+  "version": "0.1.0",
+  "features": {
+    "multiCursor": true,
+    "findReplace": {
+      "caseSensitive": true,
+      "wholeWord": true,
+      "regex": true
+    },
+    "largeFileMode": {
+      "enabled": true,
+      "thresholdBytes": 1048576
+    }
+  },
+  "recentFiles": [
+    "src/main.rs",
+    "src/editor/buffer.rs",
+    "src/overlay/find.rs"
+  ],
+  "window": {
+    "width": 1440,
+    "height": 900,
+    "theme": "Notepad++ Classic"
+  }
+}

@@ -1,0 +1,12 @@
+2026-04-03T09:10:12.103Z INFO  app.start version=0.1.0 profile=demo
+2026-04-03T09:10:12.208Z INFO  window.init width=1440 height=900 scale=2.0
+2026-04-03T09:10:12.622Z INFO  session.restore tabs=4 dirty=1
+2026-04-03T09:10:13.004Z WARN  syntax.load language=xml status=fallback
+2026-04-03T09:10:13.215Z INFO  search.begin query="timeout" regex=false
+2026-04-03T09:10:13.272Z INFO  search.progress scanned=12000 matches=13
+2026-04-03T09:10:13.339Z INFO  search.progress scanned=24000 matches=29
+2026-04-03T09:10:13.452Z INFO  search.complete scanned=31555 matches=31 elapsed_ms=237
+2026-04-03T09:10:14.020Z ERROR io.save path="/tmp/demo.txt" code=13 message="permission denied"
+2026-04-03T09:10:14.117Z INFO  retry.save path="/tmp/demo.txt" attempt=2
+2026-04-03T09:10:14.226Z INFO  io.save path="/tmp/demo.txt" bytes=8921
+2026-04-03T09:10:15.002Z INFO  app.idle

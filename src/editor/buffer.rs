@@ -2987,10 +2987,8 @@ impl Buffer {
                 for lower in ch.to_lowercase() {
                     slug.push(lower);
                 }
-            } else if ch == ' ' || ch == '-' {
-                if !slug.ends_with('-') {
-                    slug.push('-');
-                }
+            } else if (ch == ' ' || ch == '-') && !slug.ends_with('-') {
+                slug.push('-');
             }
             // other characters are stripped
         }

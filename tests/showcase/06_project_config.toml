@@ -1,0 +1,20 @@
+app_name = "NotepadX"
+profile = "demo"
+autosave_on_focus_loss = false
+show_line_numbers = true
+line_wrap = true
+font_size = 18
+
+[editor]
+tab_size = 4
+use_spaces = true
+highlight_current_line = true
+
+[search]
+case_sensitive_default = false
+whole_word_default = false
+regex_default = false
+
+[workspace]
+recent_limit = 10
+restore_session = true
