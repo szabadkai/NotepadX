@@ -82,6 +82,7 @@ jobs:
           Label: NotepadX
           Suite: stable
           Codename: stable
+          Date: $(date -Ru)
           Architectures: amd64
           Components: main
           Description: NotepadX APT Repository
